@@ -64,6 +64,8 @@ static uint32_t g_nimg;
 static VkExtent2D g_extent;
 
 static int g_first_frame_done;
+static int g_desktop_pixels_visible;
+static unsigned g_drawn_present_count;
 
 static int g_base_black;
 static VkExtent2D g_caps_extent;
@@ -1697,9 +1699,12 @@ static int render_impl(int scene_w, int scene_h, const struct vkp_draw *draws, i
 
     g_base_black = (g_plain_frame && n == 0 && !hf) ? 1 : 0;
 
-    if (drawn && !g_first_frame_done) {
-        g_first_frame_done = 1;
-        droiddeck_on_first_frame();
+    if (drawn) {
+        g_drawn_present_count++;
+        if (!g_first_frame_done && (g_desktop_pixels_visible || g_drawn_present_count >= 45)) {
+            g_first_frame_done = 1;
+            droiddeck_on_first_frame();
+        }
     }
     if (how) *how = hdr_how;
     return 0;
@@ -1729,6 +1734,16 @@ ANativeWindow *vkp_window(void) { return g_window; }
 
 void vkp_reset_first_frame(void) {
     g_first_frame_done = 0;
+    g_desktop_pixels_visible = 0;
+    g_drawn_present_count = 0;
+}
+
+void vkp_mark_desktop_pixels_visible(void) {
+    g_desktop_pixels_visible = 1;
+}
+
+int vkp_desktop_content_ready(void) {
+    return g_desktop_pixels_visible;
 }
 
 void vkp_signal_first_frame(void) {

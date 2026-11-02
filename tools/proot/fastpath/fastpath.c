@@ -775,24 +775,8 @@ static int ret(long r) {
   do { long r_ = (r); if (r_ != FP_SLOW) { hits++; return ret(r_); } missed(__func__, dirfd, path); return real_call; } while (0)
 
 
-static volatile int *fp_sbx_chrooted_ptr;
-static pthread_once_t fp_sbx_once = PTHREAD_ONCE_INIT;
-static void fp_sbx_lookup(void) {
-  fp_sbx_chrooted_ptr = (volatile int *)dlsym(RTLD_DEFAULT, "__bl_sbx_chrooted");
-}
-
-static int fp_sbx_denied(int dirfd, const char *path) {
-  pthread_once(&fp_sbx_once, fp_sbx_lookup);
-  if (!fp_sbx_chrooted_ptr || !__builtin_expect(*fp_sbx_chrooted_ptr, 0)) return 0;
-  if (!path) return 0;
-  if (strcmp(path, "/") == 0 || strcmp(path, ".") == 0) return 0;
-  if (path[0] == '/' || dirfd == AT_FDCWD) return 1;
-  return 0;
-}
-
 static long fp_open(int dirfd, const char *path, int flags, mode_t mode) {
   struct res r;
-  if (fp_sbx_denied(dirfd, path)) return -ENOENT;
   if ((flags & __O_TMPFILE) == __O_TMPFILE) return FP_SLOW;
   int follow = !(flags & O_NOFOLLOW) && !((flags & O_CREAT) && (flags & O_EXCL));
   if ((flags & O_CREAT) && trailing_slash(path)) return FP_SLOW;
@@ -833,46 +817,16 @@ int creat(const char *path, mode_t mode) { return open(path, O_WRONLY | O_CREAT 
 int creat64(const char *path, mode_t mode) __attribute__((alias("creat")));
 
 
-static int fp_is_chrome_sandbox(const char *path) {
-  if (!path) return 0;
-  size_t len = strlen(path);
-  const char suffix[] = "/chrome-sandbox";
-  const size_t slen = sizeof(suffix) - 1;
-  if (len >= slen && memcmp(path + len - slen, suffix, slen) == 0) return 1;
-  return strcmp(path, "chrome-sandbox") == 0;
-}
-
-static void fp_spoof_sandbox_stat(const char *path, struct stat *st) {
-  if (!st) return;
-  if (fp_is_chrome_sandbox(path) && S_ISREG(st->st_mode)) {
-    st->st_uid = 0;
-    st->st_gid = 0;
-    st->st_mode = (st->st_mode & ~07777) | S_ISUID | 0755;
-  } else if (S_ISDIR(st->st_mode) && st->st_nlink > 3 && path &&
-             (strncmp(program_invocation_short_name, "chromium", 8) == 0 ||
-              strncmp(program_invocation_short_name, "chrome", 6) == 0) &&
-             (strcmp(path, "self/task/") == 0 || strcmp(path, "self/task") == 0 ||
-              strcmp(path, "/proc/self/task/") == 0 || strcmp(path, "/proc/self/task") == 0)) {
-    st->st_nlink = 3;
-  }
-}
-
 static long fp_stat(int dirfd, const char *path, int flags, struct stat *st) {
   struct res r;
-  if (fp_sbx_denied(dirfd, path)) return -ENOENT;
   if ((flags & AT_EMPTY_PATH) && path && !path[0] && fp_ready())
     return sc(SYS_newfstatat, dirfd, (long)"", (long)st, flags, 0);
   if (flags & ~(AT_SYMLINK_NOFOLLOW | AT_NO_AUTOMOUNT)) return FP_SLOW;
   long rs = resolve(dirfd, path, (flags & AT_SYMLINK_NOFOLLOW ? 0 : 1) | MAY_BE_UNSEEN, &r);
   if (rs < 0) return rs;
   if (rs == 1) return -ENOENT;
-  if (rs == UNSEEN) {
-    long sr = sc(SYS_newfstatat, AT_FDCWD, (long)r.host, (long)st, flags, 0);
-    if (sr == 0) fp_spoof_sandbox_stat(path, st);
-    return sr;
-  }
+  if (rs == UNSEEN) return sc(SYS_newfstatat, AT_FDCWD, (long)r.host, (long)st, flags, 0);
   *st = r.st;
-  fp_spoof_sandbox_stat(path, st);
   return 0;
 }
 
@@ -981,7 +935,6 @@ static long statx_call(int dirfd, const char *path, int flags, unsigned mask, st
 static long fp_statx(int dirfd, const char *path, int flags, unsigned mask, struct statx *out) {
   struct res r;
   long rs;
-  if (fp_sbx_denied(dirfd, path)) return -ENOENT;
   if (mask & STATX__RESERVED) return -EINVAL;
   if (!out) return -EFAULT;
   if (!path) return flags & AT_EMPTY_PATH ? FP_SLOW : -EFAULT;
@@ -992,11 +945,6 @@ static long fp_statx(int dirfd, const char *path, int flags, unsigned mask, stru
   if (rs == 1) rs = -ENOENT;
   if (rs == 0 || rs == UNSEEN)
     rs = statx_call(AT_FDCWD, r.host, flags | (rs == 0 && !r.magic ? AT_SYMLINK_NOFOLLOW : 0), mask, out);
-  if (rs == 0 && out && fp_is_chrome_sandbox(path) && S_ISREG(out->stx_mode)) {
-    out->stx_uid = 0;
-    out->stx_gid = 0;
-    out->stx_mode = (out->stx_mode & ~07777) | S_ISUID | 0755;
-  }
   return rs;
 }
 
@@ -1013,7 +961,6 @@ static int effective_is_real(void) {
 
 static long fp_access(int dirfd, const char *path, int mode, int flags) {
   struct res r;
-  if (fp_sbx_denied(dirfd, path)) return -ENOENT;
   if ((flags & AT_EACCESS) && effective_is_real()) flags &= ~AT_EACCESS;
   long rs = (flags & ~AT_SYMLINK_NOFOLLOW) == 0
             ? resolve(dirfd, path, (flags & AT_SYMLINK_NOFOLLOW ? 0 : 1) | MAY_BE_UNSEEN, &r) : FP_SLOW;
@@ -1317,7 +1264,6 @@ static long fp_statfs(const char *path, struct statfs *buf) {
   if (rs == 1) rs = -ENOENT;
   if (rs == 0 && under(r.guest, "/dev/shm", 8)) rs = FP_SLOW;
   if (rs == 0) rs = sc(SYS_statfs, (long)r.host, (long)buf, 0, 0, 0);
-  if (rs == 0 && buf && fp_is_chrome_sandbox(path)) buf->f_flags &= ~ST_NOSUID;
   return rs;
 }
 static int statfs_common(const char *path, struct statfs *buf, int (*real)(const char *, struct statfs *)) {
@@ -1356,7 +1302,6 @@ static int statvfs_common(const char *path, struct statvfs *buf, int (*real)(con
     _Static_assert(sizeof buf->f_fsid == sizeof fs.f_fsid, "fsid layout");
     memcpy(&buf->f_fsid, &fs.f_fsid, sizeof fs.f_fsid);
     buf->f_flag = fs.f_flags ^ FP_ST_VALID;
-    if (fp_is_chrome_sandbox(path)) buf->f_flag &= ~ST_NOSUID;
     buf->f_namemax = fs.f_namelen;
   }
   ANSWER(rs, AT_FDCWD, path, real(path, buf));

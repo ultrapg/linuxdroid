@@ -120,6 +120,7 @@ data class SessionConfigSignature(
     val displayScale: Float,
     val targetRefreshHz: Int,
     val cpuCoreLimit: Int,
+    val cpuSelectedCores: String,
     val gpuModeId: String,
     val fastPath: Boolean,
     val noSeccomp: Boolean,
@@ -154,11 +155,43 @@ object SessionPrefs {
         prefs(context).getInt("cpu_core_limit", 0).coerceAtLeast(0)
 
     fun setCpuCoreLimit(context: Context, limit: Int) {
-        prefs(context).edit().putInt("cpu_core_limit", limit.coerceAtLeast(0)).apply()
+        val safeLimit = limit.coerceAtLeast(0)
+        val editor = prefs(context).edit().putInt("cpu_core_limit", safeLimit)
+        if (safeLimit == 0) {
+            editor.putString("cpu_selected_cores", "")
+        }
+        editor.apply()
     }
+
+    /**
+     * Explicit comma-separated core list (e.g. "4,5,6,7" or "6,7"); empty string means all cores (or legacy limit).
+     */
+    fun selectedCpuCoresSpec(context: Context): String =
+        prefs(context).getString("cpu_selected_cores", "")?.trim().orEmpty()
+
+    fun setSelectedCpuCores(context: Context, coreIndices: Collection<Int>, totalCores: Int) {
+        val sorted = coreIndices.filter { it >= 0 }.distinct().sorted()
+        val isAll = sorted.isEmpty() || (totalCores > 0 && sorted.size >= totalCores)
+        prefs(context).edit()
+            .putString("cpu_selected_cores", if (isAll) "" else sorted.joinToString(","))
+            .putInt("cpu_core_limit", if (isAll) 0 else sorted.size)
+            .apply()
+    }
+
+    fun resolveSelectedCpuCores(context: Context, topology: com.linuxdroid.app.runtime.CpuTopology): List<Int> =
+        topology.resolveSelectedCores(selectedCpuCoresSpec(context), cpuCoreLimit(context))
+
+    fun effectiveSelectedCpuCoreSet(context: Context, topology: com.linuxdroid.app.runtime.CpuTopology): Set<Int> =
+        topology.effectiveSelectedSet(selectedCpuCoresSpec(context), cpuCoreLimit(context))
 
     fun effectiveCpuCores(context: Context, totalCores: Int): Int {
         val safeTotal = totalCores.coerceAtLeast(1)
+        val spec = selectedCpuCoresSpec(context)
+        if (spec.isNotEmpty()) {
+            val count = com.linuxdroid.app.runtime.CpuInfo.parseCpuListSpec(spec)
+                .count { it in 0 until safeTotal }
+            if (count in 1 until safeTotal) return count
+        }
         val limit = cpuCoreLimit(context)
         return if (limit in 1 until safeTotal) limit else safeTotal
     }
@@ -361,6 +394,7 @@ object SessionPrefs {
         displayScale = displayScale(context),
         targetRefreshHz = targetRefreshHz(context),
         cpuCoreLimit = cpuCoreLimit(context),
+        cpuSelectedCores = selectedCpuCoresSpec(context),
         gpuModeId = gpuMode(context).id,
         fastPath = prootFastPath(context),
         noSeccomp = prootNoSeccomp(context),

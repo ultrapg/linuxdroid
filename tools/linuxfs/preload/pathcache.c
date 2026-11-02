@@ -6,7 +6,6 @@
 
 __attribute__((visibility("hidden"))) int bl_binfmt_runnable(const char *path, int mode);
 __attribute__((visibility("hidden"))) int bl_writable_access(int dirfd, const char *path, int mode, int flags);
-__attribute__((visibility("hidden"))) int bl_sbx_denied_path(int dirfd, const char *path);
 
 static int (*next_faccessat(void))(int, const char *, int, int) {
   static int (*real)(int, const char *, int, int);
@@ -21,10 +20,6 @@ static int writable_as_owner(int (*real)(int, const char *, int, int), int dirfd
 }
 
 static int check_cwd(const char *path, int mode, int flags) {
-  if (bl_sbx_denied_path(AT_FDCWD, path)) {
-    errno = ENOENT;
-    return -1;
-  }
   int (*real)(int, const char *, int, int) = next_faccessat();
   if (real == NULL) {
     errno = ENOSYS;
@@ -54,10 +49,6 @@ int eaccess(const char *path, int mode) {
 
 int faccessat(int dirfd, const char *path, int mode, int flags) {
   if (dirfd == AT_FDCWD) return check_cwd(path, mode, flags);
-  if (bl_sbx_denied_path(dirfd, path)) {
-    errno = ENOENT;
-    return -1;
-  }
   int (*real)(int, const char *, int, int) = next_faccessat();
   if (real == NULL) {
     errno = ENOSYS;

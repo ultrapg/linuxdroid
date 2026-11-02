@@ -170,11 +170,11 @@ ENTRY
       for _ in $(seq 1 300); do
         if dbus-send --session --dest=org.kde.plasmashell --type=method_call --print-reply /PlasmaShell org.freedesktop.DBus.Introspectable.Introspect 2>/dev/null | grep -q "org.kde.PlasmaShell"; then
           dbus-send --session --dest=org.kde.KWin --type=method_call /VirtualKeyboard org.freedesktop.DBus.Properties.Set string:"org.kde.kwin.VirtualKeyboard" string:"enabled" variant:boolean:true >/dev/null 2>&1 || true
-          sleep 1.2
+          sleep 0.2
           write_status "READY|KDE Plasma desktop ready" "== [BOOT READY] KDE Plasma desktop ready"
           break
         fi
-        sleep 0.25
+        sleep 0.2
       done
     ) &
     watcher_pid=$!
@@ -324,13 +324,13 @@ run_xwayland_desktop() {
   (
     for i in $(seq 1 150); do
       if DISPLAY="$disp" xprop -root _NET_SUPPORTING_WM_CHECK 2>/dev/null | grep -q "window id"; then
-        if [ "$desktop_name" != "XFCE4" ] || pgrep -u "$(id -u)" -x xfdesktop >/dev/null 2>&1 || [ "$i" -ge 60 ]; then
-          sleep 0.4
+        if [ "$desktop_name" != "XFCE4" ] || pgrep -f xfce4-panel >/dev/null 2>&1 || pgrep -f xfdesktop >/dev/null 2>&1 || [ "$i" -ge 20 ]; then
+          sleep 0.2
           boot_ready "${desktop_name} desktop ready"
           exit 0
         fi
       fi
-      sleep 0.2
+      sleep 0.15
     done
     boot_ready "${desktop_name} desktop ready"
   ) &

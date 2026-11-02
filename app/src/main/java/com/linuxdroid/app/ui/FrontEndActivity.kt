@@ -51,13 +51,13 @@ import androidx.compose.material.icons.outlined.PlayArrow
 import androidx.compose.material.icons.outlined.PowerSettingsNew
 import androidx.compose.material.icons.outlined.Refresh
 import androidx.compose.material.icons.outlined.Settings
-import androidx.compose.material.icons.outlined.Share
 import androidx.compose.material.icons.outlined.Terminal
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
+import androidx.compose.material3.Checkbox
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
@@ -97,11 +97,10 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import androidx.core.content.FileProvider
-import com.linuxdroid.app.core.FileUtils
 import com.linuxdroid.app.gpu.GpuConfigGenerator
 import com.linuxdroid.app.gpu.GpuDriverMode
 import com.linuxdroid.app.gpu.GpuInfo
+import com.linuxdroid.app.runtime.CpuCoreTier
 import com.linuxdroid.app.runtime.CpuInfo
 import com.linuxdroid.app.runtime.DesktopCatalog
 import com.linuxdroid.app.runtime.DesktopEdition
@@ -144,7 +143,6 @@ class FrontEndActivity : ComponentActivity() {
                                 .putExtra(TerminalActivity.EXTRA_AS_ROOT, root)
                         )
                     },
-                    onShareLogs = { shareSessionLogs() },
                 )
             }
         }
@@ -170,45 +168,6 @@ class FrontEndActivity : ComponentActivity() {
         }
     }
 
-    private fun shareSessionLogs() {
-        val logDir = LinuxRuntime.logDir(this)
-        val combinedFile = File(logDir, "linuxdroid-diagnostics.log")
-        val cpu = CpuInfo.detect()
-        val report = buildString {
-            appendLine("=== LinuxDroid Diagnostics Report ===")
-            appendLine("Device: ${Build.MANUFACTURER} ${Build.MODEL} (SDK ${Build.VERSION.SDK_INT})")
-            appendLine("SoC / Hardware: ${Build.SOC_MODEL} / ${Build.HARDWARE}")
-            appendLine("CPU: ${cpu.summary} (limit=${SessionPrefs.cpuCoreLimit(this@FrontEndActivity)})")
-            appendLine("GPU: ${GpuInfo.detect().shortSummary()}")
-            appendLine("External Display Mode: ${SessionPrefs.externalDisplayMode(this@FrontEndActivity).id}")
-            appendLine("Desktop: ${LinuxRuntime.detectInstalledDesktopLabel(this@FrontEndActivity)}")
-            appendLine()
-            val sources = listOf(
-                "proot-host.log",
-                "session.log",
-                "wayland.log",
-                "virgl.log",
-                "pulseaudio.log",
-            )
-            for (name in sources) {
-                val f = File(logDir, name)
-                if (f.isFile && f.length() > 0L) {
-                    appendLine("--- $name (${f.length()} bytes) ---")
-                    val text = runCatching { f.readText() }.getOrDefault("")
-                    appendLine(if (text.length <= 24_000) text else text.takeLast(24_000))
-                }
-            }
-        }
-        FileUtils.writeString(combinedFile, report)
-        val uri = FileProvider.getUriForFile(this, "$packageName.fileprovider", combinedFile)
-        val share = Intent(Intent.ACTION_SEND).apply {
-            type = "text/plain"
-            putExtra(Intent.EXTRA_STREAM, uri)
-            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
-        }
-        startActivity(Intent.createChooser(share, "Share LinuxDroid Diagnostic Logs"))
-    }
-
     companion object {
         const val EXTRA_SKIP_AUTOBOOT = "skip_autoboot"
     }
@@ -226,7 +185,6 @@ private enum class DashboardTab(val label: String, val icon: ImageVector) {
 private fun DashboardScreen(
     onLaunchDesktop: () -> Unit,
     onOpenTerminal: (Boolean) -> Unit,
-    onShareLogs: () -> Unit,
 ) {
     val context = androidx.compose.ui.platform.LocalContext.current
     val sessionSnap by SessionState.state.collectAsState()
@@ -245,6 +203,7 @@ private fun DashboardScreen(
     var autoBoot by remember { mutableStateOf(SessionPrefs.autoBootOnLaunch(context)) }
     var gpuMode by remember { mutableStateOf(SessionPrefs.gpuMode(context)) }
     var cpuCoreLimit by remember { mutableIntStateOf(SessionPrefs.cpuCoreLimit(context)) }
+    var selectedCpuSpec by remember { mutableStateOf(SessionPrefs.selectedCpuCoresSpec(context)) }
     var externalMode by remember { mutableStateOf(SessionPrefs.externalDisplayMode(context)) }
     var connectedExternalSummary by remember {
         mutableStateOf(DeXEnvironmentDetector.findExternalDisplay(context)?.let { DeXEnvironmentDetector.describeDisplay(it) })
@@ -263,6 +222,22 @@ private fun DashboardScreen(
     var showAddMountDialog by remember { mutableStateOf(false) }
     var logRefreshTick by remember { mutableIntStateOf(0) }
     var diagnosticLogPreview by remember { mutableStateOf("") }
+    var sawStartingPhase by rememberSaveable { mutableStateOf(false) }
+
+    LaunchedEffect(sessionSnap.phase, sessionSnap.firstFrameReady) {
+        when {
+            sessionSnap.phase == SessionPhase.STARTING -> {
+                sawStartingPhase = true
+            }
+            sawStartingPhase && sessionSnap.phase == SessionPhase.RUNNING && sessionSnap.firstFrameReady -> {
+                sawStartingPhase = false
+                onLaunchDesktop()
+            }
+            sessionSnap.phase == SessionPhase.STOPPED || sessionSnap.phase == SessionPhase.FAILED -> {
+                sawStartingPhase = false
+            }
+        }
+    }
 
     val currentConfigSig = remember(
         installedEditionId,
@@ -270,6 +245,7 @@ private fun DashboardScreen(
         scalePref,
         refreshHzPref,
         cpuCoreLimit,
+        selectedCpuSpec,
         gpuMode,
         fastPathEnabled,
         noSeccompEnabled,
@@ -287,12 +263,16 @@ private fun DashboardScreen(
         GpuConfigGenerator.resolve(gpuMode, gpuInfo, LinuxRuntime.VIRGL_SOCKET_GUEST_PATH)
     }
 
-    val effectiveCpuCores = remember(cpuCoreLimit, cpuTopology.totalCores) {
-        if (cpuCoreLimit in 1 until cpuTopology.totalCores) cpuCoreLimit else cpuTopology.totalCores
+    val activeCoreSet = remember(selectedCpuSpec, cpuCoreLimit, cpuTopology) {
+        cpuTopology.effectiveSelectedSet(selectedCpuSpec, cpuCoreLimit)
     }
 
-    val selectedCoreIndices = remember(cpuCoreLimit, cpuTopology) {
-        cpuTopology.selectPreferredCores(cpuCoreLimit)
+    val selectedCoreIndices = remember(activeCoreSet) {
+        activeCoreSet.toList().sorted()
+    }
+
+    val effectiveCpuCores = remember(selectedCoreIndices, cpuTopology.totalCores) {
+        selectedCoreIndices.size.coerceIn(1, cpuTopology.totalCores)
     }
 
     // Live External Display detection (updates immediately when plugging/unplugging USB-C HDMI or Wireless Cast)
@@ -431,13 +411,6 @@ private fun DashboardScreen(
                                 )
                             }
                         }
-                        IconButton(onClick = onShareLogs) {
-                            Icon(
-                                imageVector = Icons.Outlined.Share,
-                                contentDescription = "Share Session Logs",
-                                tint = MaterialTheme.colorScheme.onSurfaceVariant,
-                            )
-                        }
                     }
                 }
 
@@ -553,13 +526,21 @@ private fun DashboardScreen(
 
                         DashboardTab.HARDWARE -> HardwareTabContent(
                             cpuTopology = cpuTopology,
-                            cpuCoreLimit = cpuCoreLimit,
                             effectiveCpuCores = effectiveCpuCores,
                             selectedCoreIndices = selectedCoreIndices,
-                            onSelectCpuCoreLimit = { newLimit ->
-                                val normalized = if (newLimit <= 0 || newLimit >= cpuTopology.totalCores) 0 else newLimit
-                                cpuCoreLimit = normalized
-                                SessionPrefs.setCpuCoreLimit(context, normalized)
+                            onSelectCpuCores = { cores ->
+                                val normalized = cores.filter { it in 0 until cpuTopology.totalCores }.distinct().sorted()
+                                val allSelected = normalized.isEmpty() || normalized.size >= cpuTopology.totalCores
+                                if (allSelected) {
+                                    selectedCpuSpec = ""
+                                    cpuCoreLimit = 0
+                                    SessionPrefs.setSelectedCpuCores(context, emptyList(), cpuTopology.totalCores)
+                                    SessionPrefs.setCpuCoreLimit(context, 0)
+                                } else {
+                                    selectedCpuSpec = normalized.joinToString(",")
+                                    cpuCoreLimit = normalized.size
+                                    SessionPrefs.setSelectedCpuCores(context, normalized, cpuTopology.totalCores)
+                                }
                             },
                             gpuInfo = gpuInfo,
                             gpuMode = gpuMode,
@@ -648,7 +629,6 @@ private fun DashboardScreen(
                             },
                             diagnosticLogPreview = diagnosticLogPreview,
                             onRefreshLogs = { logRefreshTick++ },
-                            onShareLogs = onShareLogs,
                         )
                     }
                 }
@@ -931,14 +911,14 @@ private fun WorkstationTabContent(
         }
     }
 
-    // 2. Linux Desktop Editions Manager (Fixed-height scrollable containers + Single-Edition Delete Confirmation)
+        // 2. Linux Desktop Editions Manager (Fixed-height scrollable containers + Single-Edition Delete Confirmation)
     SectionCard {
         SectionHeader("Linux Desktop Editions")
         Text(
             text = if (installedEditionId != null) {
                 "One edition is active. To keep the system stable, delete the installed edition first before installing another."
             } else {
-                "Install one Ubuntu 24.04 LTS ARM64 desktop edition (includes sandboxed Chromium, MPV, FEX-Emu x86_64, and SoC GPU drivers)."
+                "Install one Ubuntu 24.04 LTS ARM64 desktop edition (includes Firefox, MPV, FEX-Emu x86_64, and SoC GPU drivers)."
             },
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
@@ -1147,10 +1127,9 @@ private fun WorkstationTabContent(
 @Composable
 private fun HardwareTabContent(
     cpuTopology: com.linuxdroid.app.runtime.CpuTopology,
-    cpuCoreLimit: Int,
     effectiveCpuCores: Int,
     selectedCoreIndices: List<Int>,
-    onSelectCpuCoreLimit: (Int) -> Unit,
+    onSelectCpuCores: (List<Int>) -> Unit,
     gpuInfo: GpuInfo,
     gpuMode: GpuDriverMode,
     resolvedGpuSummary: String,
@@ -1161,8 +1140,13 @@ private fun HardwareTabContent(
     onToggleNoSeccomp: (Boolean) -> Unit,
 ) {
     val totalCores = cpuTopology.totalCores
+    val selectedSet = remember(selectedCoreIndices) { selectedCoreIndices.toSet() }
+    val allCoreIndices = remember(cpuTopology) { cpuTopology.allCoreIndices() }
+    val perfIndices = remember(cpuTopology) { cpuTopology.performanceCoreIndices() }
+    val primeIndices = remember(cpuTopology) { cpuTopology.primeCoreIndices() }
+    val effIndices = remember(cpuTopology) { cpuTopology.efficiencyCoreIndices() }
 
-    // 1. CPU Core Allocation Card
+    // 1. CPU Core Allocation & Per-Core / Cluster Selection Card
     SectionCard {
         Row(
             verticalAlignment = Alignment.CenterVertically,
@@ -1171,7 +1155,7 @@ private fun HardwareTabContent(
             Icon(Icons.Outlined.Memory, contentDescription = null, tint = MaterialTheme.colorScheme.primary)
             Column(modifier = Modifier.weight(1f)) {
                 Text(
-                    text = "CPU Core Allocation",
+                    text = "CPU Core Selection & Affinity",
                     style = MaterialTheme.typography.titleMedium,
                     fontWeight = FontWeight.SemiBold,
                 )
@@ -1193,12 +1177,12 @@ private fun HardwareTabContent(
             modifier = Modifier.fillMaxWidth(),
         ) {
             Column(modifier = Modifier.padding(12.dp)) {
-                val usingAll = cpuCoreLimit <= 0 || cpuCoreLimit >= totalCores
+                val usingAll = selectedSet.size >= totalCores
                 Text(
                     text = if (usingAll) {
                         "Active: All $totalCores CPU Cores (100% Full CPU Performance)"
                     } else {
-                        "Active: $effectiveCpuCores of $totalCores CPU Cores"
+                        "Active: $effectiveCpuCores of $totalCores CPU Cores (CPU ${selectedCoreIndices.joinToString(", ")})"
                     },
                     style = MaterialTheme.typography.bodyMedium,
                     fontWeight = FontWeight.SemiBold,
@@ -1208,9 +1192,9 @@ private fun HardwareTabContent(
                 )
                 Text(
                     text = if (usingAll) {
-                        "Linux desktop & apps can schedule across every hardware CPU core."
+                        "Linux desktop & apps schedule across all performance and efficiency cores."
                     } else {
-                        "Pinned to highest-clocked cores (${selectedCoreIndices.joinToString(", ")}) to save power/thermals."
+                        "Pinned via CPU affinity to selected cores (${selectedCoreIndices.joinToString(", ") { "CPU $it" }})."
                     },
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
@@ -1219,28 +1203,172 @@ private fun HardwareTabContent(
                 )
 
                 if (totalCores > 1) {
-                    Spacer(Modifier.height(8.dp))
-                    Slider(
-                        value = effectiveCpuCores.toFloat(),
-                        onValueChange = { raw -> onSelectCpuCoreLimit(raw.roundToInt().coerceIn(1, totalCores)) },
-                        valueRange = 1f..totalCores.toFloat(),
-                        steps = (totalCores - 2).coerceAtLeast(0),
-                        modifier = Modifier.fillMaxWidth(),
+                    Spacer(Modifier.height(10.dp))
+                    Text(
+                        text = "Cluster Presets",
+                        style = MaterialTheme.typography.labelLarge,
+                        color = MaterialTheme.colorScheme.onSurface,
                     )
+                    Spacer(Modifier.height(4.dp))
                     FlowRow(
                         horizontalArrangement = Arrangement.spacedBy(8.dp),
                         verticalArrangement = Arrangement.spacedBy(4.dp),
                     ) {
-                        for (preset in cpuTopology.presetCoreCounts()) {
-                            val isAll = preset == totalCores
-                            val selected = if (isAll) (cpuCoreLimit == 0 || cpuCoreLimit >= totalCores) else (cpuCoreLimit == preset)
+                        FilterChip(
+                            selected = usingAll,
+                            onClick = { onSelectCpuCores(allCoreIndices) },
+                            label = { Text("All Cores ($totalCores)") },
+                        )
+                        if (perfIndices.size in 1 until totalCores) {
+                            val isPerfSelected = selectedSet == perfIndices.toSet()
                             FilterChip(
-                                selected = selected,
-                                onClick = { onSelectCpuCoreLimit(if (isAll) 0 else preset) },
-                                label = { Text(if (isAll) "All ($totalCores)" else "$preset ${if (preset == 1) "Core" else "Cores"}") },
+                                selected = isPerfSelected,
+                                onClick = { onSelectCpuCores(perfIndices) },
+                                label = { Text("Performance Cores (${perfIndices.size})") },
+                            )
+                        }
+                        if (primeIndices.isNotEmpty() && primeIndices.size < perfIndices.size) {
+                            val isPrimeSelected = selectedSet == primeIndices.toSet()
+                            FilterChip(
+                                selected = isPrimeSelected,
+                                onClick = { onSelectCpuCores(primeIndices) },
+                                label = { Text("Prime Cores (${primeIndices.size})") },
+                            )
+                        }
+                        if (effIndices.size in 1 until totalCores) {
+                            val isEffSelected = selectedSet == effIndices.toSet()
+                            FilterChip(
+                                selected = isEffSelected,
+                                onClick = { onSelectCpuCores(effIndices) },
+                                label = { Text("Other / Efficiency Cores (${effIndices.size})") },
                             )
                         }
                     }
+
+                    Spacer(Modifier.height(10.dp))
+                    Text(
+                        text = "Select Individual CPU Cores",
+                        style = MaterialTheme.typography.labelLarge,
+                        color = MaterialTheme.colorScheme.onSurface,
+                    )
+                    Spacer(Modifier.height(6.dp))
+
+                    // Fixed-height scrollable individual core selector (never resizes card)
+                    val coresScroll = rememberScrollState()
+                    Surface(
+                        shape = RoundedCornerShape(8.dp),
+                        color = Color(0xFF0E151D),
+                        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(188.dp),
+                    ) {
+                        Column(
+                            modifier = Modifier
+                                .fillMaxSize()
+                                .verticalScroll(coresScroll)
+                                .padding(8.dp),
+                            verticalArrangement = Arrangement.spacedBy(6.dp),
+                        ) {
+                            for (core in cpuTopology.cores) {
+                                val isChecked = core.index in selectedSet
+                                val tierColor = when (core.tier) {
+                                    CpuCoreTier.PRIME -> MaterialTheme.colorScheme.secondary
+                                    CpuCoreTier.PERFORMANCE -> MaterialTheme.colorScheme.primary
+                                    CpuCoreTier.EFFICIENCY -> MaterialTheme.colorScheme.onSurfaceVariant
+                                }
+                                Surface(
+                                    shape = RoundedCornerShape(8.dp),
+                                    color = if (isChecked) {
+                                        MaterialTheme.colorScheme.surfaceVariant
+                                    } else {
+                                        MaterialTheme.colorScheme.surface
+                                    },
+                                    border = BorderStroke(
+                                        1.dp,
+                                        if (isChecked) MaterialTheme.colorScheme.primary.copy(alpha = 0.7f) else MaterialTheme.colorScheme.outline,
+                                    ),
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .clickable {
+                                            val next = if (isChecked) {
+                                                if (selectedSet.size > 1) (selectedSet - core.index).toList().sorted() else selectedCoreIndices
+                                            } else {
+                                                (selectedSet + core.index).toList().sorted()
+                                            }
+                                            onSelectCpuCores(next)
+                                        },
+                                ) {
+                                    Row(
+                                        modifier = Modifier
+                                            .fillMaxWidth()
+                                            .padding(horizontal = 10.dp, vertical = 6.dp),
+                                        verticalAlignment = Alignment.CenterVertically,
+                                        horizontalArrangement = Arrangement.SpaceBetween,
+                                    ) {
+                                        Row(
+                                            verticalAlignment = Alignment.CenterVertically,
+                                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                            modifier = Modifier.weight(1f),
+                                        ) {
+                                            Checkbox(
+                                                checked = isChecked,
+                                                onCheckedChange = null,
+                                            )
+                                            Column {
+                                                Text(
+                                                    text = "CPU ${core.index} • ${core.formattedGhz()}",
+                                                    style = MaterialTheme.typography.bodyMedium,
+                                                    fontWeight = FontWeight.Medium,
+                                                    maxLines = 1,
+                                                    overflow = TextOverflow.Ellipsis,
+                                                )
+                                                Text(
+                                                    text = when (core.tier) {
+                                                        CpuCoreTier.PRIME -> "Prime High-Clock Core"
+                                                        CpuCoreTier.PERFORMANCE -> "Performance Core"
+                                                        CpuCoreTier.EFFICIENCY -> "Other / Efficiency Core"
+                                                    },
+                                                    style = MaterialTheme.typography.bodySmall,
+                                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                                    maxLines = 1,
+                                                    overflow = TextOverflow.Ellipsis,
+                                                )
+                                            }
+                                        }
+                                        Surface(
+                                            shape = RoundedCornerShape(10.dp),
+                                            color = tierColor.copy(alpha = 0.16f),
+                                        ) {
+                                            Text(
+                                                text = core.tier.shortBadge,
+                                                style = MaterialTheme.typography.labelSmall,
+                                                color = tierColor,
+                                                modifier = Modifier.padding(horizontal = 8.dp, vertical = 3.dp),
+                                            )
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    Spacer(Modifier.height(8.dp))
+                    Text(
+                        text = "Quick Core Count Slider",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                    Slider(
+                        value = effectiveCpuCores.toFloat(),
+                        onValueChange = { raw ->
+                            val count = raw.roundToInt().coerceIn(1, totalCores)
+                            onSelectCpuCores(cpuTopology.selectPreferredCores(count))
+                        },
+                        valueRange = 1f..totalCores.toFloat(),
+                        steps = (totalCores - 2).coerceAtLeast(0),
+                        modifier = Modifier.fillMaxWidth(),
+                    )
                 }
             }
         }
@@ -1505,7 +1633,6 @@ private fun SystemTabContent(
     onToggleMic: (Boolean) -> Unit,
     diagnosticLogPreview: String,
     onRefreshLogs: () -> Unit,
-    onShareLogs: () -> Unit,
 ) {
     // 1. Startup & Workstation Account
     SectionCard {
@@ -1637,25 +1764,14 @@ private fun SystemTabContent(
                 modifier = Modifier.weight(1f),
             )
             Spacer(Modifier.width(8.dp))
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                OutlinedButton(
-                    onClick = onRefreshLogs,
-                    contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp),
-                    modifier = Modifier.height(34.dp),
-                ) {
-                    Icon(Icons.Outlined.Refresh, contentDescription = null, modifier = Modifier.size(15.dp))
-                    Spacer(Modifier.width(4.dp))
-                    Text("Refresh", softWrap = false, maxLines = 1)
-                }
-                OutlinedButton(
-                    onClick = onShareLogs,
-                    contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp),
-                    modifier = Modifier.height(34.dp),
-                ) {
-                    Icon(Icons.Outlined.Share, contentDescription = null, modifier = Modifier.size(15.dp))
-                    Spacer(Modifier.width(4.dp))
-                    Text("Share Logs", softWrap = false, maxLines = 1)
-                }
+            OutlinedButton(
+                onClick = onRefreshLogs,
+                contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp),
+                modifier = Modifier.height(34.dp),
+            ) {
+                Icon(Icons.Outlined.Refresh, contentDescription = null, modifier = Modifier.size(15.dp))
+                Spacer(Modifier.width(4.dp))
+                Text("Refresh", softWrap = false, maxLines = 1)
             }
         }
 

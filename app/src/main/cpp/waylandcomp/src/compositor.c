@@ -732,6 +732,24 @@ extern void droiddeck_on_game_surface(const char *window, const char *gpu);
 extern void droiddeck_on_game_frame(void);
 extern void droiddeck_on_game_program(int pid, const char *program);
 
+static int shm_has_visible_desktop_pixels(const void *data, int32_t w, int32_t h, int32_t stride) {
+    if (!data || w < 128 || h < 128 || stride < w * 4) return 0;
+    const uint8_t *base = (const uint8_t *)data;
+    int non_black = 0;
+    for (int gy = 1; gy <= 8; gy++) {
+        int y = (int)(((int64_t)h * gy) / 9);
+        const uint32_t *row = (const uint32_t *)(base + (size_t)y * (size_t)stride);
+        for (int gx = 1; gx <= 8; gx++) {
+            int x = (int)(((int64_t)w * gx) / 9);
+            uint32_t px = row[x];
+            if ((px & 0x00F8F8F8u) != 0u) {
+                if (++non_black >= 6) return 1;
+            }
+        }
+    }
+    return 0;
+}
+
 static void take_shm(struct surface *s, struct wl_shm_buffer *shm, struct wl_resource *buffer) {
     int32_t w = wl_shm_buffer_get_width(shm), h = wl_shm_buffer_get_height(shm);
     int32_t stride = wl_shm_buffer_get_stride(shm);
@@ -743,7 +761,11 @@ static void take_shm(struct surface *s, struct wl_shm_buffer *shm, struct wl_res
     if (!s->shm_img) s->shm_img = vkp_image_create_shm(w, h);
     if (s->shm_img) {
         wl_shm_buffer_begin_access(shm);
-        vkp_image_upload_shm(s->shm_img, wl_shm_buffer_get_data(shm), stride);
+        const void *pixels = wl_shm_buffer_get_data(shm);
+        if (!vkp_desktop_content_ready() && shm_has_visible_desktop_pixels(pixels, w, h, stride)) {
+            vkp_mark_desktop_pixels_visible();
+        }
+        vkp_image_upload_shm(s->shm_img, pixels, stride);
         wl_shm_buffer_end_access(shm);
     }
     wl_buffer_send_release(buffer);
@@ -833,6 +855,9 @@ static void take_dmabuf(struct surface *s, struct dmabuf_buffer *b, struct wl_re
     s->buf_alpha = (b->format & 0xff) == 'A';
     s->has_content = b->img != NULL;
     if (!repeat) g_stat_dmabuf++;
+    if (s->has_content && !vkp_desktop_content_ready() && b->width >= 128 && b->height >= 128 && g_stat_dmabuf >= 3) {
+        vkp_mark_desktop_pixels_visible();
+    }
     const int announced_now = !s->announced_vulkan;
     if (!s->announced_vulkan) {
         char name[160];

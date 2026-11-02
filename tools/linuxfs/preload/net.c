@@ -135,6 +135,17 @@ int bind(int fd, const struct sockaddr *addr, socklen_t len) {
     }
   }
   int ret = real(fd, addr, len);
+  if (ret < 0 && errno == EACCES && addr != NULL && len >= sizeof(struct sockaddr_nl) &&
+      addr->sa_family == AF_NETLINK) {
+    struct sockaddr_nl nl_zero;
+    memcpy(&nl_zero, addr, sizeof(nl_zero));
+    nl_zero.nl_groups = 0;
+    ret = real(fd, (const struct sockaddr *)&nl_zero, sizeof(nl_zero));
+    if (ret < 0 && errno == EACCES) {
+      errno = 0;
+      return 0;
+    }
+  }
   if (ret == 0) record_port(fd, 0);
   return ret;
 }
@@ -264,6 +275,7 @@ __attribute__((visibility("hidden"))) int bl_binfmt_retry(const char *path, char
 __attribute__((visibility("hidden"))) void bl_binfmt_before_search(const char *file, char *const argv[], char *const envp[]);
 __attribute__((visibility("hidden"))) int bl_binfmt_after_search(const char *file, char *const argv[], char *const envp[], int error);
 __attribute__((visibility("hidden"))) char *const *bl_webhelper_argv(const char *path, char *const argv[]);
+__attribute__((visibility("hidden"))) char *const *bl_webhelper_envp(const char *path, char *const argv[], char *const envp[]);
 __attribute__((visibility("hidden"))) int bl_binfmt_spawn(pid_t *pid, const char *path, const posix_spawn_file_actions_t *fa,
                                                           const posix_spawnattr_t *attr, char *const argv[], char *const envp[],
                                                           spawn_fn real);
@@ -310,8 +322,9 @@ static int maybe_answer_lsof(const char *path, char *const argv[]) {
   _exit(0);
 }
 
-int execve(const char *path, char *const argv_in[], char *const envp[]) {
+int execve(const char *path, char *const argv_in[], char *const envp_in[]) {
   char *const *argv = bl_webhelper_argv(path, argv_in);
+  char *const *envp = bl_webhelper_envp(path, argv, envp_in);
   static int (*real)(const char *, char *const[], char *const[]);
   if (!real) real = (int (*)(const char *, char *const[], char *const[]))dlsym(RTLD_NEXT, "execve");
   maybe_answer_lsof(path, argv);

@@ -22,9 +22,8 @@ object SessionTerminal {
         File(root, home.removePrefix("/")).mkdirs()
 
         val cpuTopology = CpuInfo.detect()
-        val cpuLimit = SessionPrefs.cpuCoreLimit(context)
-        val effectiveCores = SessionPrefs.effectiveCpuCores(context, cpuTopology.totalCores)
-        val affinityCores = if (!asRoot) cpuTopology.selectPreferredCores(cpuLimit) else emptyList()
+        val affinityCores = if (!asRoot) SessionPrefs.resolveSelectedCpuCores(context, cpuTopology) else emptyList()
+        val effectiveCores = if (affinityCores.isNotEmpty()) affinityCores.size else cpuTopology.totalCores
 
         val binds = LinuxRuntime.lastBinds(context).filter { !it.startsWith("/proc/self/fd/") }
         val useNoSeccomp = SessionPrefs.prootNoSeccomp(context)

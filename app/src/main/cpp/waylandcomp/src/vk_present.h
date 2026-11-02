@@ -94,6 +94,8 @@ int vkp_surface_rotation_degrees(void);
 
 ANativeWindow *vkp_window(void);
 void vkp_signal_first_frame(void);
+void vkp_mark_desktop_pixels_visible(void);
+int vkp_desktop_content_ready(void);
 
 int vkp_pass_begin(int scene_w, int scene_h, const struct vkp_draw *draws, int n, int *rw, int *rh);
 int vkp_pass_copy_to(struct vkp_image *dst, int wait_fd);

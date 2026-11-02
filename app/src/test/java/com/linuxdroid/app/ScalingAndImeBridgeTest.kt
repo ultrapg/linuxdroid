@@ -85,10 +85,10 @@ class ScalingAndImeBridgeTest {
     }
 
     @Test
-    fun fallbackDesktopCatalogUsesSandboxedChromiumInsteadOfFirefox() {
+    fun fallbackDesktopCatalogUsesFirefoxBrowser() {
         for (edition in DesktopCatalog.FALLBACK_EDITIONS) {
-            assertTrue(edition.description.contains("Chromium"))
-            assertFalse(edition.description.contains("Firefox", ignoreCase = true))
+            assertTrue(edition.description.contains("Firefox"))
+            assertFalse(edition.description.contains("Chromium", ignoreCase = true))
         }
     }
 }

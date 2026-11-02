@@ -10,7 +10,6 @@
 
 int bl_status_without_tracer(const char *path, int flags, const void *caller) __attribute__((visibility("hidden")));
 int bl_writable_retry(int dirfd, const char *path, int flags) __attribute__((visibility("hidden")));
-int bl_sbx_denied_path(int dirfd, const char *path) __attribute__((visibility("hidden")));
 
 static int (*real_open)(const char *, int, ...);
 static int (*real_openat)(int, const char *, int, ...);
@@ -34,10 +33,6 @@ int open(const char *path, int flags, ...) {
   va_start(ap, flags);
   mode = va_arg(ap, mode_t);
   va_end(ap);
-  if (bl_sbx_denied_path(AT_FDCWD, path)) {
-    errno = ENOENT;
-    return -1;
-  }
   if (is_trace_marker(path)) {
     errno = EACCES;
     return -1;
@@ -62,10 +57,6 @@ int openat(int dirfd, const char *path, int flags, ...) {
   va_start(ap, flags);
   mode = va_arg(ap, mode_t);
   va_end(ap);
-  if (bl_sbx_denied_path(dirfd, path)) {
-    errno = ENOENT;
-    return -1;
-  }
   if (is_trace_marker(path)) {
     errno = EACCES;
     return -1;
@@ -100,7 +91,3 @@ int close(int fd) {
 
 int open64(const char *path, int flags, ...) __attribute__((alias("open")));
 int openat64(int dirfd, const char *path, int flags, ...) __attribute__((alias("openat")));
-int __open_2(const char *path, int flags) { return open(path, flags, 0); }
-int __open64_2(const char *path, int flags) { return open(path, flags, 0); }
-int __openat_2(int dirfd, const char *path, int flags) { return openat(dirfd, path, flags, 0); }
-int __openat64_2(int dirfd, const char *path, int flags) { return openat(dirfd, path, flags, 0); }

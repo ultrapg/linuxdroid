@@ -1,4 +1,0 @@
-# LinuxDroid Chromium defaults: native Wayland/X11 auto-detection, non-blocking keyring,
-# and direct GTK/Qt dialogs without stalling on systemd user portal timeouts.
-export GTK_USE_PORTAL=0
-export CHROMIUM_FLAGS="$CHROMIUM_FLAGS --ozone-platform-hint=auto --password-store=basic"

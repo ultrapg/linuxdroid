@@ -4,6 +4,7 @@ import android.content.res.Configuration
 import android.view.Display
 import com.linuxdroid.app.core.FileUtils
 import com.linuxdroid.app.runtime.CoreDescriptor
+import com.linuxdroid.app.runtime.CpuCoreTier
 import com.linuxdroid.app.runtime.CpuInfo
 import com.linuxdroid.app.runtime.CpuTopology
 import com.linuxdroid.app.runtime.LinuxRuntime
@@ -26,15 +27,17 @@ class WorkstationControlsAndExternalDisplayTest {
 
     @Test
     fun selectPreferredCoresPrefersHighestFrequencyPerformanceCores() {
-        val cores = listOf(
-            CoreDescriptor(0, 1_800_000L),
-            CoreDescriptor(1, 1_800_000L),
-            CoreDescriptor(2, 1_800_000L),
-            CoreDescriptor(3, 1_800_000L),
-            CoreDescriptor(4, 2_800_000L),
-            CoreDescriptor(5, 2_800_000L),
-            CoreDescriptor(6, 2_800_000L),
-            CoreDescriptor(7, 3_200_000L),
+        val cores = CpuInfo.assignCoreTiers(
+            listOf(
+                CoreDescriptor(0, 1_800_000L),
+                CoreDescriptor(1, 1_800_000L),
+                CoreDescriptor(2, 1_800_000L),
+                CoreDescriptor(3, 1_800_000L),
+                CoreDescriptor(4, 2_800_000L),
+                CoreDescriptor(5, 2_800_000L),
+                CoreDescriptor(6, 2_800_000L),
+                CoreDescriptor(7, 3_200_000L),
+            )
         )
         val topo = CpuTopology(
             totalCores = 8,
@@ -42,10 +45,23 @@ class WorkstationControlsAndExternalDisplayTest {
             summary = CpuInfo.buildSummary(8, cores),
         )
         assertTrue(topo.summary.contains("3.20 GHz"))
+        assertEquals(CpuCoreTier.EFFICIENCY, topo.cores[0].tier)
+        assertEquals(CpuCoreTier.PERFORMANCE, topo.cores[4].tier)
+        assertEquals(CpuCoreTier.PRIME, topo.cores[7].tier)
+
+        assertEquals(listOf(4, 5, 6, 7), topo.performanceCoreIndices())
+        assertEquals(listOf(7), topo.primeCoreIndices())
+        assertEquals(listOf(0, 1, 2, 3), topo.efficiencyCoreIndices())
+
         assertEquals(emptyList<Int>(), topo.selectPreferredCores(0, onlineIndices = (0..7).toSet()))
         assertEquals(emptyList<Int>(), topo.selectPreferredCores(8, onlineIndices = (0..7).toSet()))
         assertEquals(listOf(4, 5, 6, 7), topo.selectPreferredCores(4, onlineIndices = (0..7).toSet()))
         assertEquals(listOf(6, 7), topo.selectPreferredCores(2, onlineIndices = (0..7).toSet()))
+
+        // Explicit per-core selection overrides count limit
+        assertEquals(listOf(0, 1, 2, 3), topo.resolveSelectedCores("0-3", 0, (0..7).toSet()))
+        assertEquals(listOf(4, 5, 6, 7), topo.resolveSelectedCores("4,5,6,7", 2, (0..7).toSet()))
+        assertEquals(emptyList<Int>(), topo.resolveSelectedCores("0-7", 0, (0..7).toSet()))
     }
 
     @Test

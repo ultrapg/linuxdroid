@@ -214,9 +214,8 @@ class SessionService : Service() {
         val username = UserProvisioner.provisionRootfs(root, SessionPrefs.username(this), Process.myUid())
 
         val cpuTopology = CpuInfo.detect()
-        val cpuLimit = SessionPrefs.cpuCoreLimit(this)
-        val effectiveCpuCores = SessionPrefs.effectiveCpuCores(this, cpuTopology.totalCores)
-        val affinityCores = cpuTopology.selectPreferredCores(cpuLimit)
+        val affinityCores = SessionPrefs.resolveSelectedCpuCores(this, cpuTopology)
+        val effectiveCpuCores = if (affinityCores.isNotEmpty()) affinityCores.size else cpuTopology.totalCores
 
         val gpuInfo = GpuInfo.detect()
         val gpuConfig = GpuConfigGenerator.resolve(
@@ -244,11 +243,7 @@ class SessionService : Service() {
         fun completeDesktopReadyIfEligible() {
             if (bootGeneration.get() != generation) return
             val wfMs = waylandFirstFrameAtMs.get()
-            if (wfMs <= 0L) return
-            val elapsedSinceFirstWaylandFrame = System.currentTimeMillis() - wfMs
-            if (!guestShellReady.get() && elapsedSinceFirstWaylandFrame < DESKTOP_SHELL_READY_FALLBACK_MS) {
-                return
-            }
+            if (wfMs <= 0L && !guestShellReady.get()) return
             SessionState.update {
                 if (it.firstFrameReady || it.phase == SessionPhase.FAILED || it.phase == SessionPhase.STOPPING) {
                     it
@@ -773,7 +768,6 @@ class SessionService : Service() {
     companion object {
         private const val TAG = "SessionService"
         private const val NOTIFICATION_ID = 1001
-        private const val DESKTOP_SHELL_READY_FALLBACK_MS = 22_000L
         const val ACTION_START = "com.linuxdroid.app.action.START_SESSION"
         const val ACTION_RESTART = "com.linuxdroid.app.action.RESTART_SESSION"
         const val ACTION_PAUSE = "com.linuxdroid.app.action.PAUSE_SESSION"

@@ -46,6 +46,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.BrightnessLow
+import androidx.compose.material.icons.outlined.CheckCircle
 import androidx.compose.material.icons.outlined.Dashboard
 import androidx.compose.material.icons.outlined.ErrorOutline
 import androidx.compose.material.icons.outlined.Keyboard
@@ -1039,8 +1040,8 @@ private fun SessionOverlayUi(
 }
 
 /**
- * Fixed-geometry startup overlay with an internal scrollable console container.
- * Width and height remain 100% constant during boot so log updates never cause flickering or layout shifts.
+ * Fixed-geometry, reassuring startup overlay with a live 6-step readiness checklist.
+ * Automatically transitions straight to the Linux desktop as soon as the first display frame is ready.
  */
 @Composable
 private fun BootProgressOverlay(
@@ -1069,14 +1070,17 @@ private fun BootProgressOverlay(
         }.joinToString(" • ").ifEmpty { "Initializing ARM64 container runtime..." }
     }
 
-    val logScrollState = rememberScrollState()
-    val logContent = remember(snap.bootLogTail) {
-        if (snap.bootLogTail.isEmpty()) "Waiting for guest startup output..."
-        else snap.bootLogTail.joinToString("\n")
+    val bootChecklist = remember {
+        listOf(
+            1 to "Display surface & audio bridge ready",
+            2 to "Wayland compositor & X11 socket online",
+            3 to "SoC GPU hardware acceleration configured",
+            4 to "Ubuntu ARM64 container environment mounted",
+            5 to "Starting desktop window manager & panel",
+            6 to "Waiting for desktop screen output (switches automatically)",
+        )
     }
-    LaunchedEffect(logContent) {
-        logScrollState.scrollTo(logScrollState.maxValue)
-    }
+    val checklistScroll = rememberScrollState()
 
     BoxWithConstraints(
         modifier = Modifier
@@ -1086,7 +1090,7 @@ private fun BootProgressOverlay(
         contentAlignment = Alignment.Center,
     ) {
         val cardWidth = minOf(maxWidth, 600.dp)
-        val cardHeight = minOf(maxHeight, 336.dp).coerceAtLeast(220.dp)
+        val cardHeight = minOf(maxHeight, 344.dp).coerceAtLeast(220.dp)
 
         Card(
             shape = RoundedCornerShape(16.dp),
@@ -1176,10 +1180,10 @@ private fun BootProgressOverlay(
                     )
                 }
 
-                // Fixed-Height Scrollable Console Container
+                // Fixed-Height Scrollable Readiness Checklist (calm, reassuring progress instead of raw console logs)
                 Surface(
-                    shape = RoundedCornerShape(8.dp),
-                    color = Color(0xFF060A0F),
+                    shape = RoundedCornerShape(10.dp),
+                    color = Color(0xFF0B1118),
                     border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline),
                     modifier = Modifier
                         .fillMaxWidth()
@@ -1188,16 +1192,54 @@ private fun BootProgressOverlay(
                     Column(
                         modifier = Modifier
                             .fillMaxSize()
-                            .verticalScroll(logScrollState)
-                            .padding(horizontal = 10.dp, vertical = 8.dp),
+                            .verticalScroll(checklistScroll)
+                            .padding(horizontal = 12.dp, vertical = 8.dp),
+                        verticalArrangement = Arrangement.spacedBy(6.dp),
                     ) {
-                        Text(
-                            text = logContent,
-                            fontFamily = FontFamily.Monospace,
-                            fontSize = 11.sp,
-                            lineHeight = 15.sp,
-                            color = Color(0xFFB8C4D4),
-                        )
+                        for ((stepNum, label) in bootChecklist) {
+                            val isDone = curStep > stepNum
+                            val isCurrent = curStep == stepNum
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                            ) {
+                                when {
+                                    isDone -> Icon(
+                                        imageVector = Icons.Outlined.CheckCircle,
+                                        contentDescription = null,
+                                        tint = MaterialTheme.colorScheme.secondary,
+                                        modifier = Modifier.size(16.dp),
+                                    )
+                                    isCurrent -> CircularProgressIndicator(
+                                        color = MaterialTheme.colorScheme.primary,
+                                        strokeWidth = 2.dp,
+                                        modifier = Modifier.size(15.dp),
+                                    )
+                                    else -> Box(
+                                        modifier = Modifier
+                                            .size(15.dp)
+                                            .padding(3.dp)
+                                            .background(
+                                                color = MaterialTheme.colorScheme.outline,
+                                                shape = RoundedCornerShape(8.dp),
+                                            )
+                                    )
+                                }
+                                Text(
+                                    text = label,
+                                    style = MaterialTheme.typography.bodySmall,
+                                    fontWeight = if (isCurrent) FontWeight.SemiBold else FontWeight.Normal,
+                                    color = when {
+                                        isDone -> MaterialTheme.colorScheme.secondary
+                                        isCurrent -> MaterialTheme.colorScheme.onSurface
+                                        else -> MaterialTheme.colorScheme.onSurfaceVariant
+                                    },
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis,
+                                )
+                            }
+                        }
                     }
                 }
 
@@ -1205,15 +1247,15 @@ private fun BootProgressOverlay(
                 Row(
                     modifier = Modifier
                         .fillMaxWidth()
-                        .height(36.dp),
+                        .height(34.dp),
                     verticalAlignment = Alignment.CenterVertically,
                     horizontalArrangement = Arrangement.spacedBy(8.dp),
                 ) {
                     Text(
-                        text = if (elapsedSec >= 20) {
-                            "First boot builds caches (~20–45s)"
+                        text = if (elapsedSec >= 18) {
+                            "First startup initializes caches — switches to desktop automatically"
                         } else {
-                            ""
+                            "Switches to desktop automatically when screen output is ready"
                         },
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
@@ -1222,30 +1264,6 @@ private fun BootProgressOverlay(
                         modifier = Modifier.weight(1f),
                     )
 
-                    if (snap.bootStep >= 5 && elapsedSec >= 8) {
-                        TextButton(
-                            onClick = {
-                                SessionState.update {
-                                    it.copy(
-                                        firstFrameReady = true,
-                                        phase = SessionPhase.RUNNING,
-                                    )
-                                }
-                            },
-                            contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp),
-                        ) {
-                            Text("Show Canvas")
-                        }
-                    }
-                    if (elapsedSec >= 15) {
-                        OutlinedButton(
-                            onClick = { onRetryBoot(true) },
-                            contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp),
-                            modifier = Modifier.height(34.dp),
-                        ) {
-                            Text("Safe Mode")
-                        }
-                    }
                     TextButton(
                         onClick = onOpenDashboard,
                         contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp),

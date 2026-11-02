@@ -1,0 +1,27 @@
+// LinuxDroid Firefox runtime defaults for Android PRoot (X11/Xwayland + Wayland)
+pref("security.sandbox.content.level", 0);
+pref("security.sandbox.gmp.level", 0);
+pref("security.sandbox.rdd.level", 0);
+pref("security.sandbox.socket.process.level", 0);
+pref("security.sandbox.utility.level", 0);
+pref("security.sandbox.gpu.level", 0);
+pref("dom.ipc.forkserver.enable", false);
+pref("gfx.webrender.software", true);
+pref("gfx.webrender.all", false);
+pref("layers.acceleration.disabled", true);
+pref("layers.gpu-process.enabled", false);
+pref("widget.dmabuf.enabled", false);
+pref("media.cubeb.sandbox", false);
+pref("media.navigator.mediadatadecoder_vpx_enabled", false);
+pref("media.rdd-process.enabled", false);
+pref("media.utility-process.enabled", false);
+pref("widget.use-xdg-desktop-portal.file-picker", 0);
+pref("widget.use-xdg-desktop-portal.mime-handler", 0);
+pref("widget.use-xdg-desktop-portal.settings", 0);
+pref("widget.use-xdg-desktop-portal.location", 0);
+pref("widget.use-xdg-desktop-portal.open-uri", 0);
+pref("browser.shell.checkDefaultBrowser", false);
+pref("datareporting.healthreport.uploadEnabled", false);
+pref("toolkit.telemetry.unified", false);
+pref("browser.tabs.remote.autostart", true);
+pref("dom.ipc.processCount", 2);
