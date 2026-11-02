@@ -72,6 +72,8 @@ object GpuConfigGenerator {
         env["LINUXDROID_GPU_MODE"] = requested.id
         env["LINUXDROID_GPU_ACTIVE"] = backend
         env["LINUXDROID_GPU_FAMILY"] = gpu.family.name.lowercase()
+        env["MESA_DISK_CACHE_DATABASE"] = "1"
+        env["MESA_SHADER_CACHE_MAX_SIZE"] = "512M"
 
         return when (backend) {
             "turnip" -> {
@@ -83,6 +85,8 @@ object GpuConfigGenerator {
                 env["MESA_VK_WSI_DEBUG"] = "sw"
                 env["MESA_LOADER_DRIVER_OVERRIDE"] = "zink"
                 env["GALLIUM_DRIVER"] = "zink"
+                env["ZINK_DESCRIPTORS"] = "lazy"
+                env["MESA_NO_ERROR"] = "1"
                 env["LIBGL_KOPPER_DRI2"] = "1"
                 env["MESA_GL_VERSION_OVERRIDE"] = "4.6"
                 env["MESA_GLSL_VERSION_OVERRIDE"] = "460"
@@ -121,6 +125,7 @@ object GpuConfigGenerator {
                     env["LIBGL_ALWAYS_SOFTWARE"] = "1"
                 }
                 env["GALLIUM_DRIVER"] = "virpipe"
+                env["MESA_NO_ERROR"] = "1"
                 env["MESA_GL_VERSION_OVERRIDE"] = "4.3"
                 env["MESA_GLSL_VERSION_OVERRIDE"] = "430"
                 ResolvedGpuConfig(

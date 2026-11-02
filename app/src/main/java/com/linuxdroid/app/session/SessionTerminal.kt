@@ -2,6 +2,7 @@ package com.linuxdroid.app.session
 
 import android.content.Context
 import com.linuxdroid.app.runtime.LinuxRuntime
+import com.linuxdroid.app.runtime.ProotFastPath
 import com.linuxdroid.app.runtime.UserProvisioner
 import com.termux.terminal.TerminalSession
 import com.termux.terminal.TerminalSessionClient
@@ -19,38 +20,50 @@ object SessionTerminal {
         val home = if (asRoot) "/root" else "/home/${UserProvisioner.sanitizeUsername(user)}"
         File(root, home.removePrefix("/")).mkdirs()
 
+        val binds = LinuxRuntime.lastBinds(context).filter { !it.startsWith("/proc/self/fd/") }
+        val useNoSeccomp = SessionPrefs.prootNoSeccomp(context)
+        val fastPathKey = if (!asRoot && SessionPrefs.prootFastPath(context) && !useNoSeccomp) {
+            ProotFastPath.key(root, binds)
+        } else {
+            null
+        }
+
         val cmd = LinuxRuntime.prootPrefix(context, root, home, fakeRoot = asRoot)
         if (asRoot) cmd.add(1, "--link2symlink")
-        for (spec in LinuxRuntime.lastBinds(context)) {
-            if (!spec.startsWith("/proc/self/fd/")) {
-                cmd.add("-b")
-                cmd.add(spec)
+        for (spec in binds) {
+            cmd.add("-b")
+            cmd.add(spec)
+        }
+        cmd.add("/usr/bin/env")
+        cmd.add("-i")
+        cmd.add("HOME=$home")
+        cmd.add("USER=$user")
+        cmd.add("LOGNAME=$user")
+        cmd.add("TERM=xterm-256color")
+        cmd.add("COLORTERM=truecolor")
+        cmd.add("LANG=C.UTF-8")
+        cmd.add("PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin")
+        cmd.add("GLIBC_TUNABLES=${SessionPrefs.GLIBC_TUNABLES}")
+        cmd.add("XDG_RUNTIME_DIR=${LinuxRuntime.GUEST_RUNTIME_DIR}")
+        cmd.add("WAYLAND_DISPLAY=wayland-0")
+        cmd.add("DISPLAY=:0")
+        cmd.add("PULSE_SERVER=unix:${File(context.filesDir, "pulseaudio/PS0").absolutePath}")
+        if (fastPathKey != null) {
+            for ((k, v) in ProotFastPath.guestEnv(root, binds, fastPathKey)) {
+                cmd.add("$k=$v")
             }
         }
-        cmd.addAll(
-            listOf(
-                "/usr/bin/env",
-                "-i",
-                "HOME=$home",
-                "USER=$user",
-                "LOGNAME=$user",
-                "TERM=xterm-256color",
-                "COLORTERM=truecolor",
-                "LANG=C.UTF-8",
-                "PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
-                "XDG_RUNTIME_DIR=${LinuxRuntime.GUEST_RUNTIME_DIR}",
-                "WAYLAND_DISPLAY=wayland-0",
-                "DISPLAY=:0",
-                "PULSE_SERVER=unix:${File(context.filesDir, "pulseaudio/PS0").absolutePath}",
-                "/bin/bash",
-                "--login",
-            )
-        )
+        cmd.add("/bin/bash")
+        cmd.add("--login")
 
         val hostEnv = buildList {
             add("PROOT_LOADER=${LinuxRuntime.prootLoader(context).absolutePath}")
             add("PROOT_TMP_DIR=${LinuxRuntime.prootTempDir(context).absolutePath}")
-            if (SessionPrefs.prootNoSeccomp(context)) add("PROOT_NO_SECCOMP=1")
+            if (useNoSeccomp) add("PROOT_NO_SECCOMP=1")
+            if (fastPathKey != null) {
+                val (k, v) = ProotFastPath.hostEnv(fastPathKey)
+                add("$k=$v")
+            }
         }.toTypedArray()
 
         return TerminalSession(

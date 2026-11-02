@@ -1,0 +1,13 @@
+[KDE]
+AnimationDurationFactor=0
+SingleClick=false
+widgetStyle=Breeze
+
+[KDE Action Restrictions][$i]
+action/switch_user=false
+action/start_new_session=false
+action/lock_screen=false
+
+[KDE Control Module Restrictions][$i]
+kcm_sddm.desktop=false
+kcm_plymouth.desktop=false

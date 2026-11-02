@@ -12,6 +12,8 @@ export MOZ_DISABLE_UTILITY_SANDBOX=1
 export MOZ_SHM_NO_SEALS=1
 export ELECTRON_DISABLE_SANDBOX=1
 export NO_AT_BRIDGE=1
+export KDE_DEBUG=1
+export QT_LOGGING_RULES="${QT_LOGGING_RULES:-*.debug=false;qt.qpa.*=false}"
 
 WIDTH="${BL_WIDTH:-1920}"
 HEIGHT="${BL_HEIGHT:-1080}"
@@ -35,7 +37,6 @@ boot_ready() {
       mv -f "${BL_BOOT_STATUS}.tmp" "${BL_BOOT_STATUS}" 2>/dev/null || true
   fi
 }
-export -f boot_step boot_ready
 
 for conf in client client-rt; do
   if [ -d "/etc/pipewire" ] && [ ! -f "/etc/pipewire/$conf.conf.d/linuxdroid-rt.conf" ]; then
@@ -102,7 +103,6 @@ if [ "$desktop_choice" = "kde" ]; then
   export KDE_APPLICATIONS_AS_SCOPE=0
   export QT_QPA_PLATFORM="wayland;xcb"
   unset QT_QPA_PLATFORMTHEME
-  export QT_FORCE_STDERR_LOGGING=1
   export GDK_BACKEND="wayland,x11"
   export SDL_VIDEODRIVER="wayland,x11"
   export MOZ_ENABLE_WAYLAND=1
@@ -116,6 +116,7 @@ if [ "$desktop_choice" = "kde" ]; then
   export QT_QUICK_BACKEND=software
   export GALLIUM_THREAD=0
   export KWIN_USE_OVERLAYS=0
+  export KWIN_EFFECTS_FORCE_ANIMATIONS=0
   export KWIN_WAYLAND_NO_PERMISSION_CHECKS=1
   export KWIN_SCREENSHOT_NO_PERMISSION_CHECKS=1
   if [ "${GALLIUM_DRIVER:-}" = "zink" ]; then
@@ -139,6 +140,7 @@ ENTRY
     "$KWRITECONFIG" --file kwinrc --group Wayland --key InputMethod "$HOME/.local/share/applications/linuxdroid-ime.desktop" 2>/dev/null || true
     "$KWRITECONFIG" --file kscreenlockerrc --group Daemon --key Autolock false 2>/dev/null || true
     "$KWRITECONFIG" --file kscreenlockerrc --group Daemon --key LockOnResume false 2>/dev/null || true
+    "$KWRITECONFIG" --file kdeglobals --group KDE --key AnimationDurationFactor 0 2>/dev/null || true
     if [ "$SCALE" != "1" ] && [ "$SCALE" != "1.0" ]; then
       dpi=$(python3 -c "print(int(round(96 * float('$SCALE'))))" 2>/dev/null || echo 96)
       "$KWRITECONFIG" --file kcmfonts --group General --key forceFontDPI "$dpi" 2>/dev/null || true
@@ -150,18 +152,31 @@ ENTRY
   start_x11_helpers ":0 :1" ""
   echo "== linuxdroid-desktop: starting KDE Plasma Wayland (${WIDTH}x${HEIGHT}, scale=${SCALE}, KWIN_COMPOSE=${KWIN_COMPOSE})"
   dbus-run-session -- /bin/bash -c '
+    write_status() {
+      echo "$2"
+      if [ -n "${BL_BOOT_STATUS:-}" ]; then
+        printf "%s\n" "$1" > "${BL_BOOT_STATUS}.tmp" 2>/dev/null && \
+          mv -f "${BL_BOOT_STATUS}.tmp" "${BL_BOOT_STATUS}" 2>/dev/null || true
+      fi
+    }
     (
       for _ in $(seq 1 150); do
         if [ -S "$XDG_RUNTIME_DIR/wayland-1" ]; then
-          boot_step 6 "Loading KDE Plasma desktop shell & panels..."
+          for kamd in /usr/lib/*/libexec/kactivitymanagerd /usr/lib/kactivitymanagerd /usr/libexec/kactivitymanagerd; do
+            if [ -x "$kamd" ]; then
+              WAYLAND_DISPLAY=wayland-1 "$kamd" >/dev/null 2>&1 &
+              break
+            fi
+          done
+          write_status "6|Loading KDE Plasma desktop shell & panels..." "== [BOOT 6/6] Loading KDE Plasma desktop shell & panels..."
           break
         fi
         sleep 0.1
       done
       for _ in $(seq 1 300); do
-        if dbus-send --session --dest=org.kde.plasmashell --type=method_call --print-reply /PlasmaShell org.freedesktop.DBus.Peer.Ping >/dev/null 2>&1; then
+        if dbus-send --session --dest=org.kde.plasmashell --type=method_call --print-reply /PlasmaShell org.freedesktop.DBus.Introspectable.Introspect 2>/dev/null | grep -q "org.kde.PlasmaShell"; then
           sleep 1.2
-          boot_ready "KDE Plasma desktop ready"
+          write_status "READY|KDE Plasma desktop ready" "== [BOOT READY] KDE Plasma desktop ready"
           break
         fi
         sleep 0.25
@@ -227,12 +242,12 @@ run_xwayland_desktop() {
     for i in $(seq 1 150); do
       if DISPLAY="$disp" xprop -root _NET_SUPPORTING_WM_CHECK 2>/dev/null | grep -q "window id"; then
         if [ "$desktop_name" != "XFCE4" ] || pgrep -u "$(id -u)" -x xfdesktop >/dev/null 2>&1 || [ "$i" -ge 60 ]; then
-          sleep 1.2
+          sleep 0.4
           boot_ready "${desktop_name} desktop ready"
           exit 0
         fi
       fi
-      sleep 0.25
+      sleep 0.2
     done
     boot_ready "${desktop_name} desktop ready"
   ) &

@@ -107,6 +107,11 @@ class SessionService : Service() {
         rotateFreshBootLog(sessionLogFile)
         rotateFreshBootLog(prootLogFile)
         bootStatusFile.delete()
+        runCatching {
+            val shmDir = File(LinuxRuntime.liveDir(this), "shm")
+            shmDir.deleteRecursively()
+            shmDir.mkdirs()
+        }
 
         val startedMs = SessionState.state.value.startedAtMs.takeIf { forceCompatRetry && it > 0L }
             ?: System.currentTimeMillis()
@@ -255,6 +260,7 @@ class SessionService : Service() {
             put("LANG", "C.UTF-8")
             put("TZ", TimeZone.getDefault().id)
             put("PATH", "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin")
+            put("GLIBC_TUNABLES", SessionPrefs.GLIBC_TUNABLES)
             put("XDG_RUNTIME_DIR", LinuxRuntime.GUEST_RUNTIME_DIR)
             put("WAYLAND_DISPLAY", "wayland-0")
             put("PULSE_SERVER", "unix:${pulseAudio!!.socketFile().absolutePath}")
@@ -335,6 +341,7 @@ class SessionService : Service() {
             return
         }
         guestPid = pid
+        runCatching { Process.setThreadPriority(pid, -4) }
 
         SessionState.update { snap ->
             if (bootGeneration.get() != generation) snap
@@ -679,7 +686,7 @@ class SessionService : Service() {
     companion object {
         private const val TAG = "SessionService"
         private const val NOTIFICATION_ID = 1001
-        private const val DESKTOP_SHELL_READY_FALLBACK_MS = 14_000L
+        private const val DESKTOP_SHELL_READY_FALLBACK_MS = 22_000L
         const val ACTION_START = "com.linuxdroid.app.action.START_SESSION"
         const val ACTION_PAUSE = "com.linuxdroid.app.action.PAUSE_SESSION"
         const val ACTION_RESUME = "com.linuxdroid.app.action.RESUME_SESSION"

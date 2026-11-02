@@ -14,7 +14,7 @@ OUT_DIR="${OUT_DIR:-$REPO_ROOT/dist}"
 WORK_DIR="${WORK_DIR:-/tmp/linuxdroid-rootfs-build}"
 CACHE_DIR="${CACHE_DIR:-$WORK_DIR/cache}"
 GITHUB_REPO="${GITHUB_REPO:-ultrapg/linuxdroid}"
-RELEASE_TAG="${RELEASE_TAG:-v1.0.1}"
+RELEASE_TAG="${RELEASE_TAG:-v1.0.2}"
 
 UBUNTU_BASE_URL="https://cdimage.ubuntu.com/ubuntu-base/releases/24.04/release/ubuntu-base-24.04.5-base-arm64.tar.gz"
 UBUNTU_BASE_SHA256="a91d5a93010193712d346d761372b7c9db6dfcf093893161c64ca107f05914f2"
@@ -176,6 +176,8 @@ stage_linuxfs_overlay() {
   sudo chmod 1777 "$root/tmp" "$root/var/tmp"
   printf '%s\n' "$edition_label" | sudo tee "$root/etc/linuxdroid/edition" >/dev/null
   sudo chmod 0644 "$root/etc/linuxdroid/edition"
+  printf '%s\n' "${RELEASE_TAG#v}" | sudo tee "$root/etc/linuxdroid/version" >/dev/null
+  sudo chmod 0644 "$root/etc/linuxdroid/version"
 
   printf '/usr/local/lib/libblsession.so\n/usr/local/lib/libblfastpath.so\n' \
     | sudo tee "$root/etc/ld.so.preload" >/dev/null
@@ -190,7 +192,7 @@ clean_and_pack_rootfs() {
     apt-get clean
     rm -rf /var/lib/apt/lists/* /var/cache/apt/archives/*.deb /var/cache/apt/archives/partial/*
     rm -rf /tmp/* /var/tmp/* /var/log/*.log /var/log/apt/* /var/log/dpkg.log
-    rm -f /usr/sbin/policy-rc.d
+    rm -f /usr/sbin/policy-rc.d /usr/share/dbus-1/services/org.freedesktop.systemd1.service
   '
 
   sudo rm -f "$root/etc/resolv.conf"

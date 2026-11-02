@@ -7,6 +7,7 @@ export USER="${USER:-$(id -un 2>/dev/null || echo linux)}"
 export LOGNAME="$USER"
 export SHELL=/bin/bash
 export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+export GLIBC_TUNABLES="${GLIBC_TUNABLES:-glibc.pthread.rseq=0:glibc.malloc.top_pad=16777216}"
 
 boot_step() {
   local step_num="$1"
@@ -50,6 +51,13 @@ prepare_locale() {
 }
 prepare_locale
 
+# Remove systemd's /bin/false session D-Bus stub if present so dbus-daemon answers ServiceUnknown
+# in 0us instead of fork/exec'ing /bin/false 15+ times during KDE/desktop startup.
+if [ -f /usr/share/dbus-1/services/org.freedesktop.systemd1.service ]; then
+  rm -f /usr/share/dbus-1/services/org.freedesktop.systemd1.service 2>/dev/null || \
+    linuxdroid-root rm -f /usr/share/dbus-1/services/org.freedesktop.systemd1.service 2>/dev/null || true
+fi
+
 rm -f /tmp/.bl-clock
 head -c 8 /dev/zero > /tmp/.bl-clock 2>/dev/null || true
 if [ "${BL_ZRAM:-0}" = "1" ]; then
@@ -58,6 +66,8 @@ else
   rm -f /tmp/.bl-zram 2>/dev/null || true
 fi
 
+# Clean stale X11/ICE/D-Bus locks & sockets from any interrupted prior session (preserving .linuxdroid-svc-v2-* cache)
+rm -rf /tmp/.ICE-unix /tmp/.X11-unix /tmp/.X*-lock /tmp/dbus-* 2>/dev/null || true
 mkdir -p /tmp/.X11-unix /tmp/.ICE-unix /dev/shm
 chmod 1777 /tmp/.X11-unix /tmp/.ICE-unix /dev/shm 2>/dev/null || true
 
@@ -75,7 +85,11 @@ find "$XDG_RUNTIME_DIR" -mindepth 1 -maxdepth 1 \
 export XDG_DATA_HOME="${XDG_DATA_HOME:-$HOME/.local/share}"
 export XDG_CONFIG_HOME="${XDG_CONFIG_HOME:-$HOME/.config}"
 export XDG_CACHE_HOME="${XDG_CACHE_HOME:-$HOME/.cache}"
-mkdir -p "$HOME" "$XDG_DATA_HOME" "$XDG_CONFIG_HOME" "$XDG_CACHE_HOME"
+export MESA_SHADER_CACHE_DIR="${MESA_SHADER_CACHE_DIR:-$XDG_CACHE_HOME/mesa_shader_cache}"
+export ICEAUTHORITY="$XDG_RUNTIME_DIR/ICEauthority"
+mkdir -p "$HOME" "$XDG_DATA_HOME" "$XDG_CONFIG_HOME" "$XDG_CACHE_HOME" "$MESA_SHADER_CACHE_DIR"
+rm -f "$HOME/.ICEauthority-c" "$HOME/.ICEauthority-l" "$HOME/.Xauthority-c" "$HOME/.Xauthority-l" \
+      "$ICEAUTHORITY" "${ICEAUTHORITY}-c" "${ICEAUTHORITY}-l" 2>/dev/null || true
 
 skel_done="$XDG_DATA_HOME/linuxdroid/skel-initialized"
 if [ -d /etc/skel ] && [ ! -e "$skel_done" ]; then

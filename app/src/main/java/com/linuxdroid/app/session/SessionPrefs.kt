@@ -33,12 +33,41 @@ enum class ScreenOrientationPref(val id: String, val label: String, val androidO
     }
 }
 
-enum class ResolutionPreset(val id: String, val label: String, val width: Int, val height: Int) {
+enum class ResolutionPreset(
+    val id: String,
+    val label: String,
+    val width: Int,
+    val height: Int,
+    val shortEdgeTarget: Int = 0,
+) {
     NATIVE("native", "Native Screen / Window Resolution (Crisp)", 0, 0),
+    BALANCED_900P("aspect_900p", "Auto Fullscreen 900p (Balanced Speed)", 0, 0, shortEdgeTarget = 900),
+    PERFORMANCE_720P("aspect_720p", "Auto Fullscreen 720p (Max FPS)", 0, 0, shortEdgeTarget = 720),
     FHD_PLUS("1920x1200", "1920 × 1200 (16:10 Workstation)", 1920, 1200),
     FHD("1920x1080", "1920 × 1080 (1080p)", 1920, 1080),
     QHD("2560x1600", "2560 × 1600 (HiDPI Tablet)", 2560, 1600),
     HD_PLUS("1600x900", "1600 × 900 (Compact)", 1600, 900);
+
+    fun resolveForSurface(surfaceW: Int, surfaceH: Int): Pair<Int, Int> {
+        val safeW = (surfaceW and 1.inv()).coerceAtLeast(640)
+        val safeH = (surfaceH and 1.inv()).coerceAtLeast(480)
+        if (this == NATIVE) return safeW to safeH
+        if (shortEdgeTarget > 0) {
+            val landscape = safeW >= safeH
+            val shortDim = if (landscape) safeH else safeW
+            val longDim = if (landscape) safeW else safeH
+            if (shortDim <= shortEdgeTarget) return safeW to safeH
+            val scaledShort = (shortEdgeTarget and 1.inv()).coerceAtLeast(480)
+            val scaledLong = ((kotlin.math.round(longDim.toDouble() * scaledShort / shortDim.toDouble()).toInt()) and 1.inv())
+                .coerceAtLeast(640)
+            return if (landscape) scaledLong to scaledShort else scaledShort to scaledLong
+        }
+        return if (safeW >= safeH) {
+            width to height
+        } else {
+            height to width
+        }
+    }
 
     companion object {
         fun fromId(id: String?): ResolutionPreset =
@@ -48,6 +77,7 @@ enum class ResolutionPreset(val id: String, val label: String, val width: Int, v
 
 object SessionPrefs {
     private const val PREFS_NAME = "linuxdroid_prefs"
+    const val GLIBC_TUNABLES = "glibc.pthread.rseq=0:glibc.malloc.top_pad=16777216"
 
     private fun prefs(context: Context) =
         context.applicationContext.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)

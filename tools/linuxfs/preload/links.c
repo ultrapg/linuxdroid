@@ -2,6 +2,7 @@
 #include <dlfcn.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <limits.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -14,35 +15,83 @@ static int moves_instead(void) {
   return v != NULL && strcmp(v, "1") == 0;
 }
 
+static int has_suffix(const char *path, size_t n, const char *suf) {
+  size_t m = strlen(suf);
+  return n > m && memcmp(path + n - m, suf, m) == 0;
+}
+
 static int lock_name(const char *path) {
-  size_t n = path ? strlen(path) : 0;
-  return n > 2 && strcmp(path + n - 2, "-l") == 0;
+  if (!path) return 0;
+  size_t n = strlen(path);
+  return has_suffix(path, n, "-l") ||
+         has_suffix(path, n, "-n") ||
+         has_suffix(path, n, ".lock") ||
+         has_suffix(path, n, ".lk") ||
+         has_suffix(path, n, ".lck") ||
+         has_suffix(path, n, "-lock");
+}
+
+static int fallback_symlink_lock(int olddirfd, const char *oldpath, int newdirfd, const char *newpath) {
+  static int (*real_symlinkat)(const char *, int, const char *);
+  if (!oldpath || !newpath) return -1;
+  if (real_symlinkat == NULL) real_symlinkat = dlsym(RTLD_NEXT, "symlinkat");
+  if (oldpath[0] == '/' || (olddirfd == newdirfd && strchr(newpath, '/') == NULL)) {
+    return real_symlinkat(oldpath, newdirfd, newpath);
+  }
+  if (olddirfd == AT_FDCWD) {
+    char cwd[PATH_MAX];
+    char resolved[PATH_MAX];
+    if (getcwd(cwd, sizeof(cwd)) != NULL) {
+      int n = snprintf(resolved, sizeof(resolved), "%s/%s", cwd, oldpath);
+      if (n > 0 && (size_t)n < sizeof(resolved)) {
+        return real_symlinkat(resolved, newdirfd, newpath);
+      }
+    }
+  }
+  return real_symlinkat(oldpath, newdirfd, newpath);
 }
 
 __attribute__((visibility("hidden"))) int bl_link_lock(const char *oldpath, const char *newpath, int result) {
-  static int (*real_symlink)(const char *, const char *);
   if (result == 0 || !refused(errno)) return result;
-  if (moves_instead()) return renameat2(AT_FDCWD, oldpath, AT_FDCWD, newpath, RENAME_NOREPLACE);
-  if (!lock_name(newpath)) return result;
-  if (real_symlink == NULL) real_symlink = dlsym(RTLD_NEXT, "symlink");
-  return real_symlink(oldpath, newpath);
+  int saved_errno = errno;
+  if (moves_instead()) {
+    int r = renameat2(AT_FDCWD, oldpath, AT_FDCWD, newpath, RENAME_NOREPLACE);
+    if (r == 0) return 0;
+    errno = saved_errno;
+    return result;
+  }
+  if (!lock_name(newpath)) {
+    errno = saved_errno;
+    return result;
+  }
+  int r = fallback_symlink_lock(AT_FDCWD, oldpath, AT_FDCWD, newpath);
+  if (r != 0 && errno != EEXIST) errno = saved_errno;
+  return r;
 }
 
-#if __SIZEOF_POINTER__ != 8
 int link(const char *oldpath, const char *newpath) {
   static int (*real_link)(const char *, const char *);
   if (real_link == NULL) real_link = dlsym(RTLD_NEXT, "link");
   return bl_link_lock(oldpath, newpath, real_link(oldpath, newpath));
 }
-#endif
 
 int linkat(int olddirfd, const char *oldpath, int newdirfd, const char *newpath, int flags) {
   static int (*real_linkat)(int, const char *, int, const char *, int);
   if (real_linkat == NULL) real_linkat = dlsym(RTLD_NEXT, "linkat");
   int result = real_linkat(olddirfd, oldpath, newdirfd, newpath, flags);
-  if (result != 0 && refused(errno) && flags == 0 && moves_instead())
-    return renameat2(olddirfd, oldpath, newdirfd, newpath, RENAME_NOREPLACE);
-  if (result != 0 && refused(errno) && lock_name(newpath) && oldpath[0] == '/' && flags == 0)
-    return symlinkat(oldpath, newdirfd, newpath);
+  if (result == 0 || !refused(errno)) return result;
+  int saved_errno = errno;
+  if (flags == 0 && moves_instead()) {
+    int r = renameat2(olddirfd, oldpath, newdirfd, newpath, RENAME_NOREPLACE);
+    if (r == 0) return 0;
+    errno = saved_errno;
+    return result;
+  }
+  if (flags == 0 && lock_name(newpath)) {
+    int r = fallback_symlink_lock(olddirfd, oldpath, newdirfd, newpath);
+    if (r != 0 && errno != EEXIST) errno = saved_errno;
+    return r;
+  }
+  errno = saved_errno;
   return result;
 }

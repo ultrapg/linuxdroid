@@ -41,6 +41,9 @@ LOGIN_NAME = "org.freedesktop.login1"
 LOGIN_ROOT = "/org/freedesktop/login1"
 LOGIN_IFACE = "org.freedesktop.login1.Manager"
 
+UDISKS_NAME = "org.freedesktop.UDisks2"
+UDISKS_ROOT = "/org/freedesktop/UDisks2"
+
 
 def v(sig, val):
     return GLib.Variant(sig, val)
@@ -387,6 +390,18 @@ class NetworkService:
         return True
 
 
+class UDisks2Service:
+    def __init__(self, bus):
+        iface = nm_iface_info(OBJECT_MANAGER, {})
+        bus.register_object(UDISKS_ROOT, iface, self.on_call, None, None)
+
+    def on_call(self, bus, sender, path, iface, method, args, inv):
+        if method == "GetManagedObjects":
+            inv.return_value(v("(a{oa{sa{sv}}})", ({},)))
+        else:
+            inv.return_dbus_error(UDISKS_NAME + ".Error.NotSupported", "Not supported")
+
+
 def main():
     loop = GLib.MainLoop()
     services = {}
@@ -400,10 +415,14 @@ def main():
     def on_nm(bus, _):
         services["nm"] = NetworkService(bus)
 
+    def on_udisks(bus, _):
+        services["udisks"] = UDisks2Service(bus)
+
     owners = [
         Gio.bus_own_name(Gio.BusType.SYSTEM, UPOWER_NAME, Gio.BusNameOwnerFlags.NONE, on_upower, None, lambda *_: None),
         Gio.bus_own_name(Gio.BusType.SYSTEM, LOGIN_NAME, Gio.BusNameOwnerFlags.NONE, on_login, None, lambda *_: None),
         Gio.bus_own_name(Gio.BusType.SYSTEM, NM_NAME, Gio.BusNameOwnerFlags.NONE, on_nm, None, lambda *_: None),
+        Gio.bus_own_name(Gio.BusType.SYSTEM, UDISKS_NAME, Gio.BusNameOwnerFlags.NONE, on_udisks, None, lambda *_: None),
     ]
     try:
         loop.run()

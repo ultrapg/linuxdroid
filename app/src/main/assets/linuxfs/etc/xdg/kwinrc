@@ -1,6 +1,7 @@
 [Compositing]
 Backend=QPainter
 Enabled=true
+LatencyPolicy=Low
 
 [org.kde.kdecoration2]
 library=org.kde.breeze
@@ -14,3 +15,10 @@ LayoutName=org.kde.breeze.desktop
 [Plugins]
 blurEnabled=false
 contrastEnabled=false
+kwin4_effect_translucencyEnabled=false
+kwin4_effect_fadeEnabled=false
+kwin4_effect_scaleEnabled=false
+kwin4_effect_MorphingPopupsEnabled=false
+slidingpopupsEnabled=false
+wobblywindowsEnabled=false
+zoomEnabled=false

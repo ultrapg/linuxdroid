@@ -486,15 +486,7 @@ class SessionActivity : ComponentActivity() {
         if (routing == DisplayRoutingMode.DEX_OR_FREEFORM_WINDOW) {
             return (surfaceW and 1.inv()).coerceAtLeast(640) to (surfaceH and 1.inv()).coerceAtLeast(480)
         }
-        val preset = SessionPrefs.resolutionPreset(this)
-        if (preset == ResolutionPreset.NATIVE) {
-            return (surfaceW and 1.inv()).coerceAtLeast(640) to (surfaceH and 1.inv()).coerceAtLeast(480)
-        }
-        return if (surfaceW >= surfaceH) {
-            preset.width to preset.height
-        } else {
-            preset.height to preset.width
-        }
+        return SessionPrefs.resolutionPreset(this).resolveForSurface(surfaceW, surfaceH)
     }
 
     private fun selectBestRefreshRate(displayOverride: Display? = null): Float {

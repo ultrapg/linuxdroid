@@ -2,6 +2,9 @@
 # Run an application with full hardware SoC OpenGL (Zink / VirGL) and Vulkan enabled.
 set -u
 
+unset LIBGL_ALWAYS_SOFTWARE
+unset QT_QUICK_BACKEND
+
 if [ -r /etc/linuxdroid/gpu.env ]; then
   set -a
   # shellcheck disable=SC1091
@@ -9,14 +12,16 @@ if [ -r /etc/linuxdroid/gpu.env ]; then
   set +a
 fi
 
-unset QT_QUICK_BACKEND
 if [ "${LINUXDROID_GPU_ACTIVE:-}" = "turnip" ]; then
   unset LIBGL_ALWAYS_SOFTWARE
+  export MOZ_WEBRENDER=1
   if [ "${XDG_SESSION_TYPE:-}" = "wayland" ] && [ "${KWIN_COMPOSE:-}" = "Q" ]; then
     export GDK_BACKEND=x11
     export QT_QPA_PLATFORM=xcb
     export SDL_VIDEODRIVER=x11
   fi
+elif [ "${LINUXDROID_GPU_ACTIVE:-}" = "unified" ] && [ "${LIBGL_ALWAYS_SOFTWARE:-0}" != "1" ]; then
+  export MOZ_WEBRENDER=1
 fi
 
 if [ "$#" -eq 0 ]; then
