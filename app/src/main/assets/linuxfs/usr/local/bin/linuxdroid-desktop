@@ -1,0 +1,200 @@
+#!/bin/bash
+set -u
+
+export BL_DESKTOP=1
+export APPIMAGE_EXTRACT_AND_RUN=1
+export MOZ_DISABLE_CONTENT_SANDBOX=1
+export MOZ_DISABLE_GMP_SANDBOX=1
+export MOZ_DISABLE_RDD_SANDBOX=1
+export MOZ_DISABLE_SOCKET_PROCESS_SANDBOX=1
+export MOZ_DISABLE_UTILITY_SANDBOX=1
+export MOZ_SHM_NO_SEALS=1
+export ELECTRON_DISABLE_SANDBOX=1
+
+WIDTH="${BL_WIDTH:-1920}"
+HEIGHT="${BL_HEIGHT:-1080}"
+SCALE="${BL_SCALE:-1}"
+
+for conf in client client-rt; do
+  if [ -d "/etc/pipewire" ] && [ ! -f "/etc/pipewire/$conf.conf.d/linuxdroid-rt.conf" ]; then
+    linuxdroid-root sh -c "mkdir -p /etc/pipewire/$conf.conf.d && printf 'context.properties = {\n    module.rt = false\n}\n' >/etc/pipewire/$conf.conf.d/linuxdroid-rt.conf" 2>/dev/null || true
+  fi
+done
+
+python3 /usr/local/bin/linuxdroid-open --install >/dev/null 2>&1 || true
+update-mime-database "$HOME/.local/share/mime" >/dev/null 2>&1 &
+
+desktop_choice="${LINUXDROID_DESKTOP:-auto}"
+if [ "$desktop_choice" = "auto" ]; then
+  if command -v startplasma-wayland >/dev/null 2>&1; then
+    desktop_choice="kde"
+  elif command -v startxfce4 >/dev/null 2>&1; then
+    desktop_choice="xfce"
+  elif command -v startlxqt >/dev/null 2>&1; then
+    desktop_choice="lxqt"
+  else
+    desktop_choice="fallback"
+  fi
+fi
+
+start_x11_helpers() {
+  local disp="$1"
+  (
+    for _ in $(seq 1 80); do
+      if DISPLAY="$disp" python3 -c "import ctypes; x=ctypes.CDLL('libX11.so.6'); x.XOpenDisplay.restype=ctypes.c_void_p; d=x.XOpenDisplay(None); raise SystemExit(0 if d else 1)" 2>/dev/null; then
+        break
+      fi
+      sleep 0.1
+    done
+    if [ -n "${BL_ANDROID_CLIPBOARD:-}" ] && [ -x /usr/local/bin/linuxdroid-clipboard ]; then
+      DISPLAY="$disp" /usr/local/bin/linuxdroid-clipboard "$BL_ANDROID_CLIPBOARD" >/dev/null 2>&1 &
+    fi
+    if [ "${2:-}" = "x11-ime" ] && [ -x /usr/local/bin/linuxdroid-ime ]; then
+      DISPLAY="$disp" /usr/local/bin/linuxdroid-ime --x11 >/dev/null 2>&1 &
+    fi
+    wait
+  ) &
+}
+
+if [ "$desktop_choice" = "kde" ]; then
+  export XDG_SESSION_TYPE=wayland
+  export XDG_CURRENT_DESKTOP=KDE
+  export XDG_SESSION_DESKTOP=KDE
+  export DESKTOP_SESSION=plasma
+  export KDE_FULL_SESSION=true
+  if command -v kwriteconfig6 >/dev/null 2>&1; then
+    export KDE_SESSION_VERSION=6
+    KWRITECONFIG=kwriteconfig6
+  else
+    export KDE_SESSION_VERSION=5
+    KWRITECONFIG=kwriteconfig5
+  fi
+  export KDE_APPLICATIONS_AS_SCOPE=0
+  export QT_QPA_PLATFORM="wayland;xcb"
+  export GDK_BACKEND="wayland,x11"
+  export SDL_VIDEODRIVER="wayland,x11"
+  export MOZ_ENABLE_WAYLAND=1
+  export KWIN_USE_OVERLAYS=0
+
+  mkdir -p "$HOME/.local/share/applications" "$HOME/.config"
+  cat > "$HOME/.local/share/applications/linuxdroid-ime.desktop" <<'ENTRY'
+[Desktop Entry]
+Type=Application
+Name=Android Native Keyboard
+Exec=/usr/local/bin/linuxdroid-ime
+NoDisplay=true
+X-KDE-Wayland-VirtualKeyboard=true
+ENTRY
+
+  if command -v "$KWRITECONFIG" >/dev/null 2>&1; then
+    "$KWRITECONFIG" --file kwinrc --group Wayland --key InputMethod "$HOME/.local/share/applications/linuxdroid-ime.desktop" 2>/dev/null || true
+    "$KWRITECONFIG" --file kscreenlockerrc --group Daemon --key Autolock false 2>/dev/null || true
+    "$KWRITECONFIG" --file kscreenlockerrc --group Daemon --key LockOnResume false 2>/dev/null || true
+  fi
+
+  WRAP_DIR="$XDG_RUNTIME_DIR/linuxdroid-kwin"
+  mkdir -p "$WRAP_DIR"
+  KWIN_COMPOSE_VAL="Q"
+  if [ "${LINUXDROID_GPU_ACTIVE:-}" != "software" ] && { [ -f /usr/share/linuxdroid/kwin-opengl ] || [ -c /dev/dri/renderD128 ]; }; then
+    KWIN_COMPOSE_VAL="O2"
+  fi
+
+  cat > "$WRAP_DIR/kwin_wayland" <<EOF
+#!/bin/bash
+for arg in "\$@"; do
+  [ "\$arg" = "--wayland-display" ] && exec env KWIN_COMPOSE="$KWIN_COMPOSE_VAL" GALLIUM_THREAD=0 /usr/bin/kwin_wayland "\$@"
+done
+exec env KWIN_COMPOSE="$KWIN_COMPOSE_VAL" GALLIUM_THREAD=0 /usr/bin/kwin_wayland --wayland-display "${WAYLAND_DISPLAY:-wayland-0}" --socket wayland-1 --width "$WIDTH" --height "$HEIGHT" --scale "$SCALE" --no-lockscreen --xwayland "\$@"
+EOF
+  chmod 755 "$WRAP_DIR/kwin_wayland"
+
+  if [ -x /usr/bin/kwin_wayland_wrapper ]; then
+    cat > "$WRAP_DIR/kwin_wayland_wrapper" <<EOF
+#!/bin/bash
+exec /usr/bin/kwin_wayland_wrapper --wayland-display "${WAYLAND_DISPLAY:-wayland-0}" --socket wayland-1 --width "$WIDTH" --height "$HEIGHT" --scale "$SCALE" --no-lockscreen "\$@"
+EOF
+    chmod 755 "$WRAP_DIR/kwin_wayland_wrapper"
+  fi
+
+  export PATH="$WRAP_DIR:$PATH"
+  echo "== linuxdroid-desktop: starting KDE Plasma Wayland (${WIDTH}x${HEIGHT}, scale=${SCALE}, KWIN_COMPOSE=${KWIN_COMPOSE_VAL})"
+  start_x11_helpers ":0" ""
+  exec dbus-run-session -- startplasma-wayland
+fi
+
+run_xwayland_desktop() {
+  local session_cmd="$1"
+  local desktop_name="$2"
+  if ! command -v Xwayland >/dev/null 2>&1; then
+    echo "ERROR: Xwayland is required for $desktop_name but is not installed." >&2
+    exit 1
+  fi
+  local disp=":0"
+  rm -f /tmp/.X0-lock /tmp/.X11-unix/X0 2>/dev/null || true
+
+  echo "== linuxdroid-desktop: starting Xwayland $disp (${WIDTH}x${HEIGHT}) on ${WAYLAND_DISPLAY:-wayland-0} for $desktop_name"
+  WAYLAND_DISPLAY="${WAYLAND_DISPLAY:-wayland-0}" Xwayland "$disp" -noreset -fullscreen -geometry "${WIDTH}x${HEIGHT}" >/tmp/linuxdroid-xwayland.log 2>&1 &
+  local xw_pid=$!
+  trap 'kill "$xw_pid" 2>/dev/null || true' EXIT TERM INT
+
+  for _ in $(seq 1 80); do
+    [ -S /tmp/.X11-unix/X0 ] && break
+    kill -0 "$xw_pid" 2>/dev/null || break
+    sleep 0.05
+  done
+
+  export DISPLAY="$disp"
+  unset WAYLAND_DISPLAY
+  export XDG_SESSION_TYPE=x11
+  export GDK_BACKEND=x11
+  export QT_QPA_PLATFORM=xcb
+  export SDL_VIDEODRIVER=x11
+  export MOZ_ENABLE_WAYLAND=0
+
+  if [ "$SCALE" != "1" ] && [ "$SCALE" != "1.0" ] && command -v xrandr >/dev/null 2>&1; then
+    local dpi
+    dpi=$(python3 -c "print(int(round(96 * float('$SCALE'))))" 2>/dev/null || echo 96)
+    printf 'Xft.dpi: %s\n' "$dpi" | xrdb -merge 2>/dev/null || true
+    export GDK_SCALE=1
+    export QT_FONT_DPI="$dpi"
+  fi
+
+  start_x11_helpers "$disp" "x11-ime"
+  dbus-run-session -- $session_cmd
+  local rc=$?
+  kill "$xw_pid" 2>/dev/null || true
+  exit "$rc"
+}
+
+if [ "$desktop_choice" = "xfce" ]; then
+  export XDG_CURRENT_DESKTOP=XFCE
+  export XDG_SESSION_DESKTOP=xfce
+  export DESKTOP_SESSION=xfce
+  mkdir -p "$HOME/.config/xfce4/xfconf/xfce-perchannel-xml"
+  if [ ! -f "$HOME/.config/xfce4/xfconf/xfce-perchannel-xml/xfwm4.xml" ]; then
+    cat > "$HOME/.config/xfce4/xfconf/xfce-perchannel-xml/xfwm4.xml" <<'XFWM'
+<?xml version="1.0" encoding="UTF-8"?>
+<channel name="xfwm4" version="1.0">
+  <property name="general" type="empty">
+    <property name="use_compositing" type="bool" value="false"/>
+    <property name="vblank_mode" type="string" value="off"/>
+  </property>
+</channel>
+XFWM
+  fi
+  run_xwayland_desktop "startxfce4" "XFCE4"
+elif [ "$desktop_choice" = "lxqt" ]; then
+  export XDG_CURRENT_DESKTOP=LXQt
+  run_xwayland_desktop "startlxqt" "LXQt"
+else
+  for candidate in mate-session lxsession openbox-session xterm; do
+    if command -v "$candidate" >/dev/null 2>&1; then
+      run_xwayland_desktop "$candidate" "$candidate"
+    fi
+  done
+  if command -v weston >/dev/null 2>&1; then
+    exec weston --backend=wayland-backend.so --width="$WIDTH" --height="$HEIGHT"
+  fi
+  echo "No supported desktop session found in rootfs; keeping shell alive."
+  exec sleep infinity
+fi

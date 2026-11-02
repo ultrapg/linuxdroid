@@ -1,0 +1,5 @@
+<resources>
+    <string name="app_name">LinuxDroid</string>
+    <string name="notification_channel_session">Linux Desktop Session</string>
+    <string name="notification_channel_install">Desktop Rootfs Installer</string>
+</resources>

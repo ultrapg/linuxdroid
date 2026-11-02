@@ -1,0 +1,104 @@
+#!/bin/bash
+set -euo pipefail
+
+install_fex_rootfs() {
+  echo "==> Fetching FEX-Emu Ubuntu 24.04 x86_64 RootFS..."
+  /usr/local/bin/linuxdroid-fex fetch-rootfs
+}
+
+install_vscodium() {
+  echo "==> Installing VSCodium (ARM64)..."
+  sudo sh -c '
+    curl -fsSL https://gitlab.com/paulcarroty/vscodium-deb-rpm-repo/raw/master/pub.gpg \
+      | gpg --dearmor > /usr/share/keyrings/vscodium-archive-keyring.gpg
+    echo "deb [ signed-by=/usr/share/keyrings/vscodium-archive-keyring.gpg ] https://download.vscodium.com/debs vscodium main" \
+      > /etc/apt/sources.list.d/vscodium.list
+    apt-get update && apt-get install -y codium
+  '
+}
+
+install_vscode() {
+  echo "==> Installing Visual Studio Code (ARM64)..."
+  sudo sh -c '
+    curl -fsSL https://packages.microsoft.com/keys/microsoft.asc \
+      | gpg --dearmor > /usr/share/keyrings/packages.microsoft.gpg
+    echo "deb [arch=arm64 signed-by=/usr/share/keyrings/packages.microsoft.gpg] https://packages.microsoft.com/repos/code stable main" \
+      > /etc/apt/sources.list.d/vscode.list
+    apt-get update && apt-get install -y code
+  '
+}
+
+install_libreoffice() {
+  echo "==> Installing LibreOffice Workstation Suite..."
+  sudo apt-get update && sudo apt-get install -y libreoffice
+}
+
+install_gimp() {
+  echo "==> Installing GIMP Image Editor..."
+  sudo apt-get update && sudo apt-get install -y gimp
+}
+
+install_dev_tools() {
+  echo "==> Installing C/C++, CMake, Git & Python Build Toolchain..."
+  sudo apt-get update && sudo apt-get install -y build-essential cmake ninja-build pkg-config gdb python3-pip python3-venv nodejs npm
+}
+
+run_action() {
+  case "${1:-}" in
+    fex-rootfs) install_fex_rootfs ;;
+    vscode) install_vscode ;;
+    vscodium) install_vscodium ;;
+    libreoffice) install_libreoffice ;;
+    gimp) install_gimp ;;
+    devtools) install_dev_tools ;;
+    *)
+      echo "Usage: linuxdroid-apps [fex-rootfs | vscode | vscodium | libreoffice | gimp | devtools]"
+      return 1
+      ;;
+  esac
+}
+
+if [ $# -gt 0 ]; then
+  run_action "$1"
+  exit 0
+fi
+
+if [ -n "${DISPLAY:-}${WAYLAND_DISPLAY:-}" ]; then
+  if command -v kdialog >/dev/null 2>&1; then
+    choice=$(kdialog --title "LinuxDroid Workstation Apps" --menu "Select workstation component to install:" \
+      "fex-rootfs" "FEX-Emu Ubuntu 24.04 x86_64 RootFS (Run x86_64 Linux apps)" \
+      "vscode" "Visual Studio Code (Official ARM64)" \
+      "vscodium" "VSCodium (Open-Source ARM64)" \
+      "libreoffice" "LibreOffice Suite (Writer, Calc, Impress)" \
+      "gimp" "GIMP Image Editor" \
+      "devtools" "Developer C/C++, Node.js & Python Toolchain" 2>/dev/null || true)
+  elif command -v zenity >/dev/null 2>&1; then
+    choice=$(zenity --list --title="LinuxDroid Workstation Apps" --width=560 --height=360 \
+      --column="ID" --column="Package" \
+      "fex-rootfs" "FEX-Emu Ubuntu 24.04 x86_64 RootFS (Run x86_64 Linux apps)" \
+      "vscode" "Visual Studio Code (Official ARM64)" \
+      "vscodium" "VSCodium (Open-Source ARM64)" \
+      "libreoffice" "LibreOffice Suite (Writer, Calc, Impress)" \
+      "gimp" "GIMP Image Editor" \
+      "devtools" "Developer C/C++, Node.js & Python Toolchain" 2>/dev/null || true)
+  else
+    choice=""
+  fi
+  if [ -n "${choice:-}" ]; then
+    for term in konsole xfce4-terminal xterm; do
+      if command -v "$term" >/dev/null 2>&1; then
+        exec "$term" -e bash -lc "/usr/local/bin/linuxdroid-apps '$choice'; echo; read -rp 'Done. Press Enter to close...'"
+      fi
+    done
+    run_action "$choice"
+    exit 0
+  fi
+fi
+
+echo "LinuxDroid Workstation Installer"
+echo "  linuxdroid-apps fex-rootfs   - Fetch FEX-Emu x86_64 RootFS"
+echo "  linuxdroid-apps vscode       - Install VS Code (ARM64)"
+echo "  linuxdroid-apps vscodium     - Install VSCodium (ARM64)"
+echo "  linuxdroid-apps libreoffice  - Install LibreOffice"
+echo "  linuxdroid-apps gimp         - Install GIMP"
+echo "  linuxdroid-apps devtools     - Install C/C++, Node.js & Python build tools"

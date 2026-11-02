@@ -1,0 +1,416 @@
+#!/usr/bin/env python3
+import ipaddress
+import json
+import os
+from pathlib import Path
+import socket
+import struct
+import sys
+import time
+from xml.sax.saxutils import escape
+
+try:
+    import gi
+    gi.require_version("Gio", "2.0")
+    from gi.repository import Gio, GLib
+except Exception:
+    sys.exit(0)
+
+PROPERTIES = "org.freedesktop.DBus.Properties"
+OBJECT_MANAGER = "org.freedesktop.DBus.ObjectManager"
+
+UPOWER_NAME = "org.freedesktop.UPower"
+UPOWER_ROOT = "/org/freedesktop/UPower"
+UPOWER_DISPLAY = "/org/freedesktop/UPower/devices/DisplayDevice"
+UPOWER_BAT = "/org/freedesktop/UPower/devices/battery_BAT1"
+UPOWER_DEV_IFACE = "org.freedesktop.UPower.Device"
+SYSFS_BAT = Path("/sys/class/power_supply/BAT1")
+
+NM_NAME = "org.freedesktop.NetworkManager"
+NM_ROOT = "/org/freedesktop/NetworkManager"
+NM_SETTINGS = NM_ROOT + "/Settings"
+NM_ACTIVE = NM_ROOT + "/ActiveConnection/1"
+NM_IP4 = NM_ROOT + "/IP4Config/1"
+NM_IP6 = NM_ROOT + "/IP6Config/1"
+NM_AP = NM_ROOT + "/AccessPoint/1"
+NM_PROFILE = NM_SETTINGS + "/1"
+NM_UUID = "9a4f31e2-61a0-48d8-b4c5-5d91746c6e78"
+NET_SNAPSHOT = Path("/etc/linuxdroid-network.json")
+
+LOGIN_NAME = "org.freedesktop.login1"
+LOGIN_ROOT = "/org/freedesktop/login1"
+LOGIN_IFACE = "org.freedesktop.login1.Manager"
+
+
+def v(sig, val):
+    return GLib.Variant(sig, val)
+
+
+def read_sysfs_str(name, default=""):
+    try:
+        return (SYSFS_BAT / name).read_text(encoding="utf-8").strip()
+    except OSError:
+        return default
+
+
+def read_sysfs_int(name, default=0):
+    try:
+        return int(read_sysfs_str(name, str(default)))
+    except ValueError:
+        return default
+
+
+def battery_props():
+    pct = float(max(0, min(100, read_sysfs_int("capacity", 85))))
+    status_str = read_sysfs_str("status", "Discharging")
+    state_map = {"Charging": 1, "Discharging": 2, "Empty": 3, "Full": 4, "Not charging": 5}
+    state = state_map.get(status_str, 2)
+    charging = state in (1, 4)
+    if pct >= 90:
+        lvl = "full"
+    elif pct >= 60:
+        lvl = "good"
+    elif pct >= 30:
+        lvl = "low"
+    elif pct >= 10:
+        lvl = "caution"
+    else:
+        lvl = "empty"
+    icon = f"battery-{lvl}{'-charging' if state == 1 else ''}-symbolic"
+    energy_now = read_sysfs_int("energy_now", 0) / 1_000_000.0
+    energy_full = max(energy_now, read_sysfs_int("energy_full", 15_000_000) / 1_000_000.0)
+    power_now = read_sysfs_int("power_now", 0) / 1_000_000.0
+    voltage = read_sysfs_int("voltage_now", 3_850_000) / 1_000_000.0
+    tte = int(read_sysfs_int("time_to_empty_now", 0))
+    ttf = int(read_sysfs_int("time_to_full_now", 0))
+    warn = 4 if (not charging and pct <= 5) else (3 if (not charging and pct <= 15) else 1)
+    return {
+        "NativePath": v("s", "BAT1"),
+        "Vendor": v("s", read_sysfs_str("manufacturer", "Android")),
+        "Model": v("s", read_sysfs_str("model_name", "Battery")),
+        "Serial": v("s", ""),
+        "UpdateTime": v("t", int(time.time())),
+        "Type": v("u", 2),
+        "PowerSupply": v("b", True),
+        "HasHistory": v("b", False),
+        "HasStatistics": v("b", False),
+        "Online": v("b", charging),
+        "Energy": v("d", energy_now),
+        "EnergyEmpty": v("d", 0.0),
+        "EnergyFull": v("d", energy_full),
+        "EnergyFullDesign": v("d", energy_full),
+        "EnergyRate": v("d", power_now),
+        "Voltage": v("d", voltage),
+        "ChargeCycles": v("i", -1),
+        "Luminosity": v("d", 0.0),
+        "TimeToEmpty": v("x", tte),
+        "TimeToFull": v("x", ttf),
+        "Percentage": v("d", pct),
+        "Temperature": v("d", read_sysfs_int("temp", 280) / 10.0),
+        "IsPresent": v("b", True),
+        "State": v("u", state),
+        "IsRechargeable": v("b", True),
+        "Capacity": v("d", 100.0),
+        "Technology": v("u", 1),
+        "WarningLevel": v("u", warn),
+        "BatteryLevel": v("u", 1),
+        "IconName": v("s", icon),
+    }, not charging
+
+
+UPOWER_XML = """
+<node>
+  <interface name="org.freedesktop.UPower">
+    <method name="EnumerateDevices"><arg type="ao" direction="out"/></method>
+    <method name="GetDisplayDevice"><arg type="o" direction="out"/></method>
+    <method name="GetCriticalAction"><arg type="s" direction="out"/></method>
+    <property name="DaemonVersion" type="s" access="read"/>
+    <property name="OnBattery" type="b" access="read"/>
+    <property name="LidIsClosed" type="b" access="read"/>
+    <property name="LidIsPresent" type="b" access="read"/>
+  </interface>
+</node>
+"""
+
+LOGIN_XML = """
+<node>
+  <interface name="org.freedesktop.login1.Manager">
+    <method name="CanSuspend"><arg type="s" direction="out"/></method>
+    <method name="CanPowerOff"><arg type="s" direction="out"/></method>
+    <method name="CanReboot"><arg type="s" direction="out"/></method>
+    <property name="PreparingForSleep" type="b" access="read"/>
+    <property name="Docked" type="b" access="read"/>
+  </interface>
+</node>
+"""
+
+
+class UPowerService:
+    def __init__(self, bus):
+        self.bus = bus
+        self.props, self.on_battery = battery_props()
+        root_iface = Gio.DBusNodeInfo.new_for_xml(UPOWER_XML).interfaces[0]
+        dev_xml = "<node><interface name='org.freedesktop.UPower.Device'><method name='Refresh'/>" + "".join(
+            f"<property name='{escape(k)}' type='{val.get_type_string()}' access='read'/>"
+            for k, val in self.props.items()
+        ) + "</interface></node>"
+        dev_iface = Gio.DBusNodeInfo.new_for_xml(dev_xml).interfaces[0]
+        bus.register_object(UPOWER_ROOT, root_iface, self.on_call, self.on_root_prop, None)
+        bus.register_object(UPOWER_DISPLAY, dev_iface, self.on_dev_call, self.on_dev_prop, None)
+        bus.register_object(UPOWER_BAT, dev_iface, self.on_dev_call, self.on_dev_prop, None)
+        GLib.timeout_add_seconds(5, self.poll)
+
+    def on_root_prop(self, bus, sender, path, iface, name):
+        return {
+            "DaemonVersion": v("s", "1.90.2"),
+            "OnBattery": v("b", self.on_battery),
+            "LidIsClosed": v("b", False),
+            "LidIsPresent": v("b", False),
+        }.get(name)
+
+    def on_dev_prop(self, bus, sender, path, iface, name):
+        return self.props.get(name)
+
+    def on_call(self, bus, sender, path, iface, method, args, inv):
+        if method == "EnumerateDevices":
+            inv.return_value(v("(ao)", ([UPOWER_BAT],)))
+        elif method == "GetDisplayDevice":
+            inv.return_value(v("(o)", (UPOWER_DISPLAY,)))
+        elif method == "GetCriticalAction":
+            inv.return_value(v("(s)", ("Ignore",)))
+        else:
+            inv.return_dbus_error(UPOWER_NAME + ".NotSupported", "Not supported")
+
+    def on_dev_call(self, bus, sender, path, iface, method, args, inv):
+        if method == "Refresh":
+            self.poll()
+            inv.return_value(v("()", ()))
+        else:
+            inv.return_dbus_error(UPOWER_DEV_IFACE + ".NotSupported", "Not supported")
+
+    def poll(self):
+        new_props, new_on_bat = battery_props()
+        changed = {k: val for k, val in new_props.items() if k != "UpdateTime" and val != self.props.get(k)}
+        bat_changed = new_on_bat != self.on_battery
+        self.props, self.on_battery = new_props, new_on_bat
+        if changed:
+            changed["UpdateTime"] = new_props["UpdateTime"]
+            for p in (UPOWER_DISPLAY, UPOWER_BAT):
+                self.bus.emit_signal(None, p, PROPERTIES, "PropertiesChanged", v("(sa{sv}as)", (UPOWER_DEV_IFACE, changed, [])))
+        if bat_changed:
+            self.bus.emit_signal(None, UPOWER_ROOT, PROPERTIES, "PropertiesChanged",
+                                 v("(sa{sv}as)", (UPOWER_NAME, {"OnBattery": v("b", self.on_battery)}, [])))
+        return True
+
+
+class LoginService:
+    def __init__(self, bus):
+        iface = Gio.DBusNodeInfo.new_for_xml(LOGIN_XML).interfaces[0]
+        bus.register_object(LOGIN_ROOT, iface, self.on_call, self.on_prop, None)
+
+    def on_prop(self, bus, sender, path, iface, name):
+        if name == "PreparingForSleep":
+            return v("b", False)
+        if name == "Docked":
+            return v("b", os.environ.get("LINUXDROID_DOCKED") == "1")
+        return None
+
+    def on_call(self, bus, sender, path, iface, method, args, inv):
+        if method in ("CanSuspend", "CanPowerOff", "CanReboot"):
+            inv.return_value(v("(s)", ("no",)))
+        else:
+            inv.return_dbus_error(LOGIN_NAME + ".NotSupported", "Manage power in Android")
+
+
+NM_METHODS = {
+    OBJECT_MANAGER: """
+      <method name="GetManagedObjects"><arg type="a{oa{sa{sv}}}" direction="out"/></method>
+      <signal name="InterfacesAdded"><arg type="o"/><arg type="a{sa{sv}}"/></signal>
+      <signal name="InterfacesRemoved"><arg type="o"/><arg type="as"/></signal>""",
+    NM_NAME: """
+      <method name="GetPermissions"><arg type="a{ss}" direction="out"/></method>
+      <method name="CheckConnectivity"><arg type="u" direction="out"/></method>
+      <method name="GetDevices"><arg type="ao" direction="out"/></method>
+      <method name="GetAllDevices"><arg type="ao" direction="out"/></method>
+      <signal name="StateChanged"><arg type="u"/></signal>""",
+    NM_NAME + ".Settings": '<method name="ListConnections"><arg type="ao" direction="out"/></method>',
+    NM_NAME + ".Settings.Connection": '<method name="GetSettings"><arg type="a{sa{sv}}" direction="out"/></method>',
+    NM_NAME + ".Device.Wireless": """
+      <method name="GetAccessPoints"><arg type="ao" direction="out"/></method>
+      <method name="GetAllAccessPoints"><arg type="ao" direction="out"/></method>
+      <method name="RequestScan"><arg type="a{sv}" direction="in"/></method>""",
+}
+
+
+def read_net_state():
+    try:
+        data = json.loads(NET_SNAPSHOT.read_text(encoding="utf-8"))
+        if isinstance(data, dict) and isinstance(data.get("connected"), bool):
+            return data
+    except Exception:
+        pass
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
+            s.connect(("192.0.2.1", 9))
+            ip = s.getsockname()[0]
+        return {"connected": True, "validated": True, "transport": "wifi", "ssid": "Android Network",
+                "strength": 85, "addresses": [{"address": ip, "prefix": 24}]}
+    except OSError:
+        return {"connected": False, "transport": "none"}
+
+
+def build_nm_objects(state):
+    up = bool(state.get("connected"))
+    transport = state.get("transport", "wifi" if up else "none")
+    wifi = transport == "wifi"
+    dev = NM_ROOT + "/Devices/" + ("Wifi" if wifi else "Ethernet")
+    kind = "802-11-wireless" if wifi else "802-3-ethernet"
+    conn_name = state.get("ssid") or ("Wi-Fi" if wifi else "Android Network")
+    v4 = [a for a in state.get("addresses", []) if ipaddress.ip_address(a["address"]).version == 4]
+    dev_state = 100 if up else 30
+    objs = {
+        NM_ROOT: {NM_NAME: {
+            "Devices": v("ao", [dev]), "AllDevices": v("ao", [dev]),
+            "ActiveConnections": v("ao", [NM_ACTIVE] if up else []),
+            "PrimaryConnection": v("o", NM_ACTIVE if up else "/"),
+            "PrimaryConnectionType": v("s", kind if up else ""),
+            "ActivatingConnection": v("o", "/"),
+            "NetworkingEnabled": v("b", True),
+            "WirelessEnabled": v("b", wifi), "WirelessHardwareEnabled": v("b", True),
+            "Startup": v("b", False), "Version": v("s", "1.46.0"),
+            "State": v("u", 70 if up else 20), "Connectivity": v("u", 4 if up else 1),
+            "Metered": v("u", 2),
+        }},
+        NM_SETTINGS: {NM_NAME + ".Settings": {
+            "Connections": v("ao", [NM_PROFILE]), "Hostname": v("s", socket.gethostname()), "CanModify": v("b", False),
+        }},
+        NM_PROFILE: {NM_NAME + ".Settings.Connection": {"Unsaved": v("b", True), "Flags": v("u", 0), "Filename": v("s", "")}},
+        dev: {NM_NAME + ".Device": {
+            "Interface": v("s", state.get("interface", "wlan0")),
+            "IpInterface": v("s", state.get("interface", "wlan0") if up else ""),
+            "Driver": v("s", "android"), "DeviceType": v("u", 2 if wifi else 1),
+            "State": v("u", dev_state), "StateReason": v("(uu)", (dev_state, 0)),
+            "ActiveConnection": v("o", NM_ACTIVE if up else "/"),
+            "Ip4Config": v("o", NM_IP4 if (up and v4) else "/"), "Ip6Config": v("o", "/"),
+            "AvailableConnections": v("ao", [NM_PROFILE]), "Managed": v("b", True), "Real": v("b", True),
+            "Mtu": v("u", int(state.get("mtu", 1500))),
+        }},
+    }
+    if wifi:
+        objs[dev][NM_NAME + ".Device.Wireless"] = {
+            "Mode": v("u", 2), "Bitrate": v("u", int(state.get("bitrate", 0))),
+            "AccessPoints": v("ao", [NM_AP] if up else []),
+            "ActiveAccessPoint": v("o", NM_AP if up else "/"),
+        }
+        if up:
+            objs[NM_AP] = {NM_NAME + ".AccessPoint": {
+                "Flags": v("u", 1), "WpaFlags": v("u", 0), "RsnFlags": v("u", 0x188),
+                "Ssid": v("ay", list(conn_name.encode("utf-8"))),
+                "Frequency": v("u", int(state.get("frequency", 5180))),
+                "Mode": v("u", 2), "Strength": v("y", max(0, min(100, int(state.get("strength", 85))))),
+            }}
+    if up:
+        objs[NM_ACTIVE] = {NM_NAME + ".Connection.Active": {
+            "Connection": v("o", NM_PROFILE), "SpecificObject": v("o", NM_AP if wifi else "/"),
+            "Id": v("s", conn_name), "Uuid": v("s", NM_UUID), "Type": v("s", kind),
+            "Devices": v("ao", [dev]), "State": v("u", 2), "Default": v("b", True), "Default6": v("b", False),
+            "Ip4Config": v("o", NM_IP4 if v4 else "/"), "Ip6Config": v("o", "/"), "Vpn": v("b", False),
+        }}
+        if v4:
+            native = lambda ip: struct.unpack("=I", socket.inet_aton(ip))[0]
+            dns = [ip for ip in state.get("dns", []) if ":" not in ip]
+            objs[NM_IP4] = {NM_NAME + ".IP4Config": {
+                "AddressData": v("aa{sv}", [{"address": v("s", a["address"]), "prefix": v("u", int(a["prefix"]))} for a in v4]),
+                "Addresses": v("aau", [[native(a["address"]), int(a["prefix"]), 0] for a in v4]),
+                "Gateway": v("s", ""), "Nameservers": v("au", [native(ip) for ip in dns]),
+            }}
+    return objs, conn_name, kind
+
+
+def nm_iface_info(iface, props):
+    p_xml = "".join(f'<property name="{escape(k)}" type="{val.get_type_string()}" access="read"/>' for k, val in props.items())
+    return Gio.DBusNodeInfo.new_for_xml(f'<node><interface name="{iface}">{NM_METHODS.get(iface, "")}{p_xml}</interface></node>').interfaces[0]
+
+
+class NetworkService:
+    def __init__(self, bus):
+        self.bus = bus
+        self.raw = read_net_state()
+        self.objs, self.conn_name, self.kind = build_nm_objects(self.raw)
+        self.regs = {}
+        for p in ("/org/freedesktop", NM_ROOT):
+            bus.register_object(p, nm_iface_info(OBJECT_MANAGER, {}), self.on_call, None, None)
+        self.sync_regs()
+        GLib.timeout_add_seconds(3, self.poll)
+
+    def sync_regs(self):
+        wanted = {(p, i) for p, ifaces in self.objs.items() for i in ifaces}
+        for key in list(self.regs.keys() - wanted):
+            self.bus.unregister_object(self.regs.pop(key))
+        for p, i in wanted - self.regs.keys():
+            self.regs[(p, i)] = self.bus.register_object(p, nm_iface_info(i, self.objs[p][i]), self.on_call, self.on_prop, None)
+
+    def on_prop(self, bus, sender, path, iface, name):
+        return self.objs.get(path, {}).get(iface, {}).get(name)
+
+    def on_call(self, bus, sender, path, iface, method, args, inv):
+        if method == "GetManagedObjects":
+            inv.return_value(v("(a{oa{sa{sv}}})", (self.objs,)))
+        elif method == "GetPermissions":
+            inv.return_value(v("(a{ss})", ({},)))
+        elif method == "CheckConnectivity":
+            inv.return_value(v("(u)", (4 if self.raw.get("connected") else 1,)))
+        elif method == "ListConnections":
+            inv.return_value(v("(ao)", ([NM_PROFILE],)))
+        elif method == "GetSettings":
+            inv.return_value(v("(a{sa{sv}})", ({"connection": {
+                "id": v("s", self.conn_name), "uuid": v("s", NM_UUID), "type": v("s", self.kind),
+            }},)))
+        elif method in ("GetDevices", "GetAllDevices"):
+            inv.return_value(v("(ao)", (self.objs[NM_ROOT][NM_NAME]["Devices"].unpack(),)))
+        elif method in ("GetAccessPoints", "GetAllAccessPoints"):
+            aps = self.objs.get(path, {}).get(NM_NAME + ".Device.Wireless", {}).get("AccessPoints", v("ao", [])).unpack()
+            inv.return_value(v("(ao)", (aps,)))
+        elif method == "RequestScan":
+            inv.return_value(v("()", ()))
+        else:
+            inv.return_dbus_error(NM_NAME + ".NotSupported", "Manage network in Android settings")
+
+    def poll(self):
+        state = read_net_state()
+        if state == self.raw:
+            return True
+        self.raw = state
+        self.objs, self.conn_name, self.kind = build_nm_objects(state)
+        self.sync_regs()
+        self.bus.emit_signal(None, NM_ROOT, NM_NAME, "StateChanged", v("(u)", (70 if state.get("connected") else 20,)))
+        return True
+
+
+def main():
+    loop = GLib.MainLoop()
+    services = {}
+
+    def on_upower(bus, _):
+        services["upower"] = UPowerService(bus)
+
+    def on_login(bus, _):
+        services["login"] = LoginService(bus)
+
+    def on_nm(bus, _):
+        services["nm"] = NetworkService(bus)
+
+    owners = [
+        Gio.bus_own_name(Gio.BusType.SYSTEM, UPOWER_NAME, Gio.BusNameOwnerFlags.NONE, on_upower, None, lambda *_: None),
+        Gio.bus_own_name(Gio.BusType.SYSTEM, LOGIN_NAME, Gio.BusNameOwnerFlags.NONE, on_login, None, lambda *_: None),
+        Gio.bus_own_name(Gio.BusType.SYSTEM, NM_NAME, Gio.BusNameOwnerFlags.NONE, on_nm, None, lambda *_: None),
+    ]
+    try:
+        loop.run()
+    finally:
+        for oid in owners:
+            Gio.bus_unown_name(oid)
+
+
+if __name__ == "__main__":
+    main()

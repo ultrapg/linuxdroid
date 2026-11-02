@@ -1,0 +1,112 @@
+#!/usr/bin/env python3
+import hashlib
+import json
+import os
+from pathlib import Path
+import tempfile
+import xml.etree.ElementTree as ET
+
+KDE_OWNER = "http://www.kde.org"
+MARK = "LinuxDroidBookmark"
+ICON_NS = "http://www.freedesktop.org/standards/desktop-bookmarks"
+ET.register_namespace("bookmark", ICON_NS)
+
+
+def collect_places(home: Path):
+    places = []
+    android_root = home / "Android"
+    if android_root.exists() or Path("/sdcard").exists():
+        places.append((android_root, "Android Storage", "smartphone"))
+        for sub, title, icon in (
+            ("Download", "Android Downloads", "folder-download"),
+            ("Documents", "Android Documents", "folder-documents"),
+            ("Pictures", "Android Pictures", "folder-pictures"),
+            ("DCIM", "Android Camera", "camera-photo"),
+        ):
+            target = android_root / sub
+            if target.exists():
+                places.append((target, title, icon))
+
+    mounts_json = Path("/etc/linuxdroid/mounts.json")
+    if mounts_json.is_file():
+        try:
+            for item in json.loads(mounts_json.read_text(encoding="utf-8")):
+                p = Path(item.get("guestPath", ""))
+                label = item.get("label") or p.name
+                if p.is_absolute() and p.exists():
+                    places.append((p, label, "drive-removable-media"))
+        except Exception:
+            pass
+    return places
+
+
+def atomic_write(path: Path, content: str):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = None
+    try:
+        with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", dir=path.parent, delete=False) as f:
+            tmp = f.name
+            f.write(content)
+        os.replace(tmp, path)
+    finally:
+        if tmp and os.path.exists(tmp):
+            os.unlink(tmp)
+
+
+def update_gtk_bookmarks(config_dir: Path, places):
+    bm_file = config_dir / "gtk-3.0" / "bookmarks"
+    existing = bm_file.read_text(encoding="utf-8", errors="replace").splitlines() if bm_file.is_file() else []
+    managed_uris = {p.as_uri() for p, _, _ in places}
+    kept = [line for line in existing if line.strip() and line.strip().split(" ", 1)[0] not in managed_uris]
+    for p, label, _ in places:
+        kept.append(f"{p.as_uri()} {label}")
+    new_text = "\n".join(kept) + ("\n" if kept else "")
+    if not bm_file.is_file() or bm_file.read_text(encoding="utf-8", errors="replace") != new_text:
+        atomic_write(bm_file, new_text)
+
+
+def update_kde_places(data_dir: Path, places):
+    xbel = data_dir / "user-places.xbel"
+    if xbel.is_file():
+        root = ET.fromstring(xbel.read_bytes())
+        if root.tag != "xbel":
+            return
+    else:
+        root = ET.Element("xbel", {"version": "1.0"})
+
+    for bm in list(root.findall("bookmark")):
+        meta = bm.find(f"info/metadata[@owner='{KDE_OWNER}']")
+        if meta is not None and meta.find(MARK) is not None:
+            root.remove(bm)
+
+    existing_uris = {bm.get("href") for bm in root.findall("bookmark")}
+    for p, label, icon_name in places:
+        uri = p.as_uri()
+        if uri in existing_uris:
+            continue
+        bm = ET.SubElement(root, "bookmark", {"href": uri})
+        ET.SubElement(bm, "title").text = label
+        info = ET.SubElement(bm, "info")
+        icon_meta = ET.SubElement(info, "metadata", {"owner": "http://freedesktop.org"})
+        ET.SubElement(icon_meta, f"{{{ICON_NS}}}icon", {"name": icon_name})
+        kde_meta = ET.SubElement(info, "metadata", {"owner": KDE_OWNER})
+        ET.SubElement(kde_meta, "ID").text = "linuxdroid-" + hashlib.sha256(uri.encode()).hexdigest()[:12]
+        ET.SubElement(kde_meta, MARK).text = "true"
+        ET.SubElement(kde_meta, "isSystemItem").text = "false"
+
+    atomic_write(xbel, ET.tostring(root, encoding="unicode", xml_declaration=True))
+
+
+def main():
+    home = Path.home()
+    places = collect_places(home)
+    if not places:
+        return
+    config = Path(os.environ.get("XDG_CONFIG_HOME") or (home / ".config"))
+    data = Path(os.environ.get("XDG_DATA_HOME") or (home / ".local/share"))
+    update_gtk_bookmarks(config, places)
+    update_kde_places(data, places)
+
+
+if __name__ == "__main__":
+    main()

@@ -1,0 +1,12 @@
+pref("network.manage-offline-status", false);
+pref("browser.offline", false);
+pref("security.sandbox.content.level", 0);
+pref("media.cubeb.sandbox", false);
+pref("security.sandbox.socket.process.level", 0);
+pref("security.sandbox.utility.level", 0);
+pref("gfx.webrender.all", true);
+pref("layers.acceleration.force-enabled", true);
+pref("widget.use-xdg-desktop-portal.file-picker", 1);
+pref("browser.shell.checkDefaultBrowser", false);
+pref("datareporting.policy.dataSubmissionEnabled", false);
+pref("browser.aboutwelcome.enabled", false);

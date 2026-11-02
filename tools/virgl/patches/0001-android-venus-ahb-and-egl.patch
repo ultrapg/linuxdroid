@@ -1,0 +1,593 @@
+diff --git a/meson.build b/meson.build
+index 10be099..b1f824e 100644
+--- a/meson.build
++++ b/meson.build
+@@ -107,7 +107,7 @@ endif
+ 
+ with_drm_renderers = drm_renderers.length() > 0
+ 
+-libdrm_dep = dependency('libdrm', version : '>=2.4.50', required: with_drm_renderers or get_option('venus'))
++libdrm_dep = dependency('libdrm', version : '>=2.4.50', required: with_drm_renderers)
+ libdrm_amdgpu_dep = dependency('libdrm_amdgpu', version : '>=2.4.121', required: with_drm_amdgpu)
+ conf_data.set('ENABLE_DRM', libdrm_dep.found())
+ 
+@@ -160,6 +160,7 @@ endif
+ 
+ with_host_windows = host_machine.system() == 'windows'
+ with_host_darwin = host_machine.system() == 'darwin'
++with_host_android = host_machine.system() == 'android'
+ 
+ if thread_dep.found() and not with_host_windows
+   conf_data.set('HAVE_PTHREAD', 1)
+@@ -273,7 +274,7 @@ endif
+ 
+ if with_egl
+    if cc.has_header('epoxy/egl.h', dependencies: epoxy_dep) and epoxy_dep.get_variable(pkgconfig: 'epoxy_has_egl') == '1'
+-      if with_host_windows or with_host_darwin
++      if with_host_windows or with_host_darwin or with_host_android
+          have_egl = true
+       else
+          if libdrm_dep.found()
+@@ -327,7 +328,11 @@ if with_venus
+    if with_minigbm_allocation
+       gbm_dep = dependency('gbm')
+    endif
+-   venus_dep = dependency('vulkan')
++   if with_host_android
++      venus_dep = [dependency('vulkan'), cc.find_library('android')]
++   else
++      venus_dep = dependency('vulkan')
++   endif
+ 
+    conf_data.set('ENABLE_VENUS', 1)
+ 
+diff --git a/src/venus/vkr_allocator.c b/src/venus/vkr_allocator.c
+index fc27437..4925091 100644
+--- a/src/venus/vkr_allocator.c
++++ b/src/venus/vkr_allocator.c
+@@ -199,10 +199,30 @@ vkr_allocator_init(void)
+          .pQueuePriorities = &priority
+       };
+ 
++      const char *dev_exts[1] = { "VK_KHR_external_memory_fd" };
++      uint32_t ext_cnt = 0;
++      VkExtensionProperties *ep = NULL;
++      vkEnumerateDeviceExtensionProperties(physical_dev_handle, NULL, &ext_cnt, NULL);
++      if (ext_cnt > 0) {
++         ep = calloc(ext_cnt, sizeof(*ep));
++         if (ep)
++            vkEnumerateDeviceExtensionProperties(physical_dev_handle, NULL, &ext_cnt, ep);
++      }
++      bool has_ext_mem_fd = false;
++      for (uint32_t k = 0; ep && k < ext_cnt; k++) {
++         if (strcmp(ep[k].extensionName, "VK_KHR_external_memory_fd") == 0) {
++            has_ext_mem_fd = true;
++            break;
++         }
++      }
++      free(ep);
++
+       VkDeviceCreateInfo dev_info = {
+          .sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO,
+          .queueCreateInfoCount = 1,
+          .pQueueCreateInfos = &queue_info,
++         .enabledExtensionCount = has_ext_mem_fd ? 1 : 0,
++         .ppEnabledExtensionNames = has_ext_mem_fd ? dev_exts : NULL,
+       };
+ 
+       res =
+diff --git a/src/venus/vkr_device.c b/src/venus/vkr_device.c
+index cd62fe8..c572a96 100644
+--- a/src/venus/vkr_device.c
++++ b/src/venus/vkr_device.c
+@@ -128,6 +128,8 @@ vkr_dispatch_vkCreateDevice(struct vn_dispatch_context *dispatch,
+    uint32_t ext_count = args->pCreateInfo->enabledExtensionCount;
+    ext_count += physical_dev->KHR_external_memory_fd;
+    ext_count += physical_dev->EXT_external_memory_dma_buf;
++   ext_count += physical_dev->ANDROID_external_memory_android_hardware_buffer;
++   ext_count += physical_dev->EXT_queue_family_foreign;
+    ext_count += physical_dev->KHR_external_fence_fd;
+    if (ext_count > args->pCreateInfo->enabledExtensionCount) {
+       exts = malloc(sizeof(*exts) * ext_count);
+@@ -143,6 +145,10 @@ vkr_dispatch_vkCreateDevice(struct vn_dispatch_context *dispatch,
+          exts[ext_count++] = "VK_KHR_external_memory_fd";
+       if (physical_dev->EXT_external_memory_dma_buf)
+          exts[ext_count++] = "VK_EXT_external_memory_dma_buf";
++      if (physical_dev->ANDROID_external_memory_android_hardware_buffer)
++         exts[ext_count++] = "VK_ANDROID_external_memory_android_hardware_buffer";
++      if (physical_dev->EXT_queue_family_foreign)
++         exts[ext_count++] = "VK_EXT_queue_family_foreign";
+       if (physical_dev->KHR_external_fence_fd)
+          exts[ext_count++] = "VK_KHR_external_fence_fd";
+ 
+diff --git a/src/venus/vkr_device_memory.c b/src/venus/vkr_device_memory.c
+index 03f84b6..e00ef31 100644
+--- a/src/venus/vkr_device_memory.c
++++ b/src/venus/vkr_device_memory.c
+@@ -52,6 +52,16 @@ vkr_get_fd_info_from_resource_info(struct vkr_context *ctx,
+ #include <linux/udmabuf.h>
+ #include <sys/ioctl.h>
+ #include <sys/mman.h>
++#ifndef HAVE_MEMFD_CREATE
++#include <sys/syscall.h>
++#include <unistd.h>
++static inline int
++vkr_memfd_create_compat(const char *name, unsigned int flags)
++{
++   return (int)syscall(__NR_memfd_create, name, flags);
++}
++#define memfd_create vkr_memfd_create_compat
++#endif
+ 
+ static VkResult
+ vkr_udmabuf_get_fd_info_from_allocation_info(struct vkr_physical_device *physical_dev,
+@@ -227,6 +237,163 @@ vkr_gbm_get_fd_info_from_allocation_info(UNUSED struct vkr_physical_device *phys
+ 
+ #endif /* ENABLE_MINIGBM_ALLOCATION */
+ 
++#ifdef __ANDROID__
++#include <android/hardware_buffer.h>
++#include <dlfcn.h>
++#include <unistd.h>
++#include <vulkan/vulkan_android.h>
++
++struct vkr_android_native_handle {
++   int version;
++   int numFds;
++   int numInts;
++   int data[];
++};
++
++typedef const void *(*pfn_ahb_get_native_handle)(const AHardwareBuffer *);
++
++static pfn_ahb_get_native_handle
++vkr_get_ahb_native_handle_fn(void)
++{
++   static pfn_ahb_get_native_handle fn = NULL;
++   static bool initialized = false;
++   if (!initialized) {
++      void *nw = dlopen("libnativewindow.so", RTLD_NOW | RTLD_NOLOAD);
++      if (!nw)
++         nw = dlopen("libnativewindow.so", RTLD_NOW);
++      if (nw) {
++         void *sym = dlsym(nw, "AHardwareBuffer_getNativeHandle");
++         if (sym)
++            memcpy(&fn, &sym, sizeof(fn));
++      }
++      initialized = true;
++   }
++   return fn;
++}
++
++static inline void
++vkr_ahb_release(struct AHardwareBuffer *ahb)
++{
++   if (ahb)
++      AHardwareBuffer_release(ahb);
++}
++
++static int
++vkr_ahb_export_dmabuf_fd(struct AHardwareBuffer *ahb, uint64_t min_size)
++{
++   pfn_ahb_get_native_handle get_nh = vkr_get_ahb_native_handle_fn();
++   if (!get_nh || !ahb)
++      return -1;
++   const struct vkr_android_native_handle *nh =
++      (const struct vkr_android_native_handle *)get_nh(ahb);
++   if (!nh || nh->numFds < 1)
++      return -1;
++   int best_fd = -1;
++   for (int i = 0; i < nh->numFds; i++) {
++      int candidate = nh->data[i];
++      if (candidate < 0)
++         continue;
++      off_t sz = lseek(candidate, 0, SEEK_END);
++      if (sz >= 0 && (uint64_t)sz >= min_size) {
++         best_fd = candidate;
++         break;
++      }
++      if (best_fd < 0)
++         best_fd = candidate;
++   }
++   return best_fd >= 0 ? os_dupfd_cloexec(best_fd) : -1;
++}
++
++static VkResult
++vkr_ahb_prepare_allocation(struct vkr_device *dev,
++                           struct vkr_physical_device *physical_dev,
++                           VkMemoryAllocateInfo *alloc_info,
++                           uint32_t req_prop_flags,
++                           struct AHardwareBuffer **out_ahb,
++                           VkImportAndroidHardwareBufferInfoANDROID *out_import)
++{
++   const VkMemoryDedicatedAllocateInfo *dedicated =
++      vkr_find_struct(alloc_info->pNext, VK_STRUCTURE_TYPE_MEMORY_DEDICATED_ALLOCATE_INFO);
++   if (dedicated && dedicated->image != VK_NULL_HANDLE)
++      return VK_ERROR_FEATURE_NOT_PRESENT;
++
++   const uint64_t aligned_size = align(alloc_info->allocationSize, 4096);
++   if (aligned_size == 0 || aligned_size > UINT32_MAX)
++      return VK_ERROR_OUT_OF_DEVICE_MEMORY;
++
++   AHardwareBuffer *ahb = NULL;
++   AHardwareBuffer_Desc desc = {
++      .width = (uint32_t)aligned_size,
++      .height = 1,
++      .layers = 1,
++      .format = AHARDWAREBUFFER_FORMAT_BLOB,
++      .usage = AHARDWAREBUFFER_USAGE_GPU_DATA_BUFFER |
++               AHARDWAREBUFFER_USAGE_CPU_READ_OFTEN |
++               AHARDWAREBUFFER_USAGE_CPU_WRITE_OFTEN,
++   };
++   if (AHardwareBuffer_allocate(&desc, &ahb) != 0 || !ahb) {
++      desc.usage = AHARDWAREBUFFER_USAGE_CPU_READ_OFTEN |
++                   AHARDWAREBUFFER_USAGE_CPU_WRITE_OFTEN |
++                   AHARDWAREBUFFER_USAGE_GPU_SAMPLED_IMAGE;
++      if (AHardwareBuffer_allocate(&desc, &ahb) != 0 || !ahb)
++         return VK_ERROR_OUT_OF_DEVICE_MEMORY;
++   }
++
++   PFN_vkGetAndroidHardwareBufferPropertiesANDROID get_props =
++      (PFN_vkGetAndroidHardwareBufferPropertiesANDROID)vkGetDeviceProcAddr(
++         dev->base.handle.device, "vkGetAndroidHardwareBufferPropertiesANDROID");
++   if (!get_props) {
++      AHardwareBuffer_release(ahb);
++      return VK_ERROR_EXTENSION_NOT_PRESENT;
++   }
++
++   VkAndroidHardwareBufferPropertiesANDROID ahb_props = {
++      .sType = VK_STRUCTURE_TYPE_ANDROID_HARDWARE_BUFFER_PROPERTIES_ANDROID,
++   };
++   VkResult res = get_props(dev->base.handle.device, ahb, &ahb_props);
++   if (res != VK_SUCCESS || ahb_props.memoryTypeBits == 0) {
++      AHardwareBuffer_release(ahb);
++      return res != VK_SUCCESS ? res : VK_ERROR_INVALID_EXTERNAL_HANDLE;
++   }
++
++   if (!((1u << alloc_info->memoryTypeIndex) & ahb_props.memoryTypeBits)) {
++      int chosen = -1;
++      for (uint32_t i = 0; i < physical_dev->memory_properties.memoryTypeCount; i++) {
++         if (!((1u << i) & ahb_props.memoryTypeBits))
++            continue;
++         uint32_t flags = physical_dev->memory_properties.memoryTypes[i].propertyFlags;
++         if ((flags & req_prop_flags) == req_prop_flags) {
++            chosen = (int)i;
++            break;
++         }
++         if (chosen < 0 && (flags & VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT))
++            chosen = (int)i;
++      }
++      if (chosen < 0)
++         chosen = ffs((int)ahb_props.memoryTypeBits) - 1;
++      alloc_info->memoryTypeIndex = (uint32_t)chosen;
++   }
++
++   if (dedicated && dedicated->buffer != VK_NULL_HANDLE &&
++       ahb_props.allocationSize != alloc_info->allocationSize) {
++      VkBaseInStructure *prev_ded = vkr_find_prev_struct(
++         alloc_info, VK_STRUCTURE_TYPE_MEMORY_DEDICATED_ALLOCATE_INFO);
++      if (prev_ded)
++         prev_ded->pNext = ((const VkBaseInStructure *)dedicated)->pNext;
++   }
++
++   alloc_info->allocationSize = ahb_props.allocationSize;
++   *out_import = (VkImportAndroidHardwareBufferInfoANDROID){
++      .sType = VK_STRUCTURE_TYPE_IMPORT_ANDROID_HARDWARE_BUFFER_INFO_ANDROID,
++      .pNext = alloc_info->pNext,
++      .buffer = ahb,
++   };
++   alloc_info->pNext = out_import;
++   *out_ahb = ahb;
++   return VK_SUCCESS;
++}
++#endif /* __ANDROID__ */
++
+ static void
+ vkr_dispatch_vkAllocateMemory(struct vn_dispatch_context *dispatch,
+                               struct vn_command_vkAllocateMemory *args)
+@@ -274,6 +441,10 @@ vkr_dispatch_vkAllocateMemory(struct vn_dispatch_context *dispatch,
+    uint32_t valid_fd_types = 0;
+    int udmabuf_fd = -1;
+    void *gbm_bo = NULL;
++   struct AHardwareBuffer *ahb = NULL;
++#ifdef __ANDROID__
++   VkImportAndroidHardwareBufferInfoANDROID local_ahb_import;
++#endif
+    VkExportMemoryAllocateInfo local_export_info;
+    VkExportMemoryAllocateInfo *export_info =
+       vkr_find_struct(alloc_info->pNext, VK_STRUCTURE_TYPE_EXPORT_MEMORY_ALLOCATE_INFO);
+@@ -287,6 +458,26 @@ vkr_dispatch_vkAllocateMemory(struct vn_dispatch_context *dispatch,
+          !export_info ||
+          !(export_info->handleTypes & VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT);
+       const bool force_udmabuf_import = physical_dev->udmabuf_dev_fd >= 0;
++#ifdef __ANDROID__
++      if (!force_udmabuf_import && !physical_dev->is_dma_buf_fd_export_supported &&
++          physical_dev->ANDROID_external_memory_android_hardware_buffer) {
++         if (export_info) {
++            VkBaseInStructure *prev_of_export_info = vkr_find_prev_struct(
++               alloc_info, VK_STRUCTURE_TYPE_EXPORT_MEMORY_ALLOCATE_INFO);
++            if (prev_of_export_info)
++               prev_of_export_info->pNext = export_info->pNext;
++            export_info = NULL;
++         }
++         VkResult ahb_res = vkr_ahb_prepare_allocation(
++            dev, physical_dev, alloc_info, property_flags, &ahb, &local_ahb_import);
++         if (ahb_res == VK_SUCCESS) {
++            valid_fd_types = 1 << VIRGL_RESOURCE_FD_DMABUF;
++         } else if (ahb_res != VK_ERROR_FEATURE_NOT_PRESENT) {
++            args->ret = ahb_res;
++            return;
++         }
++      } else
++#endif
+       if (!force_udmabuf_import &&
+           (physical_dev->is_dma_buf_fd_export_supported ||
+            (physical_dev->is_opaque_fd_export_supported && no_dma_buf_export))) {
+@@ -348,6 +539,10 @@ vkr_dispatch_vkAllocateMemory(struct vn_dispatch_context *dispatch,
+          close(local_import_info.fd);
+       if (gbm_bo)
+          vkr_gbm_bo_destroy(gbm_bo);
++#ifdef __ANDROID__
++      if (ahb)
++         vkr_ahb_release(ahb);
++#endif
+       return;
+    }
+ 
+@@ -356,8 +551,9 @@ vkr_dispatch_vkAllocateMemory(struct vn_dispatch_context *dispatch,
+    mem->valid_fd_types = valid_fd_types;
+    mem->udmabuf_fd = udmabuf_fd;
+    mem->gbm_bo = gbm_bo;
++   mem->ahb = ahb;
+    mem->allocation_size = alloc_info->allocationSize;
+-   mem->memory_type_index = mem_type_index;
++   mem->memory_type_index = alloc_info->memoryTypeIndex;
+ }
+ 
+ static void
+@@ -466,6 +662,10 @@ vkr_device_memory_release(struct vkr_device_memory *mem)
+ {
+    if (mem->gbm_bo)
+       vkr_gbm_bo_destroy(mem->gbm_bo);
++#ifdef __ANDROID__
++   if (mem->ahb)
++      vkr_ahb_release(mem->ahb);
++#endif
+    if (mem->udmabuf_fd >= 0)
+       close(mem->udmabuf_fd);
+ }
+@@ -544,6 +744,14 @@ vkr_device_memory_export_blob(struct vkr_device_memory *mem,
+          vkr_log("mem udmabuf fd dup failed (%s)", strerror(errno));
+          return false;
+       }
++#ifdef __ANDROID__
++   } else if (mem->ahb) {
++      fd = vkr_ahb_export_dmabuf_fd(mem->ahb, blob_size);
++      if (fd < 0) {
++         vkr_log("mem ahb dmabuf fd export failed");
++         return false;
++      }
++#endif
+    } else if (mem->gbm_bo) {
+       assert(handle_type == VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT);
+       assert(can_export_dma_buf && !can_export_opaque);
+diff --git a/src/venus/vkr_device_memory.h b/src/venus/vkr_device_memory.h
+index 79152bc..188798a 100644
+--- a/src/venus/vkr_device_memory.h
++++ b/src/venus/vkr_device_memory.h
+@@ -9,6 +9,7 @@
+ #include "vkr_common.h"
+ 
+ struct gbm_bo;
++struct AHardwareBuffer;
+ 
+ struct vkr_device_memory {
+    struct vkr_object base;
+@@ -20,6 +21,9 @@ struct vkr_device_memory {
+    /* gbm bo backing non-external mappable memory */
+    struct gbm_bo *gbm_bo;
+ 
++   /* Android hardware buffer backing mappable memory via zero-copy dma_buf */
++   struct AHardwareBuffer *ahb;
++
+    /* udmabuf backing non-external mappable memory */
+    int udmabuf_fd;
+ 
+diff --git a/src/venus/vkr_physical_device.c b/src/venus/vkr_physical_device.c
+index 5c4c23b..51b5b5a 100644
+--- a/src/venus/vkr_physical_device.c
++++ b/src/venus/vkr_physical_device.c
+@@ -260,6 +260,10 @@ vkr_physical_device_init_extensions(struct vkr_physical_device *physical_dev,
+          physical_dev->KHR_external_memory_fd = true;
+       else if (!strcmp(props->extensionName, "VK_EXT_external_memory_dma_buf"))
+          physical_dev->EXT_external_memory_dma_buf = true;
++      else if (!strcmp(props->extensionName, "VK_ANDROID_external_memory_android_hardware_buffer"))
++         physical_dev->ANDROID_external_memory_android_hardware_buffer = true;
++      else if (!strcmp(props->extensionName, "VK_EXT_queue_family_foreign"))
++         physical_dev->EXT_queue_family_foreign = true;
+       else if (!strcmp(props->extensionName, "VK_KHR_external_fence_fd"))
+          physical_dev->KHR_external_fence_fd = true;
+ 
+diff --git a/src/venus/vkr_physical_device.h b/src/venus/vkr_physical_device.h
+index b0b6691..afd07e7 100644
+--- a/src/venus/vkr_physical_device.h
++++ b/src/venus/vkr_physical_device.h
+@@ -23,6 +23,8 @@ struct vkr_physical_device {
+ 
+    bool KHR_external_memory_fd;
+    bool EXT_external_memory_dma_buf;
++   bool ANDROID_external_memory_android_hardware_buffer;
++   bool EXT_queue_family_foreign;
+ 
+    bool KHR_external_fence_fd;
+    bool KHR_external_semaphore_fd;
+diff --git a/src/vrend_winsys.c b/src/vrend_winsys.c
+index 2f56080..217a205 100644
+--- a/src/vrend_winsys.c
++++ b/src/vrend_winsys.c
+@@ -75,6 +75,14 @@ int vrend_winsys_init(uint32_t flags, int preferred_fd)
+          return -1;
+       }
+ 
++      use_context = CONTEXT_EGL;
++#elif defined(HAVE_EPOXY_EGL_H)
++      (void)preferred_fd;
++      egl = virgl_egl_init(EGL_DEFAULT_DISPLAY, flags & VIRGL_RENDERER_USE_SURFACELESS,
++                           flags & VIRGL_RENDERER_USE_GLES);
++      if (!egl)
++         return -1;
++
+       use_context = CONTEXT_EGL;
+ #else
+       (void)preferred_fd;
+@@ -98,15 +106,17 @@ int vrend_winsys_init(uint32_t flags, int preferred_fd)
+ 
+ void vrend_winsys_cleanup(void)
+ {
+-#ifdef ENABLE_GBM
++#ifdef HAVE_EPOXY_EGL_H
+    if (use_context == CONTEXT_EGL) {
+       virgl_egl_destroy(egl);
+       egl = NULL;
+       use_context = CONTEXT_NONE;
++#ifdef ENABLE_GBM
+       if (gbm) {
+          virgl_gbm_fini(gbm);
+          gbm = NULL;
+       }
++#endif
+    } else if (use_context == CONTEXT_EGL_EXTERNAL) {
+       free(egl);
+       egl = NULL;
+diff --git a/src/vrend_winsys_egl.c b/src/vrend_winsys_egl.c
+index 9d9f410..7382c20 100644
+--- a/src/vrend_winsys_egl.c
++++ b/src/vrend_winsys_egl.c
+@@ -103,6 +103,7 @@ struct virgl_egl {
+    EGLDisplay egl_display;
+    EGLConfig egl_conf;
+    EGLContext egl_ctx;
++   EGLSurface pbuffer_surface;
+    uint32_t extension_bits;
+    EGLSyncKHR signaled_fence;
+    bool different_gpu;
+@@ -188,8 +189,8 @@ static bool virgl_egl_add_extensions(struct virgl_egl *egl, const char *extensio
+ 
+ static bool virgl_egl_check_extensions(struct virgl_egl *egl)
+ {
+-   if (!has_bits(egl->extension_bits, EGL_KHR_SURFACELESS_CONTEXT | EGL_KHR_CREATE_CONTEXT)) {
+-      virgl_error("Missing EGL_KHR_surfaceless_context or EGL_KHR_create_context\n");
++   if (!has_bits(egl->extension_bits, EGL_KHR_CREATE_CONTEXT)) {
++      virgl_error("Missing EGL_KHR_create_context\n");
+       return false;
+    }
+ 
+@@ -341,11 +342,16 @@ struct virgl_egl *virgl_egl_init(EGLNativeDisplayType display_id, bool surfacele
+    egl->gbm = gbm;
+ #endif
+ 
++   egl->pbuffer_surface = EGL_NO_SURFACE;
+    egl->different_gpu = false;
+    extensions = eglQueryString(NULL, EGL_EXTENSIONS);
+-   if (!virgl_egl_add_extensions(egl, extensions))
++   if (extensions && !virgl_egl_add_extensions(egl, extensions))
+       goto fail;
+ 
++#if defined(__ANDROID__)
++   (void)has_egl_base;
++   egl->egl_display = eglGetDisplay(display_id);
++#else
+ #ifdef ENABLE_MINIGBM_ALLOCATION
+    if (virgl_egl_get_display(egl)) {
+      /* Make -Wdangling-else happy. */
+@@ -370,6 +376,7 @@ struct virgl_egl *virgl_egl_init(EGLNativeDisplayType display_id, bool surfacele
+       egl->egl_display = eglGetDisplay(display_id);
+ #endif
+    }
++#endif
+ 
+    if (!egl->egl_display) {
+ #ifdef ENABLE_GBM
+@@ -424,8 +431,20 @@ struct virgl_egl *virgl_egl_init(EGLNativeDisplayType display_id, bool surfacele
+    if (!egl->egl_ctx)
+       goto fail;
+ 
+-   eglMakeCurrent(egl->egl_display, EGL_NO_SURFACE, EGL_NO_SURFACE,
+-                  egl->egl_ctx);
++   if (!has_bit(egl->extension_bits, EGL_KHR_SURFACELESS_CONTEXT)) {
++      static const EGLint pb_att[] = {
++         EGL_WIDTH, 1,
++         EGL_HEIGHT, 1,
++         EGL_NONE
++      };
++      egl->pbuffer_surface = eglCreatePbufferSurface(egl->egl_display, egl->egl_conf, pb_att);
++      if (egl->pbuffer_surface == EGL_NO_SURFACE)
++         goto fail;
++   }
++
++   if (!eglMakeCurrent(egl->egl_display, egl->pbuffer_surface, egl->pbuffer_surface,
++                       egl->egl_ctx))
++      goto fail;
+ 
+    if (virgl_egl_supports_fences(egl)) {
+       egl->signaled_fence = eglCreateSyncKHR(egl->egl_display,
+@@ -442,6 +461,8 @@ struct virgl_egl *virgl_egl_init(EGLNativeDisplayType display_id, bool surfacele
+    return egl;
+ 
+  fail:
++   if (egl->pbuffer_surface != EGL_NO_SURFACE)
++      eglDestroySurface(egl->egl_display, egl->pbuffer_surface);
+    free(egl);
+    return NULL;
+ }
+@@ -453,6 +474,9 @@ void virgl_egl_destroy(struct virgl_egl *egl)
+    }
+    eglMakeCurrent(egl->egl_display, EGL_NO_SURFACE, EGL_NO_SURFACE,
+                   EGL_NO_CONTEXT);
++   if (egl->pbuffer_surface != EGL_NO_SURFACE) {
++      eglDestroySurface(egl->egl_display, egl->pbuffer_surface);
++   }
+    eglDestroyContext(egl->egl_display, egl->egl_ctx);
+    eglTerminate(egl->egl_display);
+    free(egl);
+@@ -648,8 +672,9 @@ void virgl_egl_destroy_context(struct virgl_egl *egl, virgl_renderer_gl_context
+ int virgl_egl_make_context_current(struct virgl_egl *egl, virgl_renderer_gl_context virglctx)
+ {
+    EGLContext egl_ctx = (EGLContext)virglctx;
++   EGLSurface surf = egl_ctx == EGL_NO_CONTEXT ? EGL_NO_SURFACE : egl->pbuffer_surface;
+ 
+-   return eglMakeCurrent(egl->egl_display, EGL_NO_SURFACE, EGL_NO_SURFACE,
++   return eglMakeCurrent(egl->egl_display, surf, surf,
+                          egl_ctx) ? 0 : -1;
+ }
+ 
+diff --git a/vtest/vtest_server.c b/vtest/vtest_server.c
+index 93d949d..68624bf 100644
+--- a/vtest/vtest_server.c
++++ b/vtest/vtest_server.c
+@@ -36,6 +36,7 @@
+ #include <netinet/in.h>
+ #include <sys/un.h>
+ #include <fcntl.h>
++#include <errno.h>
+ #include <getopt.h>
+ #include <string.h>
+ 
+@@ -412,7 +413,7 @@ static void vtest_server_open_socket(void)
+       goto err;
+    }
+ 
+-   if (listen(server.socket, 1) < 0){
++   if (listen(server.socket, 64) < 0){
+       goto err;
+    }
+ 
+@@ -459,6 +460,8 @@ static void vtest_server_wait_clients(void)
+ 
+    ret = select(max_fd + 1, &read_fds, NULL, NULL, NULL);
+    if (ret < 0) {
++      if (errno == EINTR)
++         return;
+       perror("Failed to select on socket!");
+       exit(1);
+    }

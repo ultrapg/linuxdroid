@@ -1,0 +1,23 @@
+#!/usr/bin/env python3
+import os
+import sys
+
+args = sys.argv[1:]
+i = 0
+while i < len(args):
+    a = args[i]
+    if a == "--":
+        i += 1
+        break
+    if a in ("--user", "-u") and i + 1 < len(args):
+        i += 2
+    elif a in ("--disable-internal-agent", "--keep-cwd"):
+        i += 1
+    elif a in ("--version", "--help"):
+        print("pkexec (LinuxDroid root bridge) 1.0")
+        sys.exit(0)
+    else:
+        break
+
+cmd = args[i:] or [os.environ.get("SHELL") or "/bin/bash"]
+os.execv("/usr/local/bin/linuxdroid-root", ["/usr/local/bin/linuxdroid-root"] + cmd)

@@ -1,0 +1,139 @@
+#!/bin/bash
+set -u
+
+export HOME="${HOME:-/home/linux}"
+export USER="${USER:-$(id -un 2>/dev/null || echo linux)}"
+export LOGNAME="$USER"
+export SHELL=/bin/bash
+export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+
+if [ -n "${BL_LOG:-}" ]; then
+  mkdir -p "$(dirname "$BL_LOG")" 2>/dev/null || true
+  if [ "$(stat -c %s "$BL_LOG" 2>/dev/null || echo 0)" -gt 8388608 ]; then
+    mv -f "$BL_LOG" "$BL_LOG.1" 2>/dev/null || true
+  fi
+  exec >>"$BL_LOG" 2>&1
+  echo "== linuxdroid-session $(date -u '+%Y-%m-%d %H:%M:%S UTC') user=$USER uid=$(id -u) ${BL_WIDTH:-1920}x${BL_HEIGHT:-1080}@${BL_REFRESH:-60}"
+fi
+
+sync_timezone() {
+  local zone="${TZ:-}"
+  case "$zone" in ''|/*|*..*) return 0 ;; esac
+  [ -f "/usr/share/zoneinfo/$zone" ] || return 0
+  if [ "$(readlink /etc/localtime 2>/dev/null)" != "/usr/share/zoneinfo/$zone" ]; then
+    linuxdroid-root ln -sfn "/usr/share/zoneinfo/$zone" /etc/localtime 2>/dev/null || true
+    printf '%s\n' "$zone" | linuxdroid-root tee /etc/timezone >/dev/null 2>&1 || true
+  fi
+}
+sync_timezone
+
+prepare_locale() {
+  local dir=/usr/lib/locale stamp=/var/tmp/.linuxdroid-locale
+  [ -f "$stamp" ] && [ -f "$dir/locale-archive" ] && return 0
+  if [ -d "$dir/C.utf8" ] && command -v localedef >/dev/null 2>&1; then
+    LINUXDROID_LINK_RENAME=1 linuxdroid-root localedef --add-to-archive --replace "$dir/C.utf8" >/dev/null 2>&1 || true
+    touch "$stamp" 2>/dev/null || true
+  fi
+}
+prepare_locale
+
+rm -f /tmp/.bl-clock
+head -c 8 /dev/zero > /tmp/.bl-clock 2>/dev/null || true
+if [ "${BL_ZRAM:-0}" = "1" ]; then
+  printf 0 > /tmp/.bl-zram 2>/dev/null || true
+else
+  rm -f /tmp/.bl-zram 2>/dev/null || true
+fi
+
+mkdir -p /tmp/.X11-unix /tmp/.ICE-unix /dev/shm
+chmod 1777 /tmp/.X11-unix /tmp/.ICE-unix /dev/shm 2>/dev/null || true
+
+export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/tmp/runtime-$USER}"
+mkdir -p "$XDG_RUNTIME_DIR"
+chmod 700 "$XDG_RUNTIME_DIR" 2>/dev/null || true
+find "$XDG_RUNTIME_DIR" -mindepth 1 -maxdepth 1 ! -name 'wayland-0*' ! -name 'pulse*' ! -name 'gvfs*' ! -name 'virgl*' -exec rm -rf {} + 2>/dev/null || true
+
+export XDG_DATA_HOME="${XDG_DATA_HOME:-$HOME/.local/share}"
+export XDG_CONFIG_HOME="${XDG_CONFIG_HOME:-$HOME/.config}"
+export XDG_CACHE_HOME="${XDG_CACHE_HOME:-$HOME/.cache}"
+mkdir -p "$HOME" "$XDG_DATA_HOME" "$XDG_CONFIG_HOME" "$XDG_CACHE_HOME"
+
+skel_done="$XDG_DATA_HOME/linuxdroid/skel-initialized"
+if [ -d /etc/skel ] && [ ! -e "$skel_done" ]; then
+  cp -rn /etc/skel/. "$HOME/" 2>/dev/null || true
+  mkdir -p "${skel_done%/*}" && : > "$skel_done"
+fi
+
+if [ -d /sdcard ]; then
+  ln -sfn /sdcard "$HOME/Android" 2>/dev/null || true
+fi
+
+if [ -d /mnt/linuxdroid ] && [ "$(ls -A /mnt/linuxdroid 2>/dev/null)" ]; then
+  mkdir -p "$HOME/Mounts"
+  for m in /mnt/linuxdroid/*; do
+    [ -e "$m" ] || continue
+    ln -sfn "$m" "$HOME/Mounts/$(basename "$m")" 2>/dev/null || true
+  done
+fi
+
+/usr/local/bin/linuxdroid-bookmarks 2>/dev/null || true
+
+if [ -r /etc/linuxdroid/gpu.env ]; then
+  set -a
+  # shellcheck disable=SC1091
+  . /etc/linuxdroid/gpu.env
+  set +a
+  if [ -n "${VK_DRIVER_FILES:-}" ]; then
+    resolved_icds=""
+    IFS=':' read -ra icd_entries <<< "$VK_DRIVER_FILES"
+    for icd_path in "${icd_entries[@]}"; do
+      if [ ! -f "$icd_path" ]; then
+        alt_path="${icd_path/.aarch64.json/.json}"
+        [ -f "$alt_path" ] && icd_path="$alt_path"
+      fi
+      resolved_icds="${resolved_icds:+$resolved_icds:}$icd_path"
+    done
+    export VK_DRIVER_FILES="$resolved_icds"
+    export VK_ICD_FILENAMES="$resolved_icds"
+  fi
+  echo "== gpu mode: ${LINUXDROID_GPU_MODE:-auto} (${LINUXDROID_GPU_SUMMARY:-default})"
+fi
+
+start_system_bus() {
+  command -v dbus-daemon >/dev/null 2>&1 || return 0
+  mkdir -p /tmp/linuxdroid-dbus
+  cat > /tmp/linuxdroid-dbus/system.conf <<'BUSCONF'
+<!DOCTYPE busconfig PUBLIC "-//freedesktop//DTD D-Bus Bus Configuration 1.0//EN"
+ "http://www.freedesktop.org/standards/dbus/1.0/busconfig.dtd">
+<busconfig>
+  <type>system</type>
+  <listen>unix:path=/run/dbus/system_bus_socket</listen>
+  <auth>EXTERNAL</auth>
+  <policy context="default">
+    <allow user="*"/>
+    <allow own="*"/>
+    <allow send_destination="*"/>
+    <allow receive_sender="*"/>
+  </policy>
+</busconfig>
+BUSCONF
+  linuxdroid-root mkdir -p /run/dbus 2>/dev/null || mkdir -p /run/dbus 2>/dev/null || true
+  linuxdroid-root chmod 777 /run/dbus 2>/dev/null || chmod 777 /run/dbus 2>/dev/null || true
+  rm -f /run/dbus/system_bus_socket 2>/dev/null || linuxdroid-root rm -f /run/dbus/system_bus_socket 2>/dev/null || true
+  dbus-daemon --config-file=/tmp/linuxdroid-dbus/system.conf --nofork --nopidfile >/dev/null 2>&1 &
+  for _ in $(seq 1 40); do
+    [ -S /run/dbus/system_bus_socket ] && break
+    sleep 0.05
+  done
+  if [ -S /run/dbus/system_bus_socket ] && [ -x /usr/local/bin/linuxdroid-systembus ]; then
+    DBUS_SYSTEM_BUS_ADDRESS="unix:path=/run/dbus/system_bus_socket" /usr/local/bin/linuxdroid-systembus >/dev/null 2>&1 &
+  fi
+}
+start_system_bus
+
+for _ in $(seq 1 100); do
+  [ -S "$XDG_RUNTIME_DIR/${WAYLAND_DISPLAY:-wayland-0}" ] && break
+  sleep 0.05
+done
+
+exec /usr/local/bin/linuxdroid-desktop "$@"

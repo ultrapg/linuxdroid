@@ -1,0 +1,75 @@
+#!/usr/bin/env python3
+import os
+import sys
+
+if os.geteuid() == 0 and os.path.exists("/usr/bin/sudo"):
+    os.execv("/usr/bin/sudo", ["/usr/bin/sudo"] + sys.argv[1:])
+
+args = sys.argv[1:]
+shell_mode = False
+login_mode = False
+target_user = "root"
+env_overrides = []
+
+i = 0
+while i < len(args):
+    a = args[i]
+    if a == "--":
+        i += 1
+        break
+    if a in ("-v", "-K", "-k"):
+        if len(args) == 1:
+            sys.exit(0)
+        i += 1
+    elif a in ("-E", "-n", "-S", "-H", "-P", "-A", "-b"):
+        i += 1
+    elif a == "-s":
+        shell_mode = True
+        i += 1
+    elif a == "-i":
+        login_mode = True
+        i += 1
+    elif a in ("-u", "--user") and i + 1 < len(args):
+        target_user = args[i + 1]
+        i += 2
+    elif a in ("-p", "-g", "-C", "-D", "-R", "-T") and i + 1 < len(args):
+        if a == "-D":
+            try:
+                os.chdir(args[i + 1])
+            except OSError as e:
+                sys.exit(f"sudo: {e}")
+        i += 2
+    elif a.startswith("-") and len(a) > 1 and "=" not in a:
+        # Combined short flags such as -Es or -Su
+        flags = a[1:]
+        i += 1
+        for ch in flags:
+            if ch == "s":
+                shell_mode = True
+            elif ch == "i":
+                login_mode = True
+            elif ch == "u" and i < len(args):
+                target_user = args[i]
+                i += 1
+    elif "=" in a and not a.startswith("/"):
+        env_overrides.append(a)
+        i += 1
+    else:
+        break
+
+cmd = args[i:]
+for kv in env_overrides:
+    k, v = kv.split("=", 1)
+    os.environ[k] = v
+
+if login_mode:
+    os.environ["HOME"] = "/root" if target_user == "root" else f"/home/{target_user}"
+    cmd = ["/bin/bash", "-l"] + (["-c", " ".join(cmd)] if cmd else [])
+elif shell_mode or not cmd:
+    shell = os.environ.get("SHELL") or "/bin/bash"
+    cmd = [shell] + (["-c", " ".join(cmd)] if cmd else [])
+
+if target_user != "root" and os.path.exists("/usr/sbin/runuser"):
+    cmd = ["/usr/sbin/runuser", "-u", target_user, "--"] + cmd
+
+os.execv("/usr/local/bin/linuxdroid-root", ["/usr/local/bin/linuxdroid-root"] + cmd)

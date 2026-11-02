@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=LinuxDroid Workstation Setup
+Comment=Install FEX x86_64 RootFS, VS Code, LibreOffice, GIMP, and Developer Tools
+Exec=/usr/local/bin/linuxdroid-apps
+Icon=system-software-install
+Categories=System;Settings;
+Terminal=false

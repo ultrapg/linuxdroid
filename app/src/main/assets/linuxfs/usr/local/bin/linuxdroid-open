@@ -1,0 +1,137 @@
+#!/usr/bin/env python3
+import hashlib
+import os
+from pathlib import Path
+import shutil
+import struct
+import subprocess
+import sys
+
+X86_MACHINES = {3, 62}
+SCRIPT_EXTS = (".sh", ".bash")
+SCRIPT_TYPES = ("application/x-shellscript", "text/x-shellscript")
+LINUX_TYPES = ("application/x-executable", "application/x-pie-executable", "application/vnd.appimage")
+
+
+def read_head(path, size=64):
+    try:
+        with open(path, "rb") as f:
+            return f.read(size)
+    except OSError:
+        return b""
+
+
+def elf_machine(data):
+    if len(data) < 20 or data[:4] != b"\x7fELF":
+        return None
+    return struct.unpack_from("<H" if data[5] == 1 else ">H", data, 18)[0]
+
+
+def is_noexec(path):
+    try:
+        return bool(os.statvfs(path).f_flag & os.ST_NOEXEC)
+    except OSError:
+        return False
+
+
+def stage_executable(path):
+    mach = elf_machine(read_head(path))
+    if not is_noexec(path) or mach in X86_MACHINES:
+        return path
+    st = os.stat(path)
+    cache_root = Path(os.environ.get("XDG_CACHE_HOME") or (Path.home() / ".cache")) / "linuxdroid" / "exec"
+    key = hashlib.sha1(os.path.realpath(path).encode("utf-8")).hexdigest()[:16]
+    staged = cache_root / key / os.path.basename(path)
+    try:
+        cur = staged.stat()
+        if cur.st_size == st.st_size and cur.st_mtime_ns == st.st_mtime_ns:
+            return str(staged)
+    except OSError:
+        pass
+    staged.parent.mkdir(parents=True, exist_ok=True)
+    tmp = str(staged) + ".tmp"
+    shutil.copyfile(path, tmp)
+    os.chmod(tmp, 0o755)
+    os.utime(tmp, ns=(st.st_atime_ns, st.st_mtime_ns))
+    os.replace(tmp, staged)
+    return str(staged)
+
+
+def script_interpreter(path):
+    first = read_head(path, 256).split(b"\n", 1)[0].rstrip(b"\r")
+    if first.startswith(b"#!"):
+        parts = first[2:].decode("utf-8", "replace").split()
+        if parts:
+            return parts
+    return ["/bin/bash"]
+
+
+def install_desktop_entries():
+    apps_dir = Path(os.environ.get("XDG_DATA_HOME") or (Path.home() / ".local/share")) / "applications"
+    apps_dir.mkdir(parents=True, exist_ok=True)
+    all_mimes = SCRIPT_TYPES + LINUX_TYPES
+    entry = (
+        "[Desktop Entry]\n"
+        "Type=Application\n"
+        "Name=Run Linux Program\n"
+        "Icon=system-run\n"
+        "Exec=/usr/local/bin/linuxdroid-open %f\n"
+        "Terminal=false\n"
+        "NoDisplay=true\n"
+        f"MimeType={';'.join(all_mimes)};\n"
+    )
+    (apps_dir / "linuxdroid-open.desktop").write_text(entry, encoding="utf-8")
+    return 0
+
+
+def main(argv):
+    if argv and argv[0] == "--install":
+        return install_desktop_entries()
+    exec_mode = False
+    term_mode = False
+    while argv and argv[0] in ("--exec", "--window", "--terminal", "--"):
+        flag = argv.pop(0)
+        if flag == "--exec":
+            exec_mode = True
+        elif flag == "--terminal":
+            term_mode = True
+        elif flag == "--":
+            break
+    if not argv:
+        print("usage: linuxdroid-open [--exec | --terminal] FILE [ARGS...] | --install", file=sys.stderr)
+        return 2
+
+    target = os.path.abspath(argv[0])
+    rest = argv[1:]
+    head = read_head(target)
+    ext = os.path.splitext(target)[1].lower()
+
+    os.environ.setdefault("APPIMAGE_EXTRACT_AND_RUN", "1")
+    mach = elf_machine(head)
+    if head[:4] == b"\x7fELF":
+        staged = stage_executable(target)
+        if mach in X86_MACHINES:
+            cmd = ["/usr/local/bin/linuxdroid-fex", "run", "--", staged] + rest
+        else:
+            cmd = [staged] + rest
+    elif head[:2] == b"#!" or ext in SCRIPT_EXTS:
+        cmd = script_interpreter(target) + [target] + rest
+    else:
+        if shutil.which("xdg-open") and not exec_mode:
+            os.execvp("xdg-open", ["xdg-open", target])
+        print(f"linuxdroid-open: unsupported executable format: {target}", file=sys.stderr)
+        return 126
+
+    if term_mode:
+        for term in ("konsole", "xfce4-terminal", "xterm"):
+            if shutil.which(term):
+                cmd = [term, "-e"] + cmd
+                break
+
+    if exec_mode:
+        os.execv(cmd[0], cmd)
+    return subprocess.call(cmd)
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

@@ -1,0 +1,38 @@
+# Strictly block all signing keys, certificates, and credentials
+*.jks
+*.keystore
+*.p12
+*.pfx
+*.pem
+*.key
+*.pk8
+*.x509.pem
+*signing*
+signing.properties
+keystore/
+keystore.properties
+
+# Android & Gradle build outputs
+.gradle/
+.cxx/
+build/
+app/build/
+local.properties
+*.apk
+*.aab
+*.ap_
+*.dex
+
+# Large built rootfs archives & temporary staging
+dist/
+rootfs-out/
+*.tar.zst
+*.tar.xz
+*.tar.gz
+!gradle/wrapper/*.jar
+
+# IDE & OS
+.idea/
+*.iml
+.DS_Store
+*~

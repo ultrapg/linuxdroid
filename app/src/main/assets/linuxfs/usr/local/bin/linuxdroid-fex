@@ -1,0 +1,144 @@
+#!/usr/bin/env python3
+import json
+import os
+from pathlib import Path
+import shutil
+import struct
+import subprocess
+import sys
+
+X86_MACHINES = {3: "i386", 62: "x86_64"}
+ARM_MACHINES = {40: "arm", 183: "arm64"}
+
+
+def elf_arch(path):
+    try:
+        with open(path, "rb") as f:
+            head = f.read(20)
+    except OSError:
+        return None
+    if len(head) < 20 or head[:4] != b"\x7fELF":
+        return None
+    machine = struct.unpack_from("<H" if head[5] == 1 else ">H", head, 18)[0]
+    return X86_MACHINES.get(machine) or ARM_MACHINES.get(machine) or "other"
+
+
+def find_fex():
+    for candidate in ("/usr/bin/FEXInterpreter", "/usr/bin/FEXLoader", "/usr/bin/FEX",
+                      "/usr/local/bin/FEXInterpreter", "/usr/local/bin/FEX"):
+        if os.access(candidate, os.X_OK):
+            return candidate
+    return shutil.which("FEXInterpreter") or shutil.which("FEXLoader") or shutil.which("FEX")
+
+
+def find_rootfs(home: Path):
+    fex_dir = home / ".fex-emu" / "RootFS"
+    if fex_dir.is_dir():
+        entries = sorted([p for p in fex_dir.iterdir() if p.is_dir() or p.suffix in (".sqsh", ".ero")])
+        if entries:
+            return entries[-1].name
+    return None
+
+
+def ensure_fex_config(home: Path):
+    cfg_dir = home / ".fex-emu"
+    cfg_dir.mkdir(parents=True, exist_ok=True)
+    cfg_file = cfg_dir / "Config.json"
+    rootfs = find_rootfs(home)
+    host_thunks = next((p for p in (
+        "/usr/lib/aarch64-linux-gnu/fex-emu/HostThunks",
+        "/usr/lib/fex-emu/HostThunks",
+        "/usr/local/lib/fex-emu/HostThunks",
+    ) if os.path.isdir(p)), None)
+    guest_thunks = next((p for p in (
+        "/usr/share/fex-emu/GuestThunks",
+        "/usr/local/share/fex-emu/GuestThunks",
+    ) if os.path.isdir(p)), None)
+
+    data = {}
+    if cfg_file.is_file():
+        try:
+            data = json.loads(cfg_file.read_text(encoding="utf-8"))
+        except Exception:
+            data = {}
+    cfg = data.setdefault("Config", {})
+    if rootfs and not cfg.get("RootFS"):
+        cfg["RootFS"] = rootfs
+    if host_thunks and guest_thunks:
+        cfg.setdefault("ThunkHostLibs", host_thunks)
+        cfg.setdefault("ThunkGuestLibs", guest_thunks)
+        thunks = data.setdefault("ThunksDB", {})
+        thunks.setdefault("GL", 1)
+        thunks.setdefault("Vulkan", 1)
+        thunks.setdefault("WaylandClient", 1)
+    cfg_file.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+    return rootfs
+
+
+def clean_guest_env(env):
+    out = dict(env)
+    preloads = [p for p in (out.get("LD_PRELOAD") or "").replace(" ", ":").split(":")
+                if p and ("/" not in p or (os.path.exists(p) and elf_arch(p) not in ARM_MACHINES.values()))]
+    lib_paths = [p for p in (out.get("LD_LIBRARY_PATH") or "").split(":")
+                 if p and "aarch64" not in p and "arm64" not in p]
+    if preloads:
+        out["LD_PRELOAD"] = ":".join(preloads)
+    else:
+        out.pop("LD_PRELOAD", None)
+    if lib_paths:
+        out["LD_LIBRARY_PATH"] = ":".join(lib_paths)
+    else:
+        out.pop("LD_LIBRARY_PATH", None)
+    return out
+
+
+def main(argv):
+    home = Path(os.environ.get("HOME") or Path.home())
+    cmd = argv[0] if argv else "status"
+
+    if cmd == "status":
+        fex = find_fex()
+        rootfs = ensure_fex_config(home)
+        print(json.dumps({"fex": fex, "rootfs": rootfs, "ready": bool(fex and rootfs)}, indent=2))
+        return 0
+
+    if cmd == "fetch-rootfs":
+        fetcher = shutil.which("FEXRootFSFetcher")
+        if not fetcher:
+            print("FEXRootFSFetcher is not installed in this rootfs.", file=sys.stderr)
+            return 1
+        rc = subprocess.call([fetcher, "-y", "-x", "--distro-name=ubuntu", "--distro-version=24.04"])
+        if rc != 0:
+            rc = subprocess.call([fetcher])
+        ensure_fex_config(home)
+        return rc
+
+    if cmd == "needs":
+        target = argv[1] if len(argv) > 1 else ""
+        return 0 if elf_arch(target) in X86_MACHINES.values() else 1
+
+    if cmd == "run":
+        rest = argv[1:]
+        if "--" in rest:
+            rest = rest[rest.index("--") + 1:]
+        if not rest:
+            print("usage: linuxdroid-fex run -- PROGRAM [ARGS...]", file=sys.stderr)
+            return 2
+        prog = shutil.which(rest[0]) if "/" not in rest[0] else os.path.abspath(rest[0])
+        prog = prog or rest[0]
+        if elf_arch(prog) not in X86_MACHINES.values():
+            os.execvp(rest[0], rest)
+        fex = find_fex()
+        if not fex:
+            print("linuxdroid-fex: FEXInterpreter is not installed.", file=sys.stderr)
+            return 127
+        ensure_fex_config(home)
+        guest_env = clean_guest_env(os.environ)
+        os.execve(fex, [fex, prog] + rest[1:], guest_env)
+
+    print("usage: linuxdroid-fex [status | fetch-rootfs | needs FILE | run -- PROGRAM ARGS...]", file=sys.stderr)
+    return 2
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))
