@@ -25,6 +25,7 @@ data class SessionSnapshot(
     val errorMessage: String? = null,
     val compatibilityRetryUsed: Boolean = false,
     val startedAtMs: Long = 0L,
+    val activeConfigSignature: SessionConfigSignature? = null,
 )
 
 object SessionState {

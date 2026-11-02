@@ -30,9 +30,12 @@ import com.linuxdroid.app.wayland.CompositorHost
 import com.linuxdroid.app.wayland.WaylandCompositor
 import java.io.File
 import java.util.TimeZone
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicLong
+import kotlin.math.roundToInt
 
 class SessionService : Service() {
     private var wakeLock: PowerManager.WakeLock? = null
@@ -57,6 +60,8 @@ class SessionService : Service() {
                 val height = intent.getIntExtra(EXTRA_HEIGHT, 1080).coerceAtLeast(480)
                 val refreshHz = intent.getFloatExtra(EXTRA_REFRESH_HZ, 60f).coerceIn(30f, 240f)
                 val forceCompat = intent.getBooleanExtra(EXTRA_FORCE_COMPAT, false)
+                val desiredSig = SessionPrefs.currentConfigSignature(this)
+                val curSnap = SessionState.state.value
                 startForeground(NOTIFICATION_ID, buildNotification("Starting Linux workstation...", paused = false))
                 if (!SessionState.isRunningOrPaused) {
                     val gen = bootGeneration.incrementAndGet()
@@ -64,9 +69,29 @@ class SessionService : Service() {
                         { bootWorkstation(width, height, refreshHz, forceCompatRetry = forceCompat, generation = gen) },
                         "session-boot-$gen"
                     ).start()
+                } else if (curSnap.activeConfigSignature != null && curSnap.activeConfigSignature != desiredSig) {
+                    val gen = bootGeneration.incrementAndGet()
+                    Thread(
+                        { restartIntoBoot(width, height, refreshHz, forceCompatRetry = forceCompat, generation = gen) },
+                        "session-restart-$gen"
+                    ).start()
                 } else if (SessionState.isPaused) {
                     resumeWorkstation()
+                } else {
+                    refreshNotification()
                 }
+            }
+            ACTION_RESTART -> {
+                val width = intent.getIntExtra(EXTRA_WIDTH, 1920).coerceAtLeast(640)
+                val height = intent.getIntExtra(EXTRA_HEIGHT, 1080).coerceAtLeast(480)
+                val refreshHz = intent.getFloatExtra(EXTRA_REFRESH_HZ, 60f).coerceIn(30f, 240f)
+                val forceCompat = intent.getBooleanExtra(EXTRA_FORCE_COMPAT, false)
+                startForeground(NOTIFICATION_ID, buildNotification("Applying settings & restarting Linux...", paused = false))
+                val gen = bootGeneration.incrementAndGet()
+                Thread(
+                    { restartIntoBoot(width, height, refreshHz, forceCompatRetry = forceCompat, generation = gen) },
+                    "session-restart-$gen"
+                ).start()
             }
             ACTION_TOGGLE_PAUSE -> {
                 if (SessionState.isPaused) resumeWorkstation() else pauseWorkstation()
@@ -76,6 +101,41 @@ class SessionService : Service() {
             ACTION_SHUTDOWN -> shutdownWorkstation()
         }
         return START_STICKY
+    }
+
+    private fun restartIntoBoot(
+        width: Int,
+        height: Int,
+        refreshHz: Float,
+        forceCompatRetry: Boolean,
+        generation: Int,
+    ) {
+        val oldPid = guestPid
+        guestPid = -1
+        val ctrl = suspendController
+        suspendController = null
+        SessionState.update {
+            it.copy(
+                phase = SessionPhase.STARTING,
+                statusText = "Applying updated display/hardware settings & restarting...",
+                firstFrameReady = false,
+                guestPid = -1,
+                bootStep = 1,
+                errorMessage = null,
+            )
+        }
+        refreshNotification()
+        if (ctrl != null) {
+            val latch = CountDownLatch(1)
+            ctrl.shutdownAndResume { latch.countDown() }
+            runCatching { latch.await(1_500L, TimeUnit.MILLISECONDS) }
+        }
+        if (oldPid > 1) {
+            killProcessTree(oldPid)
+        }
+        stopHelpersOnly()
+        if (bootGeneration.get() != generation) return
+        bootWorkstation(width, height, refreshHz, forceCompatRetry = forceCompatRetry, generation = generation)
     }
 
     private fun bootWorkstation(
@@ -114,6 +174,17 @@ class SessionService : Service() {
             shmDir.mkdirs()
         }
 
+        val geom = SessionPrefs.computeCompositorGeometry(this, width, height)
+        val configSig = SessionPrefs.currentConfigSignature(this)
+        val scale = geom.effectiveScale
+        val scaleText = if (scale % 1.0f == 0f) {
+            scale.toInt().toString()
+        } else {
+            "%.2f".format(java.util.Locale.US, scale).trimEnd('0').trimEnd('.')
+        }
+        val scalePct = (scale * 100f).roundToInt()
+        val resolutionSummary = "${geom.pixelWidth}×${geom.pixelHeight} (${scalePct}%) @ ${refreshHz.toInt()}Hz"
+
         val startedMs = SessionState.state.value.startedAtMs.takeIf { forceCompatRetry && it > 0L }
             ?: System.currentTimeMillis()
 
@@ -125,11 +196,12 @@ class SessionService : Service() {
                 } else {
                     "Staging Linux runtime & user account..."
                 },
-                resolutionText = "${width}×${height} @ ${refreshHz.toInt()}Hz",
+                resolutionText = resolutionSummary,
                 bootStep = 1,
                 bootTotalSteps = 6,
                 compatibilityRetryUsed = forceCompatRetry,
                 startedAtMs = startedMs,
+                activeConfigSignature = configSig,
             )
         }
         refreshNotification()
@@ -200,7 +272,14 @@ class SessionService : Service() {
                 completeDesktopReadyIfEligible()
             }
         }
-        val waylandReady = CompositorHost.ensureStarted(this, xdgDir, width, height, refreshHz)
+        val waylandReady = CompositorHost.ensureStarted(
+            context = this,
+            xdgRuntimeDir = xdgDir,
+            initialWidth = geom.compositorWidth,
+            initialHeight = geom.compositorHeight,
+            refreshHz = refreshHz,
+            desktopScale = geom.compositorScale,
+        )
         if (!waylandReady) {
             failBoot(
                 generation = generation,
@@ -245,12 +324,6 @@ class SessionService : Service() {
         val fastPathKey = if (fastPathPref) ProotFastPath.key(root, binds) else null
 
         val homePath = "/home/$username"
-        val scale = SessionPrefs.computeEffectiveScale(this, width, height)
-        val scaleText = if (scale % 1.0f == 0f) {
-            scale.toInt().toString()
-        } else {
-            "%.2f".format(java.util.Locale.US, scale).trimEnd('0').trimEnd('.')
-        }
 
         val prootCmd = LinuxRuntime.prootPrefix(this, root, homePath, fakeRoot = false)
         for (spec in binds) {
@@ -272,8 +345,10 @@ class SessionService : Service() {
             put("XDG_RUNTIME_DIR", LinuxRuntime.GUEST_RUNTIME_DIR)
             put("WAYLAND_DISPLAY", "wayland-0")
             put("PULSE_SERVER", "unix:${pulseAudio!!.socketFile().absolutePath}")
-            put("BL_WIDTH", width.toString())
-            put("BL_HEIGHT", height.toString())
+            put("BL_PIXEL_WIDTH", geom.pixelWidth.toString())
+            put("BL_PIXEL_HEIGHT", geom.pixelHeight.toString())
+            put("BL_WIDTH", geom.compositorWidth.toString())
+            put("BL_HEIGHT", geom.compositorHeight.toString())
             put("BL_SCALE", scaleText)
             put("BL_REFRESH", refreshHz.toInt().toString())
             put("BL_CPU_COUNT", effectiveCpuCores.toString())
@@ -700,6 +775,7 @@ class SessionService : Service() {
         private const val NOTIFICATION_ID = 1001
         private const val DESKTOP_SHELL_READY_FALLBACK_MS = 22_000L
         const val ACTION_START = "com.linuxdroid.app.action.START_SESSION"
+        const val ACTION_RESTART = "com.linuxdroid.app.action.RESTART_SESSION"
         const val ACTION_PAUSE = "com.linuxdroid.app.action.PAUSE_SESSION"
         const val ACTION_RESUME = "com.linuxdroid.app.action.RESUME_SESSION"
         const val ACTION_TOGGLE_PAUSE = "com.linuxdroid.app.action.TOGGLE_PAUSE_SESSION"
@@ -718,6 +794,23 @@ class SessionService : Service() {
         ) {
             val intent = Intent(context, SessionService::class.java).apply {
                 action = ACTION_START
+                putExtra(EXTRA_WIDTH, width)
+                putExtra(EXTRA_HEIGHT, height)
+                putExtra(EXTRA_REFRESH_HZ, refreshHz)
+                putExtra(EXTRA_FORCE_COMPAT, forceCompat)
+            }
+            context.startForegroundService(intent)
+        }
+
+        fun restart(
+            context: Context,
+            width: Int = 1920,
+            height: Int = 1080,
+            refreshHz: Float = 60f,
+            forceCompat: Boolean = false,
+        ) {
+            val intent = Intent(context, SessionService::class.java).apply {
+                action = ACTION_RESTART
                 putExtra(EXTRA_WIDTH, width)
                 putExtra(EXTRA_HEIGHT, height)
                 putExtra(EXTRA_REFRESH_HZ, refreshHz)

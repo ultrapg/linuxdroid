@@ -13,6 +13,7 @@ if [ "${BL_DESKTOP:-}" = "1" ]; then
       --socket wayland-1 \
       --width "${BL_WIDTH:-1920}" \
       --height "${BL_HEIGHT:-1080}" \
+      --scale "${BL_SCALE:-1}" \
       --no-lockscreen \
       "$@"
   fi

@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+import ctypes
 import json
 import os
 import select
@@ -10,7 +11,27 @@ import time
 DISPLAY_ID = 1
 REGISTRY_ID = 2
 METHOD_ID = 3
-SETTLE = 0.15
+SETTLE_SEC = 0.16
+
+X11_TEXT_WINDOW_CLASSES = {
+    "xfce4-terminal",
+    "konsole",
+    "xterm",
+    "uxterm",
+    "lxterminal",
+    "qterminal",
+    "mate-terminal",
+    "alacritty",
+    "kitty",
+    "foot",
+    "mousepad",
+    "kate",
+    "kwrite",
+    "gedit",
+    "featherpad",
+    "pluma",
+    "leafpad",
+}
 
 
 def wl_string(value):
@@ -25,43 +46,70 @@ def read_string(payload, offset):
     return text, start + length + (-length % 4)
 
 
+def resolve_state_file():
+    direct = os.environ.get("BL_IME_STATE", "").strip()
+    if direct:
+        return direct
+    ime_dir = os.environ.get("BL_IME_DIR", "").strip()
+    if ime_dir:
+        return os.path.join(ime_dir, "ime.json")
+    launch = os.environ.get("BL_LAUNCH_DIR", "").strip()
+    if launch:
+        return os.path.join(launch, "agent", "ime.json")
+    return ""
+
+
 class Report:
-    def __init__(self, directory):
-        self.directory = directory
+    def __init__(self, target_file):
+        self.target = target_file
         self.seq = 0
         self.sent = None
 
     def write(self, field, hint=0, purpose=0):
-        state = (bool(field), int(purpose))
-        if state == self.sent or not self.directory:
+        active = bool(field)
+        state = (active, int(purpose))
+        if state == self.sent or not self.target:
             return
         self.sent = state
         self.seq += 1
-        os.makedirs(self.directory, exist_ok=True)
-        target = os.path.join(self.directory, "ime.json")
-        temp = target + ".tmp"
+        parent = os.path.dirname(self.target)
+        if parent:
+            os.makedirs(parent, exist_ok=True)
+        temp = self.target + ".tmp"
         fd = os.open(temp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
         with os.fdopen(fd, "w") as handle:
-            json.dump({"textField": bool(field), "hint": int(hint), "purpose": int(purpose), "seq": self.seq}, handle)
-        os.replace(temp, target)
+            json.dump(
+                {
+                    "active": active,
+                    "textField": active,
+                    "hint": int(hint),
+                    "purpose": int(purpose),
+                    "seq": self.seq,
+                },
+                handle,
+            )
+        os.replace(temp, self.target)
 
 
 class Connection:
     def __init__(self, sock):
         self.sock = sock
+        self.sock.setblocking(False)
         self.buffer = b""
 
     def send(self, obj, opcode, payload=b""):
-        self.sock.sendall(struct.pack("<II", obj, ((8 + len(payload)) << 16) | opcode) + payload)
+        pkt = struct.pack("<II", obj, ((8 + len(payload)) << 16) | opcode) + payload
+        self.sock.sendall(pkt)
 
-    def messages(self, timeout):
-        ready, _, _ = select.select([self.sock], [], [], timeout)
-        if not ready:
-            return []
-        data, _, _, _ = self.sock.recvmsg(65536, socket.CMSG_SPACE(16 * 4))
-        if not data:
-            raise EOFError
-        self.buffer += data
+    def drain_messages(self):
+        while True:
+            try:
+                data, _, _, _ = self.sock.recvmsg(65536, socket.CMSG_SPACE(16 * 4))
+            except BlockingIOError:
+                break
+            if not data:
+                raise EOFError
+            self.buffer += data
         out = []
         while len(self.buffer) >= 8:
             obj, word = struct.unpack_from("<II", self.buffer)
@@ -78,47 +126,218 @@ def connect_wayland():
     if fd.isdigit():
         return socket.socket(socket.AF_UNIX, socket.SOCK_STREAM, fileno=int(fd))
     sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-    sock.connect(os.path.join(os.environ["XDG_RUNTIME_DIR"], os.environ.get("WAYLAND_DISPLAY", "wayland-0")))
+    rt = os.environ.get("XDG_RUNTIME_DIR", "/run/linuxdroid")
+    disp = os.environ.get("WAYLAND_DISPLAY", "wayland-1")
+    sock.connect(os.path.join(rt, disp))
     return sock
 
 
-def run_x11_atspi(report):
+class X11FocusProbe:
+    """Lightweight libX11 active-window WM_CLASS fallback for terminals and text editors."""
+
+    def __init__(self):
+        self.x11 = None
+        self.dpy = None
+        self.root = 0
+        self.atom_active = 0
+        self.atom_wm_class = 0
+        try:
+            x11 = ctypes.CDLL("libX11.so.6")
+            x11.XOpenDisplay.argtypes = [ctypes.c_char_p]
+            x11.XOpenDisplay.restype = ctypes.c_void_p
+            x11.XDefaultRootWindow.argtypes = [ctypes.c_void_p]
+            x11.XDefaultRootWindow.restype = ctypes.c_ulong
+            x11.XInternAtom.argtypes = [ctypes.c_void_p, ctypes.c_char_p, ctypes.c_int]
+            x11.XInternAtom.restype = ctypes.c_ulong
+            x11.XGetWindowProperty.argtypes = [
+                ctypes.c_void_p,
+                ctypes.c_ulong,
+                ctypes.c_ulong,
+                ctypes.c_long,
+                ctypes.c_long,
+                ctypes.c_int,
+                ctypes.c_ulong,
+                ctypes.POINTER(ctypes.c_ulong),
+                ctypes.POINTER(ctypes.c_int),
+                ctypes.POINTER(ctypes.c_ulong),
+                ctypes.POINTER(ctypes.c_ulong),
+                ctypes.POINTER(ctypes.c_void_p),
+            ]
+            x11.XGetWindowProperty.restype = ctypes.c_int
+            x11.XFree.argtypes = [ctypes.c_void_p]
+            x11.XSetErrorHandler.argtypes = [ctypes.CFUNCTYPE(ctypes.c_int, ctypes.c_void_p, ctypes.c_void_p)]
+            self._err_cb = ctypes.CFUNCTYPE(ctypes.c_int, ctypes.c_void_p, ctypes.c_void_p)(lambda _d, _e: 0)
+            x11.XSetErrorHandler(self._err_cb)
+            dpy = x11.XOpenDisplay(None)
+            if dpy:
+                self.x11 = x11
+                self.dpy = dpy
+                self.root = x11.XDefaultRootWindow(dpy)
+                self.atom_active = x11.XInternAtom(dpy, b"_NET_ACTIVE_WINDOW", 0)
+                self.atom_wm_class = x11.XInternAtom(dpy, b"WM_CLASS", 0)
+        except Exception:
+            self.x11 = None
+
+    def active_window_classes(self):
+        if not self.x11 or not self.dpy:
+            return (0, set())
+        actual_type = ctypes.c_ulong()
+        actual_format = ctypes.c_int()
+        nitems = ctypes.c_ulong()
+        bytes_after = ctypes.c_ulong()
+        prop = ctypes.c_void_p()
+        rc = self.x11.XGetWindowProperty(
+            self.dpy,
+            self.root,
+            self.atom_active,
+            0,
+            2,
+            0,
+            0,
+            ctypes.byref(actual_type),
+            ctypes.byref(actual_format),
+            ctypes.byref(nitems),
+            ctypes.byref(bytes_after),
+            ctypes.byref(prop),
+        )
+        if rc != 0 or not prop.value or nitems.value < 1:
+            if prop.value:
+                self.x11.XFree(prop)
+            return (0, set())
+        win = ctypes.cast(prop, ctypes.POINTER(ctypes.c_ulong))[0]
+        self.x11.XFree(prop)
+        if not win:
+            return (0, set())
+
+        prop2 = ctypes.c_void_p()
+        rc2 = self.x11.XGetWindowProperty(
+            self.dpy,
+            win,
+            self.atom_wm_class,
+            0,
+            64,
+            0,
+            0,
+            ctypes.byref(actual_type),
+            ctypes.byref(actual_format),
+            ctypes.byref(nitems),
+            ctypes.byref(bytes_after),
+            ctypes.byref(prop2),
+        )
+        if rc2 != 0 or not prop2.value or nitems.value < 1:
+            if prop2.value:
+                self.x11.XFree(prop2)
+            return (win, set())
+        raw = ctypes.string_at(prop2.value, nitems.value)
+        self.x11.XFree(prop2)
+        names = {part.decode("utf-8", errors="ignore").strip().lower() for part in raw.split(b"\0") if part}
+        return (win, names)
+
+
+def run_x11_ime(report):
+    probe = X11FocusProbe()
     try:
         import gi
         gi.require_version("Atspi", "2.0")
         from gi.repository import Atspi, GLib
     except Exception:
+        Atspi = None
+        GLib = None
+
+    atspi_ready = False
+    if Atspi is not None:
+        for _ in range(25):
+            try:
+                if Atspi.init() == 0:
+                    atspi_ready = True
+                    break
+            except Exception:
+                pass
+            time.sleep(0.2)
+
+    if not atspi_ready or GLib is None:
+        # Pure X11 active-window fallback loop
+        last_win = -1
+        try:
+            while True:
+                win, classes = probe.active_window_classes()
+                if win != last_win:
+                    last_win = win
+                    report.write(bool(classes & X11_TEXT_WINDOW_CLASSES))
+                time.sleep(0.25)
+        except KeyboardInterrupt:
+            pass
+        finally:
+            report.write(False)
         return 0
-    if Atspi.init() != 0:
-        return 0
+
     text_roles = {
         Atspi.Role.TEXT,
         Atspi.Role.ENTRY,
         Atspi.Role.PASSWORD_TEXT,
         Atspi.Role.PARAGRAPH,
         Atspi.Role.TERMINAL,
-        Atspi.Role.DOCUMENT_TEXT,
-        Atspi.Role.DOCUMENT_WEB,
     }
+    for optional_role in ("SEARCH_BOX", "SPIN_BUTTON", "COMBO_BOX"):
+        val = getattr(Atspi.Role, optional_role, None)
+        if val is not None:
+            text_roles.add(val)
 
-    def on_focus(event):
+    state = {"atspi_active": False, "x11_term": False, "purpose": 0, "last_win": -1}
+
+    def sync_report():
+        active = state["atspi_active"] or state["x11_term"]
+        report.write(active, 0, state["purpose"] if active else 0)
+
+    def inspect_accessible(src, focused=True):
         try:
-            src = event.source
             if not src:
                 return
             states = src.get_state_set()
-            focused = bool(event.detail1)
             role = src.get_role()
-            editable = states.contains(Atspi.StateType.EDITABLE) or role in (Atspi.Role.TERMINAL, Atspi.Role.ENTRY, Atspi.Role.PASSWORD_TEXT)
-            if focused and (editable or role in text_roles):
-                report.write(True, 0, 2 if role == Atspi.Role.PASSWORD_TEXT else 0)
+            editable = states.contains(Atspi.StateType.EDITABLE) or role in text_roles
+            if focused and editable:
+                state["atspi_active"] = True
+                state["purpose"] = 2 if role == Atspi.Role.PASSWORD_TEXT else 0
+                sync_report()
             elif not focused and editable:
-                report.write(False)
+                state["atspi_active"] = False
+                state["purpose"] = 0
+                sync_report()
+            elif focused and not editable:
+                state["atspi_active"] = False
+                state["purpose"] = 0
+                sync_report()
         except Exception:
             pass
 
-    listener = Atspi.EventListener.new(on_focus)
-    listener.register("object:state-changed:focused")
+    def on_focus(event):
+        inspect_accessible(getattr(event, "source", None), bool(getattr(event, "detail1", 0)))
+
+    def on_caret(event):
+        src = getattr(event, "source", None)
+        try:
+            if src and src.get_state_set().contains(Atspi.StateType.FOCUSED):
+                inspect_accessible(src, True)
+        except Exception:
+            pass
+
+    def poll_x11_window():
+        win, classes = probe.active_window_classes()
+        is_term = bool(classes & X11_TEXT_WINDOW_CLASSES)
+        if win != state["last_win"] or is_term != state["x11_term"]:
+            if win != state["last_win"] and not is_term:
+                state["atspi_active"] = False
+            state["last_win"] = win
+            state["x11_term"] = is_term
+            sync_report()
+        return True
+
+    focus_listener = Atspi.EventListener.new(on_focus)
+    focus_listener.register("object:state-changed:focused")
+    caret_listener = Atspi.EventListener.new(on_caret)
+    caret_listener.register("object:text-caret-moved")
+    GLib.timeout_add(250, poll_x11_window)
     try:
         GLib.MainLoop().run()
     except KeyboardInterrupt:
@@ -128,56 +347,224 @@ def run_x11_atspi(report):
     return 0
 
 
-def main():
-    launch = os.environ.get("BL_LAUNCH_DIR", "")
-    report = Report(os.environ.get("BL_IME_DIR") or (os.path.join(launch, "agent") if launch else ""))
-    if "--x11" in sys.argv[1:]:
-        return run_x11_atspi(report)
+def run_wayland_ime(report):
     conn = Connection(connect_wayland())
     conn.send(DISPLAY_ID, 1, struct.pack("<I", REGISTRY_ID))
+
+    try:
+        from gi.repository import Gio, GLib
+    except Exception:
+        Gio = None
+        GLib = None
+
     contexts = {}
-    current = None
-    pending = None
-    while True:
-        timeout = None if pending is None else max(0.0, pending - time.monotonic())
-        try:
-            batch = conn.messages(timeout)
-        except (EOFError, ConnectionError):
+    state = {
+        "current": None,
+        "kwin_text": False,
+        "hint": 0,
+        "purpose": 0,
+        "settle_source": 0,
+    }
+
+    def desired_active():
+        return (state["current"] is not None) or state["kwin_text"]
+
+    def flush_state():
+        if desired_active():
+            if state["settle_source"] and GLib is not None:
+                GLib.source_remove(state["settle_source"])
+                state["settle_source"] = 0
+            report.write(True, state["hint"], state["purpose"])
+        elif GLib is not None:
+            if not state["settle_source"]:
+                def on_settle():
+                    state["settle_source"] = 0
+                    if not desired_active():
+                        report.write(False)
+                    return False
+                state["settle_source"] = GLib.timeout_add(int(SETTLE_SEC * 1000), on_settle)
+        else:
             report.write(False)
-            return 0
+
+    def handle_wayland_packets(batch):
         for obj, opcode, payload in batch:
             if obj == DISPLAY_ID and opcode == 0:
                 report.write(False)
-                return 1
+                return False
             if obj == REGISTRY_ID and opcode == 0:
                 (name,) = struct.unpack_from("<I", payload)
                 interface, offset = read_string(payload, 4)
                 (version,) = struct.unpack_from("<I", payload, offset)
                 if interface == "zwp_input_method_v1":
-                    conn.send(REGISTRY_ID, 0, struct.pack("<I", name) + wl_string(interface)
-                              + struct.pack("<II", min(version, 1), METHOD_ID))
+                    conn.send(
+                        REGISTRY_ID,
+                        0,
+                        struct.pack("<I", name) + wl_string(interface) + struct.pack("<II", min(version, 1), METHOD_ID),
+                    )
             elif obj == METHOD_ID and opcode == 0:
-                (context,) = struct.unpack_from("<I", payload)
-                contexts[context] = [0, 0]
-                current = context
-                pending = None
-                report.write(True)
+                (ctx_id,) = struct.unpack_from("<I", payload)
+                contexts[ctx_id] = [0, 0]
+                state["current"] = ctx_id
+                state["hint"] = 0
+                state["purpose"] = 0
+                flush_state()
             elif obj == METHOD_ID and opcode == 1:
-                (context,) = struct.unpack_from("<I", payload)
-                contexts.pop(context, None)
-                conn.send(context, 0)
-                if context == current:
-                    current = None
-                    pending = time.monotonic() + SETTLE
+                (ctx_id,) = struct.unpack_from("<I", payload)
+                contexts.pop(ctx_id, None)
+                conn.send(ctx_id, 0)
+                if ctx_id == state["current"]:
+                    state["current"] = None
+                    flush_state()
             elif obj in contexts and opcode == 2:
                 hint, purpose = struct.unpack_from("<II", payload)
                 contexts[obj] = [hint, purpose]
-                if obj == current:
-                    report.write(True, hint, purpose)
-        if pending is not None and time.monotonic() >= pending:
-            pending = None
-            if current is None:
-                report.write(False)
+                if obj == state["current"]:
+                    state["hint"] = hint
+                    state["purpose"] = purpose
+                    flush_state()
+        return True
+
+    if GLib is None or Gio is None:
+        # Fallback pure-socket loop if GI is absent
+        pending = None
+        while True:
+            timeout = None if pending is None else max(0.0, pending - time.monotonic())
+            ready, _, _ = select.select([conn.sock], [], [], timeout)
+            if ready:
+                try:
+                    if not handle_wayland_packets(conn.drain_messages()):
+                        return 1
+                except (EOFError, ConnectionError):
+                    report.write(False)
+                    return 0
+                if state["current"] is None and pending is None:
+                    pending = time.monotonic() + SETTLE_SEC
+                elif state["current"] is not None:
+                    pending = None
+            if pending is not None and time.monotonic() >= pending:
+                pending = None
+                if state["current"] is None:
+                    report.write(False)
+
+    loop = GLib.MainLoop()
+
+    def on_wayland_io(_fd, cond):
+        if cond & (GLib.IO_HUP | GLib.IO_ERR):
+            report.write(False)
+            loop.quit()
+            return False
+        try:
+            if not handle_wayland_packets(conn.drain_messages()):
+                loop.quit()
+                return False
+        except (EOFError, ConnectionError):
+            report.write(False)
+            loop.quit()
+            return False
+        return True
+
+    GLib.io_add_watch(conn.sock.fileno(), GLib.IO_IN | GLib.IO_HUP | GLib.IO_ERR, on_wayland_io)
+
+    try:
+        bus = Gio.bus_get_sync(Gio.BusType.SESSION, None)
+
+        def query_kwin_vk():
+            try:
+                bus.call_sync(
+                    "org.kde.KWin",
+                    "/VirtualKeyboard",
+                    "org.freedesktop.DBus.Properties",
+                    "Set",
+                    GLib.Variant("(ssv)", ("org.kde.kwin.VirtualKeyboard", "enabled", GLib.Variant("b", True))),
+                    None,
+                    Gio.DBusCallFlags.NONE,
+                    800,
+                    None,
+                )
+            except Exception:
+                pass
+            try:
+                res = bus.call_sync(
+                    "org.kde.KWin",
+                    "/VirtualKeyboard",
+                    "org.freedesktop.DBus.Properties",
+                    "Get",
+                    GLib.Variant("(ss)", ("org.kde.kwin.VirtualKeyboard", "activeClientSupportsTextInput")),
+                    GLib.VariantType("(v)"),
+                    Gio.DBusCallFlags.NONE,
+                    800,
+                    None,
+                )
+                val = bool(res.unpack()[0])
+                if val != state["kwin_text"]:
+                    state["kwin_text"] = val
+                    flush_state()
+            except Exception:
+                pass
+            return False
+
+        def on_kwin_props(_conn, _sender, _path, _iface, _sig, params):
+            try:
+                iface_name, changed, _invalidated = params.unpack()
+                if iface_name == "org.kde.kwin.VirtualKeyboard" and "activeClientSupportsTextInput" in changed:
+                    val = bool(changed["activeClientSupportsTextInput"])
+                    if val != state["kwin_text"]:
+                        state["kwin_text"] = val
+                        flush_state()
+                elif iface_name == "org.kde.kwin.VirtualKeyboard":
+                    query_kwin_vk()
+            except Exception:
+                pass
+
+        bus.signal_subscribe(
+            "org.kde.KWin",
+            "org.freedesktop.DBus.Properties",
+            "PropertiesChanged",
+            "/VirtualKeyboard",
+            None,
+            Gio.DBusSignalFlags.NONE,
+            on_kwin_props,
+        )
+        GLib.timeout_add(400, query_kwin_vk)
+        # Periodic lightweight check in case KWin emits signal without dict payload
+        def poll_kwin_vk():
+            try:
+                res = bus.call_sync(
+                    "org.kde.KWin",
+                    "/VirtualKeyboard",
+                    "org.freedesktop.DBus.Properties",
+                    "Get",
+                    GLib.Variant("(ss)", ("org.kde.kwin.VirtualKeyboard", "activeClientSupportsTextInput")),
+                    GLib.VariantType("(v)"),
+                    Gio.DBusCallFlags.NONE,
+                    300,
+                    None,
+                )
+                val = bool(res.unpack()[0])
+                if val != state["kwin_text"]:
+                    state["kwin_text"] = val
+                    flush_state()
+            except Exception:
+                pass
+            return True
+        GLib.timeout_add(350, poll_kwin_vk)
+    except Exception:
+        pass
+
+    try:
+        loop.run()
+    except KeyboardInterrupt:
+        pass
+    finally:
+        report.write(False)
+    return 0
+
+
+def main():
+    report = Report(resolve_state_file())
+    if "--x11" in sys.argv[1:]:
+        return run_x11_ime(report)
+    return run_wayland_ime(report)
 
 
 if __name__ == "__main__":

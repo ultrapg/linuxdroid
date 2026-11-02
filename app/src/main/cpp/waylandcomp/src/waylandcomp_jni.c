@@ -44,6 +44,7 @@ extern volatile unsigned g_zero_copy_last;
 extern volatile int g_ubwc;
 extern volatile int g_no_render_node;
 extern volatile int g_output_w, g_output_h;
+extern volatile float g_desktop_scale;
 
 #define TAG "LinuxDroidWayland"
 
@@ -385,6 +386,12 @@ Java_com_linuxdroid_app_wayland_WaylandCompositor_nativeSetOutputSize(JNIEnv *en
     (void)env; (void)clazz;
     g_output_w = w > 0 ? w : 0;
     g_output_h = h > 0 ? h : 0;
+}
+
+JNIEXPORT void JNICALL
+Java_com_linuxdroid_app_wayland_WaylandCompositor_nativeSetDesktopScale(JNIEnv *env, jclass clazz, jfloat scale) {
+    (void)env; (void)clazz;
+    g_desktop_scale = scale >= 1.0f ? (float)scale : 1.0f;
 }
 
 JNIEXPORT void JNICALL

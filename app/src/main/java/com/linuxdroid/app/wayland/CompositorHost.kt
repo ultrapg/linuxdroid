@@ -24,6 +24,7 @@ object CompositorHost {
         initialWidth: Int,
         initialHeight: Int,
         refreshHz: Float,
+        desktopScale: Float = 1.0f,
         surface: Surface? = null,
     ): Boolean {
         xdgRuntimeDir.mkdirs()
@@ -38,6 +39,7 @@ object CompositorHost {
         WaylandCompositor.nativeSetCursorComposite(true)
         WaylandCompositor.nativeSetRenderOnCommit(true)
         WaylandCompositor.nativeSetScaleMode(1, 0)
+        WaylandCompositor.nativeSetDesktopScale(desktopScale)
         WaylandCompositor.nativeSetOutputSize(initialWidth, initialHeight)
         WaylandCompositor.nativeSetOutputRefreshRate(refreshHz)
 
@@ -46,7 +48,7 @@ object CompositorHost {
             val nativeLibDir = context.applicationInfo.nativeLibraryDir
             Log.i(
                 TAG,
-                "Starting Wayland compositor (${initialWidth}x${initialHeight}@${refreshHz}Hz, gpu=${gpu.deviceName}, hostDriver=${hostDriver?.libraryName ?: "system"})"
+                "Starting Wayland compositor (${initialWidth}x${initialHeight}@${refreshHz}Hz, scale=${desktopScale}, gpu=${gpu.deviceName}, hostDriver=${hostDriver?.libraryName ?: "system"})"
             )
             WaylandCompositor.nativeStartWithSurface(
                 surface,
@@ -55,8 +57,13 @@ object CompositorHost {
                 hostDriver?.libraryName,
                 nativeLibDir,
             )
-        } else if (surface != null) {
-            attachSurface(surface, initialWidth, initialHeight, refreshHz)
+        } else {
+            if (initialWidth > 0 && initialHeight > 0) {
+                WaylandCompositor.nativeResizeOutput(initialWidth, initialHeight)
+            }
+            if (surface != null) {
+                attachSurface(surface, initialWidth, initialHeight, refreshHz, desktopScale)
+            }
         }
 
         val socketFile = File(xdgRuntimeDir, "wayland-0")
@@ -90,7 +97,14 @@ object CompositorHost {
         }
     }
 
-    fun attachSurface(surface: Surface?, width: Int, height: Int, refreshHz: Float) {
+    fun attachSurface(
+        surface: Surface?,
+        width: Int,
+        height: Int,
+        refreshHz: Float,
+        desktopScale: Float = 1.0f,
+    ) {
+        WaylandCompositor.nativeSetDesktopScale(desktopScale)
         if (width > 0 && height > 0) {
             WaylandCompositor.nativeResizeOutput(width, height)
         }

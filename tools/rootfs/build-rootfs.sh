@@ -4,7 +4,7 @@
 #   - Fresh Mesa Vulkan & OpenGL stack (Venus, VirGL, PanVK/Panfrost, Zink, Lavapipe/LLVMpipe)
 #   - Qualcomm Adreno KGSL Mesa Turnip (DD-Turnip-v0.3.4, protected via dpkg-divert)
 #   - FEX-Emu (fex-emu-armv8.0) preferred for x86/x86_64 Linux binary translation
-#   - Official Mozilla ARM64 .deb Firefox (WebRender GPU enabled, zero Snap) & MPV
+#   - Native ARM64 .deb Chromium with active filesystem + Seccomp-BPF sandboxing (zero Snap) & MPV
 #   - LinuxDroid guest workstation bridges (D-Bus UPower/NetworkManager, IME, clipboard, root)
 
 set -euo pipefail
@@ -14,7 +14,7 @@ OUT_DIR="${OUT_DIR:-$REPO_ROOT/dist}"
 WORK_DIR="${WORK_DIR:-/tmp/linuxdroid-rootfs-build}"
 CACHE_DIR="${CACHE_DIR:-$WORK_DIR/cache}"
 GITHUB_REPO="${GITHUB_REPO:-ultrapg/linuxdroid}"
-RELEASE_TAG="${RELEASE_TAG:-v1.0.3}"
+RELEASE_TAG="${RELEASE_TAG:-v1.0.4}"
 
 UBUNTU_BASE_URL="https://cdimage.ubuntu.com/ubuntu-base/releases/24.04/release/ubuntu-base-24.04.5-base-arm64.tar.gz"
 UBUNTU_BASE_SHA256="a91d5a93010193712d346d761372b7c9db6dfcf093893161c64ca107f05914f2"
@@ -29,7 +29,7 @@ TALLOC_SHA256="dc46c40b9f46bb34dd97fe41f548b0e8b247b77a918576733c528e83abd854dd"
 
 FEX_PPA_FPR="EDB98BFE8A2310DC9C4A376E76DBFEBEA206F5AC"
 KISAK_PPA_FPR="EB8B81E14DA65431D7504EA8F63F0F2B90935439"
-MOZILLA_APT_FPR="35BAA0B33E9EB396F59CA838C0BA5CE6DC6315A3"
+XTRADEB_PPA_FPR="5301FA4FD93244FBC6F6149982BB6851C64F6880"
 
 log() {
   printf '\n==> [%s] %s\n' "$(date -u '+%H:%M:%S')" "$*"
@@ -71,27 +71,6 @@ fetch_key_by_fpr() {
   fi
   sudo mkdir -p "$(dirname "$dest_gpg")"
   gpg --homedir "$tmp_gnupg" --batch --export "$fpr" | sudo tee "$dest_gpg" >/dev/null
-  sudo chmod 0644 "$dest_gpg"
-  rm -rf "$tmp_gnupg"
-}
-
-fetch_mozilla_key() {
-  local dest_gpg="$1"
-  local tmp_gnupg tmp_key
-  tmp_gnupg="$(mktemp -d)"
-  tmp_key="$tmp_gnupg/mozilla.key"
-  chmod 700 "$tmp_gnupg"
-  curl -fsSL "https://packages.mozilla.org/apt/repo-signing-key.gpg" -o "$tmp_key"
-  gpg --homedir "$tmp_gnupg" --batch --import "$tmp_key"
-  local got_fpr
-  got_fpr="$(gpg --homedir "$tmp_gnupg" --batch --with-colons --fingerprint "$MOZILLA_APT_FPR" | awk -F: '/^fpr:/ {print $10; exit}')"
-  if [ "$got_fpr" != "$MOZILLA_APT_FPR" ]; then
-    rm -rf "$tmp_gnupg"
-    echo "ERROR: Mozilla APT GPG fingerprint mismatch (expected $MOZILLA_APT_FPR, got $got_fpr)" >&2
-    exit 1
-  fi
-  sudo mkdir -p "$(dirname "$dest_gpg")"
-  gpg --homedir "$tmp_gnupg" --batch --export "$MOZILLA_APT_FPR" | sudo tee "$dest_gpg" >/dev/null
   sudo chmod 0644 "$dest_gpg"
   rm -rf "$tmp_gnupg"
 }
@@ -201,6 +180,7 @@ clean_and_pack_rootfs() {
   printf 'linuxdroid\n' | sudo tee "$root/etc/hostname" >/dev/null
   sudo chmod 0644 "$root/etc/hostname"
 
+  sudo rm -rf "$root/host-rootfs"
   log "Packing $archive_out ..."
   mkdir -p "$(dirname "$archive_out")"
   rm -f "$archive_out"
@@ -211,6 +191,7 @@ clean_and_pack_rootfs() {
     --exclude='./dev/*' \
     --exclude='./proc/*' \
     --exclude='./sys/*' \
+    --exclude='./host-rootfs' \
     -C "$root" -cf - . \
     | zstd -T0 -15 -o "$archive_out"
 }
@@ -224,7 +205,8 @@ smoke_test_rootfs() {
     test -x '$desktop_bin'
     test -x /usr/bin/FEXInterpreter
     test -x /usr/bin/FEXRootFSFetcher
-    test -x /usr/bin/firefox
+    test -x /usr/bin/chromium
+    test -x /usr/lib/chromium/chrome-sandbox
     test -x /usr/bin/mpv
     test -x /usr/bin/Xwayland
     test -x /usr/bin/vulkaninfo
@@ -233,7 +215,7 @@ smoke_test_rootfs() {
     test -f /usr/share/vulkan/icd.d/freedreno_icd.aarch64.json
     test -f /usr/share/vulkan/icd.d/lvp_icd.aarch64.json
     ldd /usr/lib/aarch64-linux-gnu/libvulkan_freedreno.so | (! grep -q 'not found')
-    firefox --version
+    /usr/lib/chromium/chrome-sandbox --get-api
     python3 -c 'import gi; gi.require_version(\"Gio\", \"2.0\"); from gi.repository import Gio, GLib; print(\"Gio OK\")'
   "
 
@@ -305,15 +287,15 @@ Package: akonadi-* kdepim-* kde-games* kmail* korganizer* kaddressbook*
 Pin: release *
 Pin-Priority: -1
 
-Package: firefox*
-Pin: origin packages.mozilla.org
+Package: chromium*
+Pin: release o=LP-PPA-xtradeb-apps
 Pin-Priority: 1000
 APTPIN
 
-  log "Installing verified GPG keys for FEX-Emu PPA, Kisak Fresh Mesa PPA, and Mozilla Official APT..."
+  log "Installing verified GPG keys for FEX-Emu PPA, Kisak Fresh Mesa PPA, and XtraDeb Chromium PPA..."
   fetch_key_by_fpr "$FEX_PPA_FPR" "$WORK_DIR/base/usr/share/keyrings/fex-emu-archive-keyring.gpg"
   fetch_key_by_fpr "$KISAK_PPA_FPR" "$WORK_DIR/base/usr/share/keyrings/kisak-mesa-archive-keyring.gpg"
-  fetch_mozilla_key "$WORK_DIR/base/usr/share/keyrings/packages.mozilla.org.gpg"
+  fetch_key_by_fpr "$XTRADEB_PPA_FPR" "$WORK_DIR/base/usr/share/keyrings/xtradeb-apps-archive-keyring.gpg"
 
   log "Bootstrapping HTTPS certificates & APT repositories in base ARM64 rootfs..."
   run_in_rootfs "$WORK_DIR/base" /bin/bash -euxc '
@@ -329,11 +311,11 @@ FEXLIST
 deb [arch=arm64 signed-by=/usr/share/keyrings/kisak-mesa-archive-keyring.gpg] https://ppa.launchpadcontent.net/kisak/kisak-mesa/ubuntu noble main
 MESALIST
 
-  cat <<'MOZLIST' | sudo tee "$WORK_DIR/base/etc/apt/sources.list.d/mozilla.list" >/dev/null
-deb [arch=arm64 signed-by=/usr/share/keyrings/packages.mozilla.org.gpg] https://packages.mozilla.org/apt mozilla main
-MOZLIST
+  cat <<'CHROMLIST' | sudo tee "$WORK_DIR/base/etc/apt/sources.list.d/xtradeb-apps.list" >/dev/null
+deb [arch=arm64 signed-by=/usr/share/keyrings/xtradeb-apps-archive-keyring.gpg] https://ppa.launchpadcontent.net/xtradeb/apps/ubuntu noble main
+CHROMLIST
 
-  log "Upgrading Ubuntu 24.04 base & installing shared GPU, FEX-Emu, Firefox, MPV & workstation stack..."
+  log "Upgrading Ubuntu 24.04 base & installing shared GPU, FEX-Emu, Chromium, MPV & workstation stack..."
   run_in_rootfs "$WORK_DIR/base" /bin/bash -euxc '
     apt-get update
     apt-get full-upgrade -y
@@ -353,7 +335,7 @@ MOZLIST
       libxshmfence1 libwayland-client0 \
       mesa-utils vulkan-tools \
       pulseaudio-utils libpulse0 pavucontrol alsa-utils \
-      firefox mpv \
+      chromium mpv \
       fex-emu-armv8.0 \
       fonts-noto-core fonts-noto-color-emoji fonts-dejavu-core fonts-liberation
 
@@ -416,8 +398,8 @@ MOZLIST
         xdg-desktop-portal xdg-desktop-portal-kde
     '
   fi
-  smoke_test_rootfs "$WORK_DIR/kde" "/usr/bin/startplasma-wayland"
   stage_linuxfs_overlay "$WORK_DIR/kde" "Ubuntu 24.04 LTS — KDE Plasma (Wayland)"
+  smoke_test_rootfs "$WORK_DIR/kde" "/usr/bin/startplasma-wayland"
   local kde_archive="$OUT_DIR/linuxdroid-ubuntu-kde-arm64.tar.zst"
   clean_and_pack_rootfs "$WORK_DIR/kde" "$kde_archive"
   sudo rm -rf "$WORK_DIR/kde"
@@ -432,8 +414,8 @@ MOZLIST
       zenity adwaita-icon-theme elementary-xfce-icon-theme greybird-gtk-theme \
       xdg-user-dirs xdg-user-dirs-gtk policykit-1-gnome
   '
-  smoke_test_rootfs "$WORK_DIR/xfce" "/usr/bin/startxfce4"
   stage_linuxfs_overlay "$WORK_DIR/xfce" "Ubuntu 24.04 LTS — XFCE4 Workstation"
+  smoke_test_rootfs "$WORK_DIR/xfce" "/usr/bin/startxfce4"
   local xfce_archive="$OUT_DIR/linuxdroid-ubuntu-xfce-arm64.tar.zst"
   clean_and_pack_rootfs "$WORK_DIR/xfce" "$xfce_archive"
   sudo rm -rf "$WORK_DIR/xfce"
@@ -458,7 +440,7 @@ catalog = {
             "id": "ubuntu-kde-arm64",
             "title": "Ubuntu 24.04 LTS — KDE Plasma (Wayland)",
             "desktop": "kde",
-            "description": "Full authentic KDE Plasma Breeze desktop with Konsole, Dolphin, Kate, Okular, Firefox, MPV, FEX-Emu, and hardware SoC Vulkan/OpenGL.",
+            "description": "Full KDE Plasma Breeze desktop with Konsole, Dolphin, Kate, Okular, sandboxed Chromium, MPV, FEX-Emu, and hardware SoC Vulkan/OpenGL.",
             "url": f"{base}/linuxdroid-ubuntu-kde-arm64.tar.zst",
             "sha256": kde_sha,
             "size_bytes": int(kde_size),
@@ -467,7 +449,7 @@ catalog = {
             "id": "ubuntu-xfce-arm64",
             "title": "Ubuntu 24.04 LTS — XFCE4 Workstation",
             "desktop": "xfce",
-            "description": "Lightweight stock XFCE4 desktop with Thunar, XFCE Terminal, Mousepad, Atril, Firefox, MPV, FEX-Emu, and hardware SoC Vulkan/OpenGL.",
+            "description": "Lightweight XFCE4 desktop with Thunar, XFCE Terminal, Mousepad, Atril, sandboxed Chromium, MPV, FEX-Emu, and hardware SoC Vulkan/OpenGL.",
             "url": f"{base}/linuxdroid-ubuntu-xfce-arm64.tar.zst",
             "sha256": xfce_sha,
             "size_bytes": int(xfce_size),

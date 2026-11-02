@@ -207,6 +207,7 @@ struct surface {
     struct wl_listener dmabuf_destroy;
     const void *last_dmabuf;
     int buf_w, buf_h, has_content;
+    int buf_scale, pending_buf_scale;
     int buf_alpha;
     int opaque[4], pending_opaque[4], pending_opaque_set;
     struct damage_list damage_buf, pending_damage_buf, damage_local, pending_damage_local;
@@ -304,6 +305,7 @@ static atomic_int g_output_refresh_pending;
 static int g_output_announced_refresh_mhz = 60000;
 
 volatile int g_output_w, g_output_h;
+volatile float g_desktop_scale = 1.0f;
 struct pending_release {
     struct wl_resource *buffer;
     struct wl_listener destroy;
@@ -440,6 +442,7 @@ static int g_cursor_hx, g_cursor_hy;
 static uint32_t g_cursor_px[CURSOR_MAX_PX];
 static uint32_t g_cursor_rb[CURSOR_MAX_PX];
 static int g_cursor_w, g_cursor_h;
+static int g_cursor_lw, g_cursor_lh;
 static int g_cursor_hidden = 1;
 static int g_cursor_serial;
 
@@ -461,25 +464,27 @@ static void cursor_publish_hidden(void) {
     pthread_mutex_unlock(&g_cursor_lock);
 }
 
-static void cursor_publish_pixels(const uint8_t *src, int w, int h, size_t stride, int hx, int hy) {
+static void cursor_publish_pixels(const uint8_t *src, int w, int h, int lw, int lh, size_t stride, int hx, int hy) {
     if (w <= 0 || h <= 0 || (int64_t)w * h > CURSOR_MAX_PX) return;
     pthread_mutex_lock(&g_cursor_lock);
     for (int y = 0; y < h; y++)
         memcpy(&g_cursor_px[y * w], src + (size_t)y * stride, (size_t)w * 4);
     g_cursor_w = w; g_cursor_h = h;
+    g_cursor_lw = lw > 0 ? lw : w;
+    g_cursor_lh = lh > 0 ? lh : h;
     g_cursor_hx = hx; g_cursor_hy = hy;
     g_cursor_hidden = 0;
     g_cursor_serial++;
     pthread_mutex_unlock(&g_cursor_lock);
 }
 
-static void cursor_publish_shm(struct wl_shm_buffer *shm, int hx, int hy) {
+static void cursor_publish_shm(struct wl_shm_buffer *shm, int lw, int lh, int hx, int hy) {
     int32_t w = wl_shm_buffer_get_width(shm), h = wl_shm_buffer_get_height(shm);
     int32_t stride = wl_shm_buffer_get_stride(shm);
     if (w <= 0 || h <= 0 || (int64_t)w * h > CURSOR_MAX_PX) return;
     if ((int64_t)stride < (int64_t)w * 4) return;
     wl_shm_buffer_begin_access(shm);
-    cursor_publish_pixels((const uint8_t *)wl_shm_buffer_get_data(shm), w, h, (size_t)stride, hx, hy);
+    cursor_publish_pixels((const uint8_t *)wl_shm_buffer_get_data(shm), w, h, lw, lh, (size_t)stride, hx, hy);
     wl_shm_buffer_end_access(shm);
 }
 
@@ -545,7 +550,17 @@ static struct dmabuf_buffer *get_dmabuf(struct wl_resource *buffer) {
 static void surface_size(const struct surface *s, int *w, int *h) {
     if (s->dst_set) { *w = s->dst[0]; *h = s->dst[1]; }
     else if (s->src_set) { *w = (int)(s->src[2] + 0.5f); *h = (int)(s->src[3] + 0.5f); }
-    else { *w = s->buf_w; *h = s->buf_h; }
+    else if (s->role == ROLE_TOPLEVEL && !g_desktop && g_desktop_scale > 1.01f &&
+             g_output_w > 0 && g_output_h > 0 &&
+             (s->buf_w > g_output_w || s->buf_h > g_output_h)) {
+        int lw = (int)(s->buf_w / g_desktop_scale + 0.5f);
+        int lh = (int)(s->buf_h / g_desktop_scale + 0.5f);
+        *w = lw > 0 ? lw : 1;
+        *h = lh > 0 ? lh : 1;
+    } else if (s->buf_scale > 1 && s->buf_w >= s->buf_scale && s->buf_h >= s->buf_scale) {
+        *w = s->buf_w / s->buf_scale;
+        *h = s->buf_h / s->buf_scale;
+    } else { *w = s->buf_w; *h = s->buf_h; }
 }
 
 static void describe(const struct surface *s, char *out, size_t size) {
@@ -1040,11 +1055,26 @@ static void surface_set_input(struct wl_client *c, struct wl_resource *r,
 
 static void send_toplevel_configure(struct surface *s);
 
+static void cursor_logical_dims(const struct surface *s, int buf_w, int buf_h, int *lw, int *lh) {
+    if (s && s->dst_set && s->dst[0] > 0 && s->dst[1] > 0) {
+        *lw = s->dst[0];
+        *lh = s->dst[1];
+    } else if (s && s->buf_scale > 1 && buf_w >= s->buf_scale && buf_h >= s->buf_scale) {
+        *lw = buf_w / s->buf_scale;
+        *lh = buf_h / s->buf_scale;
+    } else {
+        *lw = buf_w;
+        *lh = buf_h;
+    }
+}
+
 static void cursor_publish_buffer(struct surface *s, struct wl_resource *buffer) {
     struct dmabuf_buffer *db = get_dmabuf(buffer);
     struct wl_shm_buffer *shm = db ? NULL : wl_shm_buffer_get(buffer);
+    int lw = 0, lh = 0;
     if (shm) {
-        cursor_publish_shm(shm, g_cursor_hx, g_cursor_hy);
+        cursor_logical_dims(s, wl_shm_buffer_get_width(shm), wl_shm_buffer_get_height(shm), &lw, &lh);
+        cursor_publish_shm(shm, lw, lh, g_cursor_hx, g_cursor_hy);
     } else if (db && db->n_planes >= 1 && db->width > 0 && db->height > 0 &&
                (int64_t)db->width * db->height <= CURSOR_MAX_PX) {
         if (!db->img && !db->import_failed) {
@@ -1057,7 +1087,8 @@ static void cursor_publish_buffer(struct surface *s, struct wl_resource *buffer)
         int r;
         do { r = poll(&p, 1, 100); } while (r < 0 && errno == EINTR);
         if (vkp_image_readback(db->img, g_cursor_rb, CURSOR_MAX_PX) != 0) return;
-        cursor_publish_pixels((const uint8_t *)g_cursor_rb, db->width, db->height,
+        cursor_logical_dims(s, db->width, db->height, &lw, &lh);
+        cursor_publish_pixels((const uint8_t *)g_cursor_rb, db->width, db->height, lw, lh,
                               (size_t)db->width * 4, g_cursor_hx, g_cursor_hy);
     } else {
         return;
@@ -1143,6 +1174,9 @@ static void surface_commit(struct wl_client *c, struct wl_resource *r) {
         memcpy(s->opaque, s->pending_opaque, sizeof(s->opaque));
         s->pending_opaque_set = 0;
     }
+    if (s->pending_buf_scale >= 1) {
+        s->buf_scale = s->pending_buf_scale;
+    }
 
     s->damage_buf = s->pending_damage_buf;
     s->damage_local = s->pending_damage_local;
@@ -1211,7 +1245,10 @@ static void surface_commit(struct wl_client *c, struct wl_resource *r) {
     schedule_render();
 }
 static void surface_set_buffer_transform(struct wl_client *c, struct wl_resource *r, int32_t t) {}
-static void surface_set_buffer_scale(struct wl_client *c, struct wl_resource *r, int32_t s) {}
+static void surface_set_buffer_scale(struct wl_client *c, struct wl_resource *r, int32_t s) {
+    struct surface *surf = wl_resource_get_user_data(r);
+    if (surf && s >= 1) surf->pending_buf_scale = s;
+}
 static void surface_damage_buffer(struct wl_client *c, struct wl_resource *r,
                                   int32_t x, int32_t y, int32_t w, int32_t h) {
     struct surface *s = wl_resource_get_user_data(r);
@@ -1325,6 +1362,8 @@ static void compositor_create_surface(struct wl_client *c, struct wl_resource *r
     if (!s) { wl_client_post_no_memory(c); return; }
     s->resource = wl_resource_create(c, &wl_surface_interface, wl_resource_get_version(r), id);
     if (!s->resource) { free(s); wl_client_post_no_memory(c); return; }
+    s->buf_scale = 1;
+    s->pending_buf_scale = 1;
     wl_list_init(&s->pending_frames);
     wl_list_init(&s->frames);
     wl_list_init(&s->pending_feedback);
@@ -2435,7 +2474,9 @@ static void pointer_set_cursor(struct wl_client *c, struct wl_resource *r, uint3
     } else if (g_cursor_shown == s) {
         cursor_publish_shown();
     } else if (s->idle_px) {
-        cursor_publish_pixels((const uint8_t *)s->idle_px, s->idle_w, s->idle_h, (size_t)s->idle_w * 4, hx, hy);
+        int lw = 0, lh = 0;
+        cursor_logical_dims(s, s->idle_w, s->idle_h, &lw, &lh);
+        cursor_publish_pixels((const uint8_t *)s->idle_px, s->idle_w, s->idle_h, lw, lh, (size_t)s->idle_w * 4, hx, hy);
         g_cursor_shown = s;
     }
     if (atomic_load(&g_cursor_composite)) schedule_render();
@@ -2648,11 +2689,13 @@ static int cursor_clip_to_eye(int scene_w, int eye, int x0, int w, int *dx, int 
 static int add_cursor(struct draw_list *dl, int scene_w) {
     if (!atomic_load(&g_cursor_composite) || !g_ptr_known || pointer_locked_for_cursor()) return 0;
 
-    int hidden, w, h, hx, hy, serial;
+    int hidden, w, h, lw, lh, hx, hy, serial;
     uint32_t *copy = NULL;
     pthread_mutex_lock(&g_cursor_lock);
     hidden = g_cursor_hidden;
     w = g_cursor_w; h = g_cursor_h;
+    lw = g_cursor_lw > 0 ? g_cursor_lw : w;
+    lh = g_cursor_lh > 0 ? g_cursor_lh : h;
     hx = g_cursor_hx; hy = g_cursor_hy;
     serial = g_cursor_serial;
     if (!hidden && w > 0 && h > 0 && serial != g_cursor_img_serial) {
@@ -2689,12 +2732,13 @@ static int add_cursor(struct draw_list *dl, int scene_w) {
         if (!d) return 0;
         dl->d = d; dl->cap = cap;
     }
+    const float scale_x = lw > 0 ? (float)w / (float)lw : 1.0f;
     int appended = 0;
     for (int i = 0; i < count; i++) {
         int dx, sx, cw;
-        if (!cursor_clip_to_eye(scene_w, -1, xs[i], w, &dx, &sx, &cw)) continue;
-        dl->d[dl->n++] = (struct vkp_draw){g_cursor_img, (float)sx, 0, (float)cw, (float)h,
-                                           dx, (int)(g_ptr_y + 0.5) - hy, cw, h, 1};
+        if (!cursor_clip_to_eye(scene_w, -1, xs[i], lw, &dx, &sx, &cw)) continue;
+        dl->d[dl->n++] = (struct vkp_draw){g_cursor_img, (float)sx * scale_x, 0, (float)cw * scale_x, (float)h,
+                                           dx, (int)(g_ptr_y + 0.5) - hy, cw, lh, 1};
         appended++;
     }
     return appended ? 1 : 0;

@@ -147,6 +147,7 @@ public final class WaylandCompositor {
     public static native void nativeSetOutputRefreshRate(float hz);
     public static native void nativeResetFirstFrame();
     public static native void nativeSetOutputSize(int width, int height);
+    public static native void nativeSetDesktopScale(float scale);
     public static native void nativeResizeOutput(int width, int height);
     public static native void nativeSetScaleMode(int mode, int alignment);
     public static native boolean nativeScenePictureRect(float[] out);

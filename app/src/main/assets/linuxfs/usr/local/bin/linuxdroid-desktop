@@ -4,19 +4,13 @@ set -u
 export BL_DESKTOP=1
 export LINUXDROID_PARENT_WAYLAND="${WAYLAND_DISPLAY:-wayland-0}"
 export APPIMAGE_EXTRACT_AND_RUN=1
-export MOZ_DISABLE_CONTENT_SANDBOX=1
-export MOZ_DISABLE_GMP_SANDBOX=1
-export MOZ_DISABLE_RDD_SANDBOX=1
-export MOZ_DISABLE_SOCKET_PROCESS_SANDBOX=1
-export MOZ_DISABLE_UTILITY_SANDBOX=1
-export MOZ_SHM_NO_SEALS=1
-export ELECTRON_DISABLE_SANDBOX=1
-export NO_AT_BRIDGE=1
 export KDE_DEBUG=1
 export QT_LOGGING_RULES="${QT_LOGGING_RULES:-*.debug=false;qt.qpa.*=false}"
 
 WIDTH="${BL_WIDTH:-1920}"
 HEIGHT="${BL_HEIGHT:-1080}"
+PIXEL_WIDTH="${BL_PIXEL_WIDTH:-$WIDTH}"
+PIXEL_HEIGHT="${BL_PIXEL_HEIGHT:-$HEIGHT}"
 SCALE="${BL_SCALE:-1}"
 
 boot_step() {
@@ -86,7 +80,7 @@ start_x11_helpers() {
 }
 
 if [ "$desktop_choice" = "kde" ]; then
-  boot_step 5 "Starting KDE Plasma Wayland compositor (${WIDTH}x${HEIGHT})..."
+  boot_step 5 "Starting KDE Plasma Wayland compositor (${PIXEL_WIDTH}x${PIXEL_HEIGHT}, scale=${SCALE})..."
 
   export XDG_SESSION_TYPE=wayland
   export XDG_CURRENT_DESKTOP=KDE
@@ -105,8 +99,6 @@ if [ "$desktop_choice" = "kde" ]; then
   unset QT_QPA_PLATFORMTHEME
   export GDK_BACKEND="wayland,x11"
   export SDL_VIDEODRIVER="wayland,x11"
-  export MOZ_ENABLE_WAYLAND=1
-  export MOZ_USE_XINPUT2=1
 
   # Nested KWin Wayland uses QPainter wl_shm into LinuxDroid's Vulkan compositor so it starts
   # reliably across Snapdragon KGSL, MediaTek, and Exynos without requiring DRM/GBM modesetting.
@@ -136,21 +128,22 @@ X-KDE-Wayland-VirtualKeyboard=true
 ENTRY
 
   if command -v "$KWRITECONFIG" >/dev/null 2>&1; then
+    cursor_px=$(python3 -c "print(max(24, int(round(24 * float('$SCALE')))))" 2>/dev/null || echo 24)
     "$KWRITECONFIG" --file plasma-localerc --group Formats --key LANG "${LANG:-C.UTF-8}" 2>/dev/null || true
     "$KWRITECONFIG" --file kwinrc --group Wayland --key InputMethod "$HOME/.local/share/applications/linuxdroid-ime.desktop" 2>/dev/null || true
+    "$KWRITECONFIG" --file kwinrc --group Wayland --key VirtualKeyboardEnabled true 2>/dev/null || true
+    "$KWRITECONFIG" --file kwinrc --group Xwayland --key Scale "$SCALE" 2>/dev/null || true
+    "$KWRITECONFIG" --file kcminputrc --group Mouse --key cursorSize "$cursor_px" 2>/dev/null || true
     "$KWRITECONFIG" --file kscreenlockerrc --group Daemon --key Autolock false 2>/dev/null || true
     "$KWRITECONFIG" --file kscreenlockerrc --group Daemon --key LockOnResume false 2>/dev/null || true
     "$KWRITECONFIG" --file kdeglobals --group KDE --key AnimationDurationFactor 0 2>/dev/null || true
-    if [ "$SCALE" != "1" ] && [ "$SCALE" != "1.0" ]; then
-      dpi=$(python3 -c "print(int(round(96 * float('$SCALE'))))" 2>/dev/null || echo 96)
-      "$KWRITECONFIG" --file kcmfonts --group General --key forceFontDPI "$dpi" 2>/dev/null || true
-    else
-      "$KWRITECONFIG" --file kcmfonts --group General --key forceFontDPI 0 2>/dev/null || true
-    fi
+    # KWin Wayland applies native --scale $SCALE directly to Wayland outputs, so forceFontDPI must stay 0
+    # to avoid double-multiplying font sizes.
+    "$KWRITECONFIG" --file kcmfonts --group General --key forceFontDPI 0 2>/dev/null || true
   fi
 
-  start_x11_helpers ":0 :1" ""
-  echo "== linuxdroid-desktop: starting KDE Plasma Wayland (${WIDTH}x${HEIGHT}, scale=${SCALE}, KWIN_COMPOSE=${KWIN_COMPOSE})"
+  echo "== linuxdroid-desktop: starting KDE Plasma Wayland (logical=${WIDTH}x${HEIGHT}, pixel=${PIXEL_WIDTH}x${PIXEL_HEIGHT}, scale=${SCALE}, KWIN_COMPOSE=${KWIN_COMPOSE})"
+  export -f start_x11_helpers
   dbus-run-session -- /bin/bash -c '
     write_status() {
       echo "$2"
@@ -159,6 +152,7 @@ ENTRY
           mv -f "${BL_BOOT_STATUS}.tmp" "${BL_BOOT_STATUS}" 2>/dev/null || true
       fi
     }
+    start_x11_helpers ":0 :1" ""
     (
       for _ in $(seq 1 150); do
         if [ -S "$XDG_RUNTIME_DIR/wayland-1" ]; then
@@ -175,6 +169,7 @@ ENTRY
       done
       for _ in $(seq 1 300); do
         if dbus-send --session --dest=org.kde.plasmashell --type=method_call --print-reply /PlasmaShell org.freedesktop.DBus.Introspectable.Introspect 2>/dev/null | grep -q "org.kde.PlasmaShell"; then
+          dbus-send --session --dest=org.kde.KWin --type=method_call /VirtualKeyboard org.freedesktop.DBus.Properties.Set string:"org.kde.kwin.VirtualKeyboard" string:"enabled" variant:boolean:true >/dev/null 2>&1 || true
           sleep 1.2
           write_status "READY|KDE Plasma desktop ready" "== [BOOT READY] KDE Plasma desktop ready"
           break
@@ -191,6 +186,85 @@ ENTRY
   exit "$rc"
 fi
 
+configure_xfce_scaling() {
+  local scale_val="$1"
+  mkdir -p "$HOME/.config/xfce4/xfconf/xfce-perchannel-xml"
+  python3 - "$HOME/.config/xfce4/xfconf/xfce-perchannel-xml" "$scale_val" <<'PY' 2>/dev/null || true
+import os
+import sys
+import xml.etree.ElementTree as ET
+
+conf_dir = sys.argv[1]
+try:
+    scale = max(1.0, min(3.0, float(sys.argv[2])))
+except Exception:
+    scale = 1.0
+
+dpi = int(round(96.0 * scale))
+gdk_scale = 2 if scale >= 1.9 else 1
+cursor_size = int(round(24.0 * scale))
+wm_theme = "Default-xhdpi" if scale >= 1.75 else ("Default-hdpi" if scale >= 1.25 else "Default")
+
+def load_channel(filename, channel_name, fallback_path=None):
+    target = os.path.join(conf_dir, filename)
+    source = target if os.path.isfile(target) else (fallback_path if fallback_path and os.path.isfile(fallback_path) else None)
+    if source:
+        try:
+            tree = ET.parse(source)
+            return target, tree, tree.getroot()
+        except Exception:
+            pass
+    root = ET.Element("channel", {"name": channel_name, "version": "1.0"})
+    return target, ET.ElementTree(root), root
+
+def ensure_group(parent, name):
+    for child in parent.findall("property"):
+        if child.get("name") == name:
+            child.set("type", "empty")
+            child.attrib.pop("value", None)
+            return child
+    el = ET.SubElement(parent, "property", {"name": name, "type": "empty"})
+    return el
+
+def set_prop(parent, name, ptype, val):
+    for child in parent.findall("property"):
+        if child.get("name") == name:
+            child.clear()
+            child.set("name", name)
+            child.set("type", ptype)
+            child.set("value", str(val))
+            return
+    ET.SubElement(parent, "property", {"name": name, "type": ptype, "value": str(val)})
+
+# 1. xsettings.xml (DPI, Gdk/WindowScalingFactor, CursorThemeSize)
+xset_target, xset_tree, xset_root = load_channel(
+    "xsettings.xml",
+    "xsettings",
+    "/etc/xdg/xfce4/xfconf/xfce-perchannel-xml/xsettings.xml",
+)
+xft_grp = ensure_group(xset_root, "Xft")
+set_prop(xft_grp, "DPI", "int", dpi)
+set_prop(xft_grp, "Antialias", "int", 1)
+set_prop(xft_grp, "Hinting", "int", 1)
+set_prop(xft_grp, "HintStyle", "string", "hintslight")
+
+gdk_grp = ensure_group(xset_root, "Gdk")
+set_prop(gdk_grp, "WindowScalingFactor", "int", gdk_scale)
+
+gtk_grp = ensure_group(xset_root, "Gtk")
+set_prop(gtk_grp, "CursorThemeSize", "int", cursor_size)
+xset_tree.write(xset_target, encoding="UTF-8", xml_declaration=True)
+
+# 2. xfwm4.xml (compositing off + HiDPI window border theme)
+xfwm_target, xfwm_tree, xfwm_root = load_channel("xfwm4.xml", "xfwm4")
+gen_grp = ensure_group(xfwm_root, "general")
+set_prop(gen_grp, "use_compositing", "bool", "false")
+set_prop(gen_grp, "vblank_mode", "string", "off")
+set_prop(gen_grp, "theme", "string", wm_theme)
+xfwm_tree.write(xfwm_target, encoding="UTF-8", xml_declaration=True)
+PY
+}
+
 run_xwayland_desktop() {
   local session_cmd="$1"
   local desktop_name="$2"
@@ -201,10 +275,13 @@ run_xwayland_desktop() {
   local disp=":0"
   rm -f /tmp/.X0-lock /tmp/.X11-unix/X0 2>/dev/null || true
 
-  boot_step 5 "Starting Xwayland display server (${WIDTH}x${HEIGHT})..."
-  echo "== linuxdroid-desktop: starting Xwayland $disp (${WIDTH}x${HEIGHT}) on ${LINUXDROID_PARENT_WAYLAND} for $desktop_name"
+  local dpi
+  dpi=$(python3 -c "print(max(96, int(round(96 * float('$SCALE')))))" 2>/dev/null || echo 96)
+
+  boot_step 5 "Starting Xwayland display server (${WIDTH}x${HEIGHT}, scale=${SCALE})..."
+  echo "== linuxdroid-desktop: starting Xwayland $disp (${WIDTH}x${HEIGHT}, dpi=${dpi}) on ${LINUXDROID_PARENT_WAYLAND} for $desktop_name"
   env LIBGL_ALWAYS_SOFTWARE=1 GALLIUM_DRIVER=llvmpipe WAYLAND_DISPLAY="${LINUXDROID_PARENT_WAYLAND}" \
-    Xwayland "$disp" -noreset -fullscreen -geometry "${WIDTH}x${HEIGHT}" >/tmp/linuxdroid-xwayland.log 2>&1 &
+    Xwayland "$disp" -dpi "$dpi" -noreset -fullscreen -geometry "${WIDTH}x${HEIGHT}" >/tmp/linuxdroid-xwayland.log 2>&1 &
   local xw_pid=$!
   trap 'kill "$xw_pid" 2>/dev/null || true' EXIT TERM INT
 
@@ -226,18 +303,24 @@ run_xwayland_desktop() {
   export GDK_BACKEND=x11
   export QT_QPA_PLATFORM=xcb
   export SDL_VIDEODRIVER=x11
-  export MOZ_ENABLE_WAYLAND=0
+  export GTK_MODULES="gail:atk-bridge"
+  export QT_ACCESSIBILITY=1
+  export QT_LINUX_ACCESSIBILITY_ALWAYS_ON=1
+
+  printf 'Xft.dpi: %s\nXcursor.size: %s\n' \
+    "$dpi" \
+    "$(python3 -c "print(max(24, int(round(24 * float('$SCALE')))))" 2>/dev/null || echo 24)" \
+    | xrdb -nocpp -merge 2>/dev/null || true
 
   if [ "$SCALE" != "1" ] && [ "$SCALE" != "1.0" ]; then
-    local dpi
-    dpi=$(python3 -c "print(int(round(96 * float('$SCALE'))))" 2>/dev/null || echo 96)
-    printf 'Xft.dpi: %s\n' "$dpi" | xrdb -nocpp -merge 2>/dev/null || true
-    export GDK_SCALE=1
-    export QT_FONT_DPI="$dpi"
+    export QT_AUTO_SCREEN_SCALE_FACTOR=0
+    export QT_SCALE_FACTOR="$SCALE"
+    export QT_FONT_DPI=96
+  else
+    unset QT_SCALE_FACTOR QT_FONT_DPI
   fi
 
   boot_step 6 "Launching ${desktop_name} desktop session..."
-  start_x11_helpers "$disp" "x11-ime"
   (
     for i in $(seq 1 150); do
       if DISPLAY="$disp" xprop -root _NET_SUPPORTING_WM_CHECK 2>/dev/null | grep -q "window id"; then
@@ -252,7 +335,11 @@ run_xwayland_desktop() {
     boot_ready "${desktop_name} desktop ready"
   ) &
   local ready_pid=$!
-  dbus-run-session -- $session_cmd
+  export -f start_x11_helpers
+  dbus-run-session -- /bin/bash -c "
+    start_x11_helpers '$disp' 'x11-ime'
+    exec $session_cmd
+  "
   local rc=$?
   kill "$ready_pid" 2>/dev/null || true
   echo "== linuxdroid-desktop: ${desktop_name} exited (code=$rc)"
@@ -264,18 +351,7 @@ if [ "$desktop_choice" = "xfce" ]; then
   export XDG_CURRENT_DESKTOP=XFCE
   export XDG_SESSION_DESKTOP=xfce
   export DESKTOP_SESSION=xfce
-  mkdir -p "$HOME/.config/xfce4/xfconf/xfce-perchannel-xml"
-  if [ ! -f "$HOME/.config/xfce4/xfconf/xfce-perchannel-xml/xfwm4.xml" ]; then
-    cat > "$HOME/.config/xfce4/xfconf/xfce-perchannel-xml/xfwm4.xml" <<'XFWM'
-<?xml version="1.0" encoding="UTF-8"?>
-<channel name="xfwm4" version="1.0">
-  <property name="general" type="empty">
-    <property name="use_compositing" type="bool" value="false"/>
-    <property name="vblank_mode" type="string" value="off"/>
-  </property>
-</channel>
-XFWM
-  fi
+  configure_xfce_scaling "$SCALE"
   if [ ! -f "$HOME/.config/xfce4/xfconf/xfce-perchannel-xml/xfce4-session.xml" ]; then
     cat > "$HOME/.config/xfce4/xfconf/xfce-perchannel-xml/xfce4-session.xml" <<'XFSESS'
 <?xml version="1.0" encoding="UTF-8"?>

@@ -3,8 +3,11 @@ package com.linuxdroid.app.session
 import android.content.Context
 import android.content.pm.ActivityInfo
 import com.linuxdroid.app.gpu.GpuDriverMode
+import com.linuxdroid.app.runtime.LinuxRuntime
 import com.linuxdroid.app.runtime.UserProvisioner
 import org.json.JSONObject
+import java.io.File
+import kotlin.math.roundToInt
 
 enum class TouchInputMode(val id: String, val label: String) {
     TOUCHSCREEN("touchscreen", "Direct Touchscreen (Laptop Touch)"),
@@ -101,6 +104,29 @@ enum class ResolutionPreset(
             entries.firstOrNull { it.id == id } ?: NATIVE
     }
 }
+
+data class CompositorGeometry(
+    val pixelWidth: Int,
+    val pixelHeight: Int,
+    val compositorWidth: Int,
+    val compositorHeight: Int,
+    val compositorScale: Float,
+    val effectiveScale: Float,
+)
+
+data class SessionConfigSignature(
+    val editionId: String,
+    val resolutionPresetId: String,
+    val displayScale: Float,
+    val targetRefreshHz: Int,
+    val cpuCoreLimit: Int,
+    val gpuModeId: String,
+    val fastPath: Boolean,
+    val noSeccomp: Boolean,
+    val username: String,
+    val micEnabled: Boolean,
+    val customMountsHash: Int,
+)
 
 object SessionPrefs {
     private const val PREFS_NAME = "linuxdroid_prefs"
@@ -204,6 +230,13 @@ object SessionPrefs {
         prefs(context).edit().putString("touch_input_mode", mode.id).apply()
     }
 
+    fun showFloatingControls(context: Context): Boolean =
+        prefs(context).getBoolean("show_floating_controls", true)
+
+    fun setShowFloatingControls(context: Context, enabled: Boolean) {
+        prefs(context).edit().putBoolean("show_floating_controls", enabled).apply()
+    }
+
     fun micEnabled(context: Context): Boolean =
         prefs(context).getBoolean("mic_enabled", false)
 
@@ -257,9 +290,11 @@ object SessionPrefs {
         prefs(context).edit().putString("custom_mounts_json", obj.toString()).apply()
     }
 
-    fun computeEffectiveScale(context: Context, pixelWidth: Int, pixelHeight: Int): Float {
-        val explicit = displayScale(context)
-        if (explicit >= 1f) return explicit
+    fun computeEffectiveScale(context: Context, pixelWidth: Int, pixelHeight: Int): Float =
+        computeEffectiveScaleForExplicit(displayScale(context), pixelWidth, pixelHeight)
+
+    fun computeEffectiveScaleForExplicit(explicitScale: Float, pixelWidth: Int, pixelHeight: Int): Float {
+        if (explicitScale >= 1f) return explicitScale.coerceIn(1.0f, 3.0f)
         val maxDim = maxOf(pixelWidth, pixelHeight)
         val minDim = minOf(pixelWidth, pixelHeight)
         return when {
@@ -269,4 +304,68 @@ object SessionPrefs {
             else -> 1.0f
         }
     }
+
+    fun usesWaylandLogicalScale(context: Context): Boolean {
+        val de = desktopEnvironment(context)
+        if (de.equals("kde", ignoreCase = true)) return true
+        if (!de.equals("auto", ignoreCase = true)) return false
+        val editionId = LinuxRuntime.detectInstalledEditionId(context)
+        if (editionId == "ubuntu-kde-arm64") return true
+        if (editionId == "ubuntu-xfce-arm64") return false
+        return File(LinuxRuntime.rootDir(context), "usr/bin/startplasma-wayland").exists()
+    }
+
+    fun computeCompositorGeometry(
+        pixelWidth: Int,
+        pixelHeight: Int,
+        explicitScale: Float,
+        usesWaylandLogicalScale: Boolean,
+    ): CompositorGeometry {
+        val safeW = (pixelWidth and 1.inv()).coerceAtLeast(640)
+        val safeH = (pixelHeight and 1.inv()).coerceAtLeast(480)
+        val scale = computeEffectiveScaleForExplicit(explicitScale, safeW, safeH)
+        return if (usesWaylandLogicalScale && scale > 1.01f) {
+            val logicalW = ((safeW / scale).roundToInt() and 1.inv()).coerceAtLeast(480)
+            val logicalH = ((safeH / scale).roundToInt() and 1.inv()).coerceAtLeast(320)
+            CompositorGeometry(
+                pixelWidth = safeW,
+                pixelHeight = safeH,
+                compositorWidth = logicalW,
+                compositorHeight = logicalH,
+                compositorScale = scale,
+                effectiveScale = scale,
+            )
+        } else {
+            CompositorGeometry(
+                pixelWidth = safeW,
+                pixelHeight = safeH,
+                compositorWidth = safeW,
+                compositorHeight = safeH,
+                compositorScale = 1.0f,
+                effectiveScale = scale,
+            )
+        }
+    }
+
+    fun computeCompositorGeometry(context: Context, pixelWidth: Int, pixelHeight: Int): CompositorGeometry =
+        computeCompositorGeometry(
+            pixelWidth = pixelWidth,
+            pixelHeight = pixelHeight,
+            explicitScale = displayScale(context),
+            usesWaylandLogicalScale = usesWaylandLogicalScale(context),
+        )
+
+    fun currentConfigSignature(context: Context): SessionConfigSignature = SessionConfigSignature(
+        editionId = LinuxRuntime.detectInstalledEditionId(context).orEmpty(),
+        resolutionPresetId = resolutionPreset(context).id,
+        displayScale = displayScale(context),
+        targetRefreshHz = targetRefreshHz(context),
+        cpuCoreLimit = cpuCoreLimit(context),
+        gpuModeId = gpuMode(context).id,
+        fastPath = prootFastPath(context),
+        noSeccomp = prootNoSeccomp(context),
+        username = username(context),
+        micEnabled = micEnabled(context),
+        customMountsHash = customMounts(context).hashCode(),
+    )
 }

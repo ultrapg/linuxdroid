@@ -49,6 +49,7 @@ import androidx.compose.material.icons.outlined.BrightnessLow
 import androidx.compose.material.icons.outlined.Dashboard
 import androidx.compose.material.icons.outlined.ErrorOutline
 import androidx.compose.material.icons.outlined.Keyboard
+import androidx.compose.material.icons.outlined.Menu
 import androidx.compose.material.icons.outlined.Monitor
 import androidx.compose.material.icons.outlined.Mouse
 import androidx.compose.material.icons.outlined.Pause
@@ -57,6 +58,7 @@ import androidx.compose.material.icons.outlined.Refresh
 import androidx.compose.material.icons.outlined.ScreenRotation
 import androidx.compose.material.icons.outlined.Terminal
 import androidx.compose.material.icons.outlined.TouchApp
+import androidx.compose.material.icons.outlined.VisibilityOff
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
@@ -64,6 +66,7 @@ import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
@@ -132,6 +135,7 @@ class SessionActivity : ComponentActivity() {
     private val temporaryPhoneFallbackState = mutableStateOf(false)
     private val phoneScreenDimmedState = mutableStateOf(false)
     private val touchModeState = mutableStateOf(TouchInputMode.TOUCHSCREEN)
+    private val showFloatingControlsState = mutableStateOf(true)
 
     private var externalPresentation: ExternalMonitorPresentation? = null
     private var displayManager: DisplayManager? = null
@@ -174,6 +178,7 @@ class SessionActivity : ComponentActivity() {
         }
 
         touchModeState.value = SessionPrefs.touchInputMode(this)
+        showFloatingControlsState.value = SessionPrefs.showFloatingControls(this)
         val (initialMode, initialExt) = evaluateCurrentRouting()
         routingModeState.value = initialMode
         externalMonitorLabelState.value = initialExt?.let { DeXEnvironmentDetector.describeDisplay(it) }
@@ -198,8 +203,15 @@ class SessionActivity : ComponentActivity() {
                 override fun surfaceChanged(holder: SurfaceHolder, format: Int, width: Int, height: Int) {
                     if (isInternalSurfaceActive() && width > 0 && height > 0) {
                         val (outW, outH) = computeDesktopOutputSize(width, height)
+                        val geom = SessionPrefs.computeCompositorGeometry(this@SessionActivity, outW, outH)
                         val hz = selectBestRefreshRate()
-                        CompositorHost.attachSurface(holder.surface, outW, outH, hz)
+                        CompositorHost.attachSurface(
+                            holder.surface,
+                            geom.compositorWidth,
+                            geom.compositorHeight,
+                            hz,
+                            geom.compositorScale,
+                        )
                         ensureSessionStarted(outW, outH, hz)
                     }
                 }
@@ -215,22 +227,26 @@ class SessionActivity : ComponentActivity() {
         }
 
         imeCaptureView = ImeCaptureView(this).apply {
-            layoutParams = FrameLayout.LayoutParams(1, 1)
+            layoutParams = FrameLayout.LayoutParams(2, 2, Gravity.TOP or Gravity.START)
+            alpha = 0f
         }
         imeBridge = ImeBridge(
-            context = this,
+            activity = this,
             captureView = imeCaptureView,
             imeStateFile = File(LinuxRuntime.sessionDir(this), "ime.json"),
         )
 
         val overlayCompose = ComposeView(this).apply {
             setContent {
+                val imeVisible by imeBridge.imeVisible.collectAsState()
                 LinuxDroidTheme {
                     SessionOverlayUi(
                         routingMode = routingModeState.value,
                         externalMonitorLabel = externalMonitorLabelState.value,
                         phoneDimmed = phoneScreenDimmedState.value,
                         showQuickMenu = showQuickMenuState.value,
+                        showFloatingControls = showFloatingControlsState.value,
+                        imeVisible = imeVisible,
                         touchMode = touchModeState.value,
                         externalOnlyPref = SessionPrefs.externalDisplayMode(this@SessionActivity) == ExternalDisplayMode.EXTERNAL_ONLY,
                         onDismissQuickMenu = {
@@ -262,8 +278,19 @@ class SessionActivity : ComponentActivity() {
                             refreshDisplayRouting()
                         },
                         onToggleKeyboard = {
+                            val wasSheetOpen = showQuickMenuState.value
                             showQuickMenuState.value = false
-                            imeBridge.toggleKeyboard()
+                            if (wasSheetOpen) {
+                                imeBridge.showKeyboardManual()
+                            } else {
+                                imeBridge.toggleKeyboard()
+                            }
+                        },
+                        onToggleFloatingControls = {
+                            val next = !showFloatingControlsState.value
+                            showFloatingControlsState.value = next
+                            SessionPrefs.setShowFloatingControls(this@SessionActivity, next)
+                            showQuickMenuState.value = false
                         },
                         onToggleTouchMode = {
                             val next = if (touchModeState.value == TouchInputMode.TOUCHSCREEN) {
@@ -344,8 +371,16 @@ class SessionActivity : ComponentActivity() {
 
     override fun onResume() {
         super.onResume()
+        touchModeState.value = SessionPrefs.touchInputMode(this)
+        showFloatingControlsState.value = SessionPrefs.showFloatingControls(this)
         applyWindowAndDisplayMode()
         imeCaptureView.requestFocus()
+        if (isInternalSurfaceActive()) {
+            val holder = desktopSurfaceView.holder
+            if (holder.surface != null && holder.surface.isValid) {
+                bindInternalSurface(holder)
+            }
+        }
     }
 
     override fun onStop() {
@@ -396,10 +431,21 @@ class SessionActivity : ComponentActivity() {
 
         if (kc == KeyEvent.KEYCODE_BACK && (event.source and InputDevice.SOURCE_MOUSE) == 0) {
             if (event.action == KeyEvent.ACTION_UP && !event.isCanceled) {
-                setPhoneDimmed(false)
-                showQuickMenuState.value = !showQuickMenuState.value
+                if (imeBridge.imeVisible.value) {
+                    imeBridge.hideKeyboard()
+                } else {
+                    setPhoneDimmed(false)
+                    showQuickMenuState.value = !showQuickMenuState.value
+                }
             }
             return true
+        }
+
+        if (event.action == KeyEvent.ACTION_DOWN && event.deviceId > 0 && kc in KeyEvent.KEYCODE_A..KeyEvent.KEYCODE_Z) {
+            val dev = event.device
+            if (dev != null && !dev.isVirtual && dev.keyboardType == InputDevice.KEYBOARD_TYPE_ALPHABETIC) {
+                imeBridge.physicalKeyboardTyped = true
+            }
         }
 
         val evdev = KeyCodes.fromKeyCode(kc)
@@ -497,9 +543,24 @@ class SessionActivity : ComponentActivity() {
         val w = frame.width().takeIf { it > 0 } ?: desktopSurfaceView.width.takeIf { it > 0 } ?: 1920
         val h = frame.height().takeIf { it > 0 } ?: desktopSurfaceView.height.takeIf { it > 0 } ?: 1080
         val (outW, outH) = computeDesktopOutputSize(w, h)
+        val geom = SessionPrefs.computeCompositorGeometry(this, outW, outH)
         val hz = selectBestRefreshRate()
-        CompositorHost.ensureStarted(this, LinuxRuntime.runtimeDir(this), outW, outH, hz, holder.surface)
-        CompositorHost.attachSurface(holder.surface, outW, outH, hz)
+        CompositorHost.ensureStarted(
+            context = this,
+            xdgRuntimeDir = LinuxRuntime.runtimeDir(this),
+            initialWidth = geom.compositorWidth,
+            initialHeight = geom.compositorHeight,
+            refreshHz = hz,
+            desktopScale = geom.compositorScale,
+            surface = holder.surface,
+        )
+        CompositorHost.attachSurface(
+            holder.surface,
+            geom.compositorWidth,
+            geom.compositorHeight,
+            hz,
+            geom.compositorScale,
+        )
         ensureSessionStarted(outW, outH, hz)
     }
 
@@ -509,21 +570,25 @@ class SessionActivity : ComponentActivity() {
             SessionPrefs.setProotFastPath(this, false)
             SessionPrefs.setProotNoSeccomp(this, true)
         }
-        if (SessionState.isRunningOrPaused) {
-            SessionService.shutdown(this)
-        }
         SessionState.reset()
 
         val extDisp = externalPresentation?.display
         if (routingModeState.value == DisplayRoutingMode.EXTERNAL_MONITOR_HOTSWAP && extDisp != null) {
             val mode = extDisp.mode
             val (outW, outH) = SessionPrefs.resolutionPreset(this).resolveForSurface(mode.physicalWidth, mode.physicalHeight)
+            val geom = SessionPrefs.computeCompositorGeometry(this, outW, outH)
             val hz = selectBestRefreshRate(extDisp)
             val extHolder = externalPresentation?.surfaceHolder
             if (extHolder != null && extHolder.surface != null && extHolder.surface.isValid) {
-                CompositorHost.attachSurface(extHolder.surface, outW, outH, hz)
+                CompositorHost.attachSurface(
+                    extHolder.surface,
+                    geom.compositorWidth,
+                    geom.compositorHeight,
+                    hz,
+                    geom.compositorScale,
+                )
             }
-            SessionService.startOrResume(this, outW, outH, hz, forceCompat = safeMode)
+            SessionService.restart(this, outW, outH, hz, forceCompat = safeMode)
             return
         }
 
@@ -531,11 +596,18 @@ class SessionActivity : ComponentActivity() {
         val w = desktopSurfaceView.width.takeIf { it > 0 } ?: 1920
         val h = desktopSurfaceView.height.takeIf { it > 0 } ?: 1080
         val (outW, outH) = computeDesktopOutputSize(w, h)
+        val geom = SessionPrefs.computeCompositorGeometry(this, outW, outH)
         val hz = selectBestRefreshRate()
         if (isInternalSurfaceActive() && holder.surface != null && holder.surface.isValid) {
-            CompositorHost.attachSurface(holder.surface, outW, outH, hz)
+            CompositorHost.attachSurface(
+                holder.surface,
+                geom.compositorWidth,
+                geom.compositorHeight,
+                hz,
+                geom.compositorScale,
+            )
         }
-        SessionService.startOrResume(this, outW, outH, hz, forceCompat = safeMode)
+        SessionService.restart(this, outW, outH, hz, forceCompat = safeMode)
     }
 
     private fun navigateBackToDashboard() {
@@ -630,11 +702,12 @@ class SessionActivity : ComponentActivity() {
     }
 
     private fun ensureSessionStarted(width: Int, height: Int, refreshHz: Float) {
-        val phase = SessionState.state.value.phase
+        val snap = SessionState.state.value
+        val phase = snap.phase
         if (phase == SessionPhase.FAILED || phase == SessionPhase.STOPPING) return
-        if (!SessionState.isRunningOrPaused) {
-            SessionService.startOrResume(this, width, height, refreshHz)
-        } else if (SessionState.isPaused) {
+        val sigChanged = snap.activeConfigSignature != null &&
+            snap.activeConfigSignature != SessionPrefs.currentConfigSignature(this)
+        if (!SessionState.isRunningOrPaused || SessionState.isPaused || sigChanged) {
             SessionService.startOrResume(this, width, height, refreshHz)
         }
     }
@@ -690,16 +763,24 @@ class SessionActivity : ComponentActivity() {
                         val mode = display.mode
                         val (outW, outH) = SessionPrefs.resolutionPreset(this@SessionActivity)
                             .resolveForSurface(mode.physicalWidth, mode.physicalHeight)
+                        val geom = SessionPrefs.computeCompositorGeometry(this@SessionActivity, outW, outH)
                         val hz = selectBestRefreshRate(display)
                         CompositorHost.ensureStarted(
-                            this@SessionActivity,
-                            LinuxRuntime.runtimeDir(this@SessionActivity),
-                            outW,
-                            outH,
-                            hz,
-                            holder.surface,
+                            context = this@SessionActivity,
+                            xdgRuntimeDir = LinuxRuntime.runtimeDir(this@SessionActivity),
+                            initialWidth = geom.compositorWidth,
+                            initialHeight = geom.compositorHeight,
+                            refreshHz = hz,
+                            desktopScale = geom.compositorScale,
+                            surface = holder.surface,
                         )
-                        CompositorHost.attachSurface(holder.surface, outW, outH, hz)
+                        CompositorHost.attachSurface(
+                            holder.surface,
+                            geom.compositorWidth,
+                            geom.compositorHeight,
+                            hz,
+                            geom.compositorScale,
+                        )
                         ensureSessionStarted(outW, outH, hz)
                     }
 
@@ -708,8 +789,15 @@ class SessionActivity : ComponentActivity() {
                         if (width > 0 && height > 0) {
                             val (outW, outH) = SessionPrefs.resolutionPreset(this@SessionActivity)
                                 .resolveForSurface(width, height)
+                            val geom = SessionPrefs.computeCompositorGeometry(this@SessionActivity, outW, outH)
                             val hz = selectBestRefreshRate(display)
-                            CompositorHost.attachSurface(holder.surface, outW, outH, hz)
+                            CompositorHost.attachSurface(
+                                holder.surface,
+                                geom.compositorWidth,
+                                geom.compositorHeight,
+                                hz,
+                                geom.compositorScale,
+                            )
                         }
                     }
 
@@ -786,6 +874,8 @@ private fun SessionOverlayUi(
     externalMonitorLabel: String?,
     phoneDimmed: Boolean,
     showQuickMenu: Boolean,
+    showFloatingControls: Boolean,
+    imeVisible: Boolean,
     touchMode: TouchInputMode,
     externalOnlyPref: Boolean,
     onDismissQuickMenu: () -> Unit,
@@ -794,6 +884,7 @@ private fun SessionOverlayUi(
     onUsePhoneScreenTemporary: () -> Unit,
     onToggleExternalOnlyMode: () -> Unit,
     onToggleKeyboard: () -> Unit,
+    onToggleFloatingControls: () -> Unit,
     onToggleTouchMode: () -> Unit,
     onCycleOrientation: () -> Unit,
     onOpenTerminal: () -> Unit,
@@ -864,6 +955,14 @@ private fun SessionOverlayUi(
                 onOpenQuickMenu = onOpenQuickMenu,
             )
         }
+
+        showFloatingControls -> {
+            FloatingSessionControls(
+                imeVisible = imeVisible,
+                onToggleKeyboard = onToggleKeyboard,
+                onOpenQuickMenu = onOpenQuickMenu,
+            )
+        }
     }
 
     if (showQuickMenu) {
@@ -891,7 +990,12 @@ private fun SessionOverlayUi(
                 )
                 HorizontalDivider(modifier = Modifier.padding(vertical = 8.dp))
 
-                QuickMenuAction(Icons.Outlined.Keyboard, "Toggle Android Keyboard", onToggleKeyboard)
+                QuickMenuAction(Icons.Outlined.Keyboard, "Show Android On-Screen Keyboard", onToggleKeyboard)
+                QuickMenuAction(
+                    Icons.Outlined.VisibilityOff,
+                    if (showFloatingControls) "Hide Floating Keyboard & Menu Pill" else "Show Floating Keyboard & Menu Pill",
+                    onToggleFloatingControls,
+                )
                 QuickMenuAction(
                     if (touchMode == TouchInputMode.TOUCHSCREEN) Icons.Outlined.Mouse else Icons.Outlined.TouchApp,
                     if (touchMode == TouchInputMode.TOUCHSCREEN) "Switch to Virtual Trackpad" else "Switch to Direct Touchscreen",
@@ -902,8 +1006,16 @@ private fun SessionOverlayUi(
                     if (externalOnlyPref) "Disable External Screen Only Mode" else "Enable External Screen Only (VLC Mode)",
                     onToggleExternalOnlyMode,
                 )
-                QuickMenuAction(Icons.Outlined.ScreenRotation, "Cycle Screen Orientation (Landscape / Auto / Portrait)", onCycleOrientation)
+                QuickMenuAction(Icons.Outlined.ScreenRotation, "Cycle Screen Orientation", onCycleOrientation)
                 QuickMenuAction(Icons.Outlined.Terminal, "Open Linux Terminal", onOpenTerminal)
+                QuickMenuAction(
+                    Icons.Outlined.Refresh,
+                    "Restart Linux Session (Apply Settings)",
+                    {
+                        onDismissQuickMenu()
+                        onRetryBoot(false)
+                    },
+                )
                 QuickMenuAction(
                     Icons.Outlined.Pause,
                     if (snap.phase == SessionPhase.PAUSED) "Resume Frozen Session" else "Pause / Freeze Session (0% CPU)",
@@ -1482,6 +1594,54 @@ private fun ExternalMonitorTrackpadOverlay(
 }
 
 @Composable
+private fun FloatingSessionControls(
+    imeVisible: Boolean,
+    onToggleKeyboard: () -> Unit,
+    onOpenQuickMenu: () -> Unit,
+) {
+    Box(
+        modifier = Modifier
+            .fillMaxSize()
+            .padding(top = 10.dp, end = 12.dp),
+        contentAlignment = Alignment.TopEnd,
+    ) {
+        Surface(
+            shape = RoundedCornerShape(20.dp),
+            color = Color(0xB80E151E),
+            border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline.copy(alpha = 0.7f)),
+        ) {
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                modifier = Modifier.padding(horizontal = 4.dp, vertical = 2.dp),
+            ) {
+                IconButton(
+                    onClick = onToggleKeyboard,
+                    modifier = Modifier.size(34.dp),
+                ) {
+                    Icon(
+                        imageVector = Icons.Outlined.Keyboard,
+                        contentDescription = "Toggle On-Screen Keyboard",
+                        tint = if (imeVisible) MaterialTheme.colorScheme.secondary else MaterialTheme.colorScheme.onSurface,
+                        modifier = Modifier.size(19.dp),
+                    )
+                }
+                IconButton(
+                    onClick = onOpenQuickMenu,
+                    modifier = Modifier.size(34.dp),
+                ) {
+                    Icon(
+                        imageVector = Icons.Outlined.Menu,
+                        contentDescription = "Open Quick Menu",
+                        tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.size(19.dp),
+                    )
+                }
+            }
+        }
+    }
+}
+
+@Composable
 private fun QuickMenuAction(
     icon: ImageVector,
     label: String,
@@ -1501,7 +1661,7 @@ private fun QuickMenuAction(
                 text = label,
                 style = MaterialTheme.typography.bodyLarge,
                 color = MaterialTheme.colorScheme.onSurface,
-                maxLines = 1,
+                maxLines = 2,
                 overflow = TextOverflow.Ellipsis,
             )
         }

@@ -22,9 +22,11 @@ It pairs a native Vulkan/AHardwareBuffer Wayland compositor on Android with clea
 - **External Screen Only Mode (VLC Style, No DeX Required) + Samsung DeX**:
   - **External Screen Only**: Outputs the Linux desktop fullscreen directly onto any connected USB-C / HDMI monitor or Wireless Cast screen via Android's `Presentation` API — without requiring Samsung DeX — while turning the phone into a multi-touch trackpad & keyboard controller with 1-tap OLED screen dimming.
   - **Auto External & Samsung DeX**: Automatically switches to an external display when plugged in, or runs as a dynamically resizable desktop window inside Samsung DeX / Android Freeform Multi-Window.
+- **Sandboxed Native ARM64 Chromium**: Ships native ARM64 **Chromium** with active filesystem chroot jailing (`chrome-sandbox` Setuid API v1 + `/var/empty` path isolation) and Android kernel Seccomp-BPF sandboxing — zero `--no-sandbox` flags or warning banners.
+- **Native True-Pixel HiDPI Scaling (`100%`–`200%`)**: Full native pixel rendering via logical Wayland output scaling on KDE Plasma (`kwin_wayland --scale`) and XSettings `Gdk/WindowScalingFactor` + `Xft/DPI` on XFCE4, with live restart-and-apply from the Dashboard.
 - **Complete Android ↔ Linux Workstation Integration**:
   - Non-root workstation user (`linux`, `/home/linux`) with passwordless `sudo`, `pkexec`, and `linuxdroid-root` (`RootSpawner`).
-  - Automatic Android soft keyboard popup via Wayland `zwp_text_input_v3` & AT-SPI2 focus bridge (`linuxdroid-ime`).
+  - 1-tap floating on-screen keyboard pill plus automatic Android soft keyboard popup on both touchscreen taps and trackpad/mouse clicks into text fields (`zwp_text_input_v3`, KWin `/VirtualKeyboard` D-Bus, and X11 AT-SPI2).
   - Two-way clipboard sync, low-latency `AAudio` PulseAudio sink + optional microphone input, real battery % & charging state (`UPower`), dynamic Wi-Fi / DNS sync (`NetworkManager`), and `/home/linux/Android` storage + custom host folder mounts with Dolphin/Thunar sidebar bookmarks.
   - Persistent background Foreground Service with **Pause / Freeze** (`SIGSTOP`/`SIGCONT`, 0% CPU) and **Shut Down** controls directly from the Android notification.
 

@@ -215,8 +215,8 @@ class FrontEndActivity : ComponentActivity() {
 }
 
 private enum class DashboardTab(val label: String, val icon: ImageVector) {
-    WORKSTATION("Workstation", Icons.Outlined.Computer),
-    HARDWARE("CPU & GPU", Icons.Outlined.Memory),
+    WORKSTATION("Home", Icons.Outlined.Computer),
+    HARDWARE("Hardware", Icons.Outlined.Memory),
     DISPLAY("Display", Icons.Outlined.Monitor),
     SYSTEM("System", Icons.Outlined.Settings),
 }
@@ -254,6 +254,7 @@ private fun DashboardScreen(
     var refreshHzPref by remember { mutableIntStateOf(SessionPrefs.targetRefreshHz(context)) }
     var orientationPref by remember { mutableStateOf(SessionPrefs.orientation(context)) }
     var touchMode by remember { mutableStateOf(SessionPrefs.touchInputMode(context)) }
+    var showFloatingControls by remember { mutableStateOf(SessionPrefs.showFloatingControls(context)) }
     var micEnabled by remember { mutableStateOf(SessionPrefs.micEnabled(context)) }
     var fastPathEnabled by remember { mutableStateOf(SessionPrefs.prootFastPath(context)) }
     var noSeccompEnabled by remember { mutableStateOf(SessionPrefs.prootNoSeccomp(context)) }
@@ -262,6 +263,25 @@ private fun DashboardScreen(
     var showAddMountDialog by remember { mutableStateOf(false) }
     var logRefreshTick by remember { mutableIntStateOf(0) }
     var diagnosticLogPreview by remember { mutableStateOf("") }
+
+    val currentConfigSig = remember(
+        installedEditionId,
+        resolution,
+        scalePref,
+        refreshHzPref,
+        cpuCoreLimit,
+        gpuMode,
+        fastPathEnabled,
+        noSeccompEnabled,
+        username,
+        micEnabled,
+        customMounts,
+    ) {
+        SessionPrefs.currentConfigSignature(context)
+    }
+    val hasPendingRestartChanges = (sessionSnap.phase == SessionPhase.RUNNING || sessionSnap.phase == SessionPhase.PAUSED) &&
+        sessionSnap.activeConfigSignature != null &&
+        sessionSnap.activeConfigSignature != currentConfigSig
 
     val resolvedGpu = remember(gpuMode, gpuInfo) {
         GpuConfigGenerator.resolve(gpuMode, gpuInfo, LinuxRuntime.VIRGL_SOCKET_GUEST_PATH)
@@ -400,8 +420,14 @@ private fun DashboardScreen(
                                 Icon(Icons.Outlined.PlayArrow, contentDescription = null, modifier = Modifier.size(18.dp))
                                 Spacer(Modifier.width(4.dp))
                                 Text(
-                                    text = if (sessionSnap.phase == SessionPhase.RUNNING) "Open" else "Launch",
+                                    text = when {
+                                        hasPendingRestartChanges -> "Apply"
+                                        sessionSnap.phase == SessionPhase.RUNNING -> "Open"
+                                        else -> "Launch"
+                                    },
                                     style = MaterialTheme.typography.labelLarge,
+                                    softWrap = false,
+                                    maxLines = 1,
                                 )
                             }
                         }
@@ -415,7 +441,7 @@ private fun DashboardScreen(
                     }
                 }
 
-                // Fixed Navigation Tab Row
+                // Fixed Navigation Tab Row (stacked icon + concise label so zero tabs truncate on narrow phones)
                 TabRow(
                     selectedTabIndex = selectedTab,
                     containerColor = MaterialTheme.colorScheme.surface,
@@ -426,21 +452,23 @@ private fun DashboardScreen(
                         Tab(
                             selected = selectedTab == index,
                             onClick = { selectedTab = index },
-                            modifier = Modifier.height(46.dp),
-                            text = {
-                                Row(
-                                    verticalAlignment = Alignment.CenterVertically,
-                                    horizontalArrangement = Arrangement.spacedBy(6.dp),
-                                ) {
-                                    Icon(tab.icon, contentDescription = null, modifier = Modifier.size(16.dp))
-                                    Text(
-                                        text = tab.label,
-                                        maxLines = 1,
-                                        overflow = TextOverflow.Ellipsis,
-                                    )
-                                }
-                            },
-                        )
+                            modifier = Modifier.height(54.dp),
+                        ) {
+                            Column(
+                                horizontalAlignment = Alignment.CenterHorizontally,
+                                verticalArrangement = Arrangement.spacedBy(2.dp),
+                                modifier = Modifier.padding(horizontal = 4.dp, vertical = 4.dp),
+                            ) {
+                                Icon(tab.icon, contentDescription = null, modifier = Modifier.size(18.dp))
+                                Text(
+                                    text = tab.label,
+                                    style = MaterialTheme.typography.labelMedium,
+                                    softWrap = false,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis,
+                                )
+                            }
+                        }
                     }
                 }
 
@@ -455,9 +483,49 @@ private fun DashboardScreen(
                         .weight(1f)
                         .fillMaxWidth()
                         .verticalScroll(tabScrollState)
-                        .padding(horizontal = 18.dp, vertical = 16.dp),
+                        .padding(horizontal = 16.dp, vertical = 14.dp),
                     verticalArrangement = Arrangement.spacedBy(14.dp),
                 ) {
+                    if (hasPendingRestartChanges) {
+                        Surface(
+                            shape = RoundedCornerShape(12.dp),
+                            color = MaterialTheme.colorScheme.primary.copy(alpha = 0.14f),
+                            border = BorderStroke(1.dp, MaterialTheme.colorScheme.primary.copy(alpha = 0.6f)),
+                            modifier = Modifier.fillMaxWidth(),
+                        ) {
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(horizontal = 14.dp, vertical = 10.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(10.dp),
+                            ) {
+                                Column(modifier = Modifier.weight(1f)) {
+                                    Text(
+                                        text = "Settings updated for active session",
+                                        style = MaterialTheme.typography.bodyMedium,
+                                        fontWeight = FontWeight.SemiBold,
+                                        color = MaterialTheme.colorScheme.onSurface,
+                                    )
+                                    Text(
+                                        text = "Restart & open the desktop to apply your new HiDPI scaling, display, or hardware settings.",
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    )
+                                }
+                                Button(
+                                    onClick = onLaunchDesktop,
+                                    contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp),
+                                    modifier = Modifier.height(36.dp),
+                                ) {
+                                    Icon(Icons.Outlined.Refresh, contentDescription = null, modifier = Modifier.size(16.dp))
+                                    Spacer(Modifier.width(4.dp))
+                                    Text("Restart", softWrap = false, maxLines = 1)
+                                }
+                            }
+                        }
+                    }
+
                     when (DashboardTab.entries[selectedTab]) {
                         DashboardTab.WORKSTATION -> WorkstationTabContent(
                             sessionSnap = sessionSnap,
@@ -465,6 +533,7 @@ private fun DashboardScreen(
                             installedReady = installedReady,
                             installedLabel = installedLabel,
                             installedEditionId = installedEditionId,
+                            hasPendingRestartChanges = hasPendingRestartChanges,
                             username = username,
                             effectiveCpuCores = effectiveCpuCores,
                             totalCpuCores = cpuTopology.totalCores,
@@ -542,6 +611,11 @@ private fun DashboardScreen(
                             onSelectTouchMode = { mode ->
                                 touchMode = mode
                                 SessionPrefs.setTouchInputMode(context, mode)
+                            },
+                            showFloatingControls = showFloatingControls,
+                            onToggleFloatingControls = { enabled ->
+                                showFloatingControls = enabled
+                                SessionPrefs.setShowFloatingControls(context, enabled)
                             },
                         )
 
@@ -665,6 +739,7 @@ private fun WorkstationTabContent(
     installedReady: Boolean,
     installedLabel: String,
     installedEditionId: String?,
+    hasPendingRestartChanges: Boolean,
     username: String,
     effectiveCpuCores: Int,
     totalCpuCores: Int,
@@ -706,7 +781,7 @@ private fun WorkstationTabContent(
                     text = installedLabel,
                     style = MaterialTheme.typography.titleMedium,
                     fontWeight = FontWeight.SemiBold,
-                    maxLines = 1,
+                    maxLines = 2,
                     overflow = TextOverflow.Ellipsis,
                 )
                 Text(
@@ -729,7 +804,7 @@ private fun WorkstationTabContent(
                     } else {
                         MaterialTheme.colorScheme.onSurfaceVariant
                     },
-                    maxLines = 1,
+                    maxLines = if (sessionSnap.phase == SessionPhase.STARTING) 1 else 2,
                     overflow = TextOverflow.Ellipsis,
                 )
             }
@@ -768,25 +843,32 @@ private fun WorkstationTabContent(
 
         Row(
             modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.spacedBy(10.dp),
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
         ) {
             Button(
                 onClick = onLaunchDesktop,
                 enabled = installedReady && !installSnap.active,
+                contentPadding = PaddingValues(horizontal = 12.dp, vertical = 8.dp),
                 modifier = Modifier
                     .weight(1f)
                     .height(44.dp),
             ) {
-                Icon(Icons.Outlined.PlayArrow, contentDescription = null)
+                Icon(
+                    imageVector = if (hasPendingRestartChanges) Icons.Outlined.Refresh else Icons.Outlined.PlayArrow,
+                    contentDescription = null,
+                    modifier = Modifier.size(18.dp),
+                )
                 Spacer(Modifier.width(6.dp))
                 Text(
-                    text = when (sessionSnap.phase) {
-                        SessionPhase.STARTING -> "View Startup Progress"
-                        SessionPhase.RUNNING -> "Open Desktop"
-                        SessionPhase.PAUSED -> "Resume Desktop"
-                        SessionPhase.FAILED -> "Retry Launch"
+                    text = when {
+                        hasPendingRestartChanges -> "Restart & Apply"
+                        sessionSnap.phase == SessionPhase.STARTING -> "Startup Progress"
+                        sessionSnap.phase == SessionPhase.RUNNING -> "Open Desktop"
+                        sessionSnap.phase == SessionPhase.PAUSED -> "Resume Desktop"
+                        sessionSnap.phase == SessionPhase.FAILED -> "Retry Launch"
                         else -> "Launch Desktop"
                     },
+                    softWrap = false,
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis,
                 )
@@ -795,18 +877,24 @@ private fun WorkstationTabContent(
             if (sessionSnap.phase == SessionPhase.RUNNING || sessionSnap.phase == SessionPhase.PAUSED) {
                 OutlinedButton(
                     onClick = onTogglePause,
+                    contentPadding = PaddingValues(horizontal = 12.dp, vertical = 8.dp),
                     modifier = Modifier.height(44.dp),
                 ) {
-                    Icon(Icons.Outlined.Pause, contentDescription = null)
+                    Icon(Icons.Outlined.Pause, contentDescription = null, modifier = Modifier.size(18.dp))
                     Spacer(Modifier.width(4.dp))
-                    Text(if (sessionSnap.phase == SessionPhase.PAUSED) "Unfreeze" else "Pause")
+                    Text(
+                        text = if (sessionSnap.phase == SessionPhase.PAUSED) "Resume" else "Pause",
+                        softWrap = false,
+                        maxLines = 1,
+                    )
                 }
                 OutlinedButton(
                     onClick = onShutdown,
+                    contentPadding = PaddingValues(horizontal = 12.dp, vertical = 8.dp),
                     modifier = Modifier.height(44.dp),
                     colors = ButtonDefaults.outlinedButtonColors(contentColor = MaterialTheme.colorScheme.error),
                 ) {
-                    Icon(Icons.Outlined.PowerSettingsNew, contentDescription = null)
+                    Icon(Icons.Outlined.PowerSettingsNew, contentDescription = "Shut Down")
                 }
             }
         }
@@ -815,27 +903,29 @@ private fun WorkstationTabContent(
             Spacer(Modifier.height(10.dp))
             Row(
                 modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.spacedBy(10.dp),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
             ) {
                 OutlinedButton(
                     onClick = { onOpenTerminal(false) },
+                    contentPadding = PaddingValues(horizontal = 10.dp, vertical = 6.dp),
                     modifier = Modifier
                         .weight(1f)
                         .height(40.dp),
                 ) {
-                    Icon(Icons.Outlined.Terminal, contentDescription = null, modifier = Modifier.size(18.dp))
+                    Icon(Icons.Outlined.Terminal, contentDescription = null, modifier = Modifier.size(17.dp))
                     Spacer(Modifier.width(6.dp))
-                    Text("Terminal ($username)", maxLines = 1, overflow = TextOverflow.Ellipsis)
+                    Text("Terminal ($username)", softWrap = false, maxLines = 1, overflow = TextOverflow.Ellipsis)
                 }
                 OutlinedButton(
                     onClick = { onOpenTerminal(true) },
+                    contentPadding = PaddingValues(horizontal = 10.dp, vertical = 6.dp),
                     modifier = Modifier
                         .weight(1f)
                         .height(40.dp),
                 ) {
-                    Icon(Icons.Outlined.Terminal, contentDescription = null, modifier = Modifier.size(18.dp))
+                    Icon(Icons.Outlined.Terminal, contentDescription = null, modifier = Modifier.size(17.dp))
                     Spacer(Modifier.width(6.dp))
-                    Text("Root Shell", maxLines = 1, overflow = TextOverflow.Ellipsis)
+                    Text("Root Shell", softWrap = false, maxLines = 1, overflow = TextOverflow.Ellipsis)
                 }
             }
         }
@@ -848,7 +938,7 @@ private fun WorkstationTabContent(
             text = if (installedEditionId != null) {
                 "One edition is active. To keep the system stable, delete the installed edition first before installing another."
             } else {
-                "Install one Ubuntu 24.04 LTS ARM64 desktop edition (includes Firefox, MPV, FEX-Emu x86_64, and SoC GPU drivers)."
+                "Install one Ubuntu 24.04 LTS ARM64 desktop edition (includes sandboxed Chromium, MPV, FEX-Emu x86_64, and SoC GPU drivers)."
             },
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
@@ -981,7 +1071,7 @@ private fun WorkstationTabContent(
                 }
             }
 
-            // Fixed-height 236.dp scrollable editions container (zero dynamic resizing)
+            // Fixed-height 284.dp scrollable editions container (zero dynamic resizing)
             val editionsScroll = rememberScrollState()
             Surface(
                 shape = RoundedCornerShape(10.dp),
@@ -989,7 +1079,7 @@ private fun WorkstationTabContent(
                 border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline),
                 modifier = Modifier
                     .fillMaxWidth()
-                    .height(236.dp),
+                    .height(284.dp),
             ) {
                 Column(
                     modifier = Modifier
@@ -1031,6 +1121,7 @@ private fun WorkstationTabContent(
             OutlinedButton(
                 onClick = onImportCustomRootfs,
                 enabled = installedEditionId == null,
+                contentPadding = PaddingValues(horizontal = 12.dp, vertical = 8.dp),
                 modifier = Modifier
                     .fillMaxWidth()
                     .height(42.dp),
@@ -1039,10 +1130,11 @@ private fun WorkstationTabContent(
                 Spacer(Modifier.width(8.dp))
                 Text(
                     text = if (installedEditionId == null) {
-                        "Import Custom Rootfs (.tar.zst / .tar.xz / .tar.gz)"
+                        "Import Custom Rootfs (.tar.zst / .xz)"
                     } else {
-                        "Delete Installed Edition First to Import Custom Rootfs"
+                        "Delete Active Edition to Import Custom"
                     },
+                    softWrap = false,
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis,
                 )
@@ -1087,7 +1179,7 @@ private fun HardwareTabContent(
                     text = "Detected: ${cpuTopology.summary}",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    maxLines = 1,
+                    maxLines = 2,
                     overflow = TextOverflow.Ellipsis,
                 )
             }
@@ -1111,7 +1203,7 @@ private fun HardwareTabContent(
                     style = MaterialTheme.typography.bodyMedium,
                     fontWeight = FontWeight.SemiBold,
                     color = MaterialTheme.colorScheme.onSurface,
-                    maxLines = 1,
+                    maxLines = 2,
                     overflow = TextOverflow.Ellipsis,
                 )
                 Text(
@@ -1122,7 +1214,7 @@ private fun HardwareTabContent(
                     },
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    maxLines = 2,
+                    maxLines = 3,
                     overflow = TextOverflow.Ellipsis,
                 )
 
@@ -1171,7 +1263,7 @@ private fun HardwareTabContent(
                     text = "100% Hardware GPU Exposed • ${gpuInfo.shortSummary()} • $resolvedGpuSummary",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    maxLines = 1,
+                    maxLines = 3,
                     overflow = TextOverflow.Ellipsis,
                 )
             }
@@ -1186,7 +1278,7 @@ private fun HardwareTabContent(
             border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline),
             modifier = Modifier
                 .fillMaxWidth()
-                .height(250.dp),
+                .height(268.dp),
         ) {
             Column(
                 modifier = Modifier
@@ -1242,6 +1334,8 @@ private fun DisplayTabContent(
     onSelectOrientation: (ScreenOrientationPref) -> Unit,
     touchMode: TouchInputMode,
     onSelectTouchMode: (TouchInputMode) -> Unit,
+    showFloatingControls: Boolean,
+    onToggleFloatingControls: (Boolean) -> Unit,
 ) {
     // 1. External Monitor Output Card (VLC-style Non-DeX Presentation + DeX)
     SectionCard {
@@ -1272,7 +1366,7 @@ private fun DisplayTabContent(
                     } else {
                         MaterialTheme.colorScheme.onSurfaceVariant
                     },
-                    maxLines = 1,
+                    maxLines = 2,
                     overflow = TextOverflow.Ellipsis,
                 )
             }
@@ -1301,7 +1395,7 @@ private fun DisplayTabContent(
             border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline),
             modifier = Modifier
                 .fillMaxWidth()
-                .height(206.dp),
+                .height(228.dp),
         ) {
             Column(
                 modifier = Modifier
@@ -1386,6 +1480,14 @@ private fun DisplayTabContent(
                 )
             }
         }
+
+        HorizontalDivider(modifier = Modifier.padding(vertical = 10.dp))
+        SettingToggleRow(
+            title = "Floating Keyboard & Quick Menu Pill",
+            subtitle = "Show a compact 1-tap keyboard & quick menu pill in the top-right corner of the desktop.",
+            checked = showFloatingControls,
+            onCheckedChange = onToggleFloatingControls,
+        )
     }
 }
 
@@ -1418,7 +1520,7 @@ private fun SystemTabContent(
         OutlinedTextField(
             value = username,
             onValueChange = onUsernameChange,
-            label = { Text("Linux Non-Root Username (passwordless sudo enabled)") },
+            label = { Text("Linux Username (passwordless sudo)", maxLines = 1, overflow = TextOverflow.Ellipsis) },
             singleLine = true,
             modifier = Modifier.fillMaxWidth(),
         )
@@ -1521,24 +1623,38 @@ private fun SystemTabContent(
         HorizontalDivider(modifier = Modifier.padding(vertical = 10.dp))
 
         Row(
-            modifier = Modifier.fillMaxWidth(),
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(bottom = 8.dp),
             horizontalArrangement = Arrangement.SpaceBetween,
             verticalAlignment = Alignment.CenterVertically,
         ) {
             Text(
                 text = "Recent Session Logs",
                 style = MaterialTheme.typography.labelLarge,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.weight(1f),
             )
-            Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                TextButton(onClick = onRefreshLogs) {
-                    Icon(Icons.Outlined.Refresh, contentDescription = null, modifier = Modifier.size(16.dp))
+            Spacer(Modifier.width(8.dp))
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                OutlinedButton(
+                    onClick = onRefreshLogs,
+                    contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp),
+                    modifier = Modifier.height(34.dp),
+                ) {
+                    Icon(Icons.Outlined.Refresh, contentDescription = null, modifier = Modifier.size(15.dp))
                     Spacer(Modifier.width(4.dp))
-                    Text("Refresh")
+                    Text("Refresh", softWrap = false, maxLines = 1)
                 }
-                TextButton(onClick = onShareLogs) {
-                    Icon(Icons.Outlined.Share, contentDescription = null, modifier = Modifier.size(16.dp))
+                OutlinedButton(
+                    onClick = onShareLogs,
+                    contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp),
+                    modifier = Modifier.height(34.dp),
+                ) {
+                    Icon(Icons.Outlined.Share, contentDescription = null, modifier = Modifier.size(15.dp))
                     Spacer(Modifier.width(4.dp))
-                    Text("Share Full Report")
+                    Text("Share Logs", softWrap = false, maxLines = 1)
                 }
             }
         }
@@ -1612,7 +1728,7 @@ private fun InfoPill(text: String, accent: Boolean = false) {
             text = text,
             style = MaterialTheme.typography.labelSmall,
             color = if (accent) MaterialTheme.colorScheme.secondary else MaterialTheme.colorScheme.onSurface,
-            maxLines = 1,
+            maxLines = 2,
             overflow = TextOverflow.Ellipsis,
             modifier = Modifier.padding(horizontal = 10.dp, vertical = 5.dp),
         )
@@ -1648,14 +1764,14 @@ private fun SelectableOptionCard(
                     text = title,
                     style = MaterialTheme.typography.bodyMedium,
                     fontWeight = FontWeight.Medium,
-                    maxLines = 1,
+                    maxLines = 2,
                     overflow = TextOverflow.Ellipsis,
                 )
                 Text(
                     text = subtitle,
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    maxLines = 2,
+                    maxLines = 3,
                     overflow = TextOverflow.Ellipsis,
                 )
             }
@@ -1686,89 +1802,98 @@ private fun EditionRow(
         ),
         modifier = Modifier.fillMaxWidth(),
     ) {
-        Row(
+        Column(
             modifier = Modifier.padding(12.dp),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(12.dp),
+            verticalArrangement = Arrangement.spacedBy(6.dp),
         ) {
-            Column(modifier = Modifier.weight(1f)) {
-                Row(
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(8.dp),
-                ) {
-                    Text(
-                        text = title,
-                        style = MaterialTheme.typography.bodyMedium,
-                        fontWeight = FontWeight.SemiBold,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis,
-                        modifier = Modifier.weight(1f, fill = false),
-                    )
-                    if (isInstalled) {
-                        Surface(
-                            shape = RoundedCornerShape(12.dp),
-                            color = MaterialTheme.colorScheme.secondary.copy(alpha = 0.18f),
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.Top,
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                Text(
+                    text = title,
+                    style = MaterialTheme.typography.bodyMedium,
+                    fontWeight = FontWeight.SemiBold,
+                    maxLines = 2,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.weight(1f),
+                )
+                if (isInstalled) {
+                    Surface(
+                        shape = RoundedCornerShape(12.dp),
+                        color = MaterialTheme.colorScheme.secondary.copy(alpha = 0.18f),
+                    ) {
+                        Row(
+                            modifier = Modifier.padding(horizontal = 8.dp, vertical = 3.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(4.dp),
                         ) {
-                            Row(
-                                modifier = Modifier.padding(horizontal = 8.dp, vertical = 2.dp),
-                                verticalAlignment = Alignment.CenterVertically,
-                                horizontalArrangement = Arrangement.spacedBy(4.dp),
-                            ) {
-                                Icon(
-                                    imageVector = Icons.Outlined.CheckCircle,
-                                    contentDescription = null,
-                                    tint = MaterialTheme.colorScheme.secondary,
-                                    modifier = Modifier.size(13.dp),
-                                )
-                                Text(
-                                    text = "Installed",
-                                    style = MaterialTheme.typography.labelSmall,
-                                    color = MaterialTheme.colorScheme.secondary,
-                                )
-                            }
+                            Icon(
+                                imageVector = Icons.Outlined.CheckCircle,
+                                contentDescription = null,
+                                tint = MaterialTheme.colorScheme.secondary,
+                                modifier = Modifier.size(13.dp),
+                            )
+                            Text(
+                                text = "Installed",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.secondary,
+                                softWrap = false,
+                                maxLines = 1,
+                            )
                         }
                     }
                 }
-                Spacer(Modifier.height(2.dp))
-                Text(
-                    text = description,
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    maxLines = 2,
-                    overflow = TextOverflow.Ellipsis,
-                )
-                Spacer(Modifier.height(4.dp))
-                Text(
-                    text = if (anotherInstalled) "$sizeLabel • Locked while another edition is installed" else sizeLabel,
-                    style = MaterialTheme.typography.labelSmall,
-                    color = if (anotherInstalled) MaterialTheme.colorScheme.onSurfaceVariant else MaterialTheme.colorScheme.primary,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
-                )
             }
 
-            if (isInstalled) {
-                OutlinedButton(
-                    onClick = onDelete,
-                    colors = ButtonDefaults.outlinedButtonColors(contentColor = MaterialTheme.colorScheme.error),
-                    border = BorderStroke(1.dp, MaterialTheme.colorScheme.error.copy(alpha = 0.7f)),
-                    contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp),
-                    modifier = Modifier.height(38.dp),
-                ) {
-                    Icon(Icons.Outlined.DeleteOutline, contentDescription = null, modifier = Modifier.size(18.dp))
-                    Spacer(Modifier.width(4.dp))
-                    Text("Delete")
-                }
-            } else {
-                Button(
-                    onClick = onInstall,
-                    enabled = !anotherInstalled,
-                    contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp),
-                    modifier = Modifier.height(38.dp),
-                ) {
-                    Icon(Icons.Outlined.CloudDownload, contentDescription = null, modifier = Modifier.size(18.dp))
-                    Spacer(Modifier.width(5.dp))
-                    Text("Install")
+            Text(
+                text = description,
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                maxLines = 3,
+                overflow = TextOverflow.Ellipsis,
+            )
+
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.SpaceBetween,
+            ) {
+                Text(
+                    text = if (anotherInstalled) "$sizeLabel • Delete active edition first" else sizeLabel,
+                    style = MaterialTheme.typography.labelSmall,
+                    color = if (anotherInstalled) MaterialTheme.colorScheme.onSurfaceVariant else MaterialTheme.colorScheme.primary,
+                    maxLines = 2,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier
+                        .weight(1f)
+                        .padding(end = 8.dp),
+                )
+
+                if (isInstalled) {
+                    OutlinedButton(
+                        onClick = onDelete,
+                        colors = ButtonDefaults.outlinedButtonColors(contentColor = MaterialTheme.colorScheme.error),
+                        border = BorderStroke(1.dp, MaterialTheme.colorScheme.error.copy(alpha = 0.7f)),
+                        contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp),
+                        modifier = Modifier.height(36.dp),
+                    ) {
+                        Icon(Icons.Outlined.DeleteOutline, contentDescription = null, modifier = Modifier.size(17.dp))
+                        Spacer(Modifier.width(4.dp))
+                        Text("Delete", softWrap = false, maxLines = 1)
+                    }
+                } else {
+                    Button(
+                        onClick = onInstall,
+                        enabled = !anotherInstalled,
+                        contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp),
+                        modifier = Modifier.height(36.dp),
+                    ) {
+                        Icon(Icons.Outlined.CloudDownload, contentDescription = null, modifier = Modifier.size(17.dp))
+                        Spacer(Modifier.width(5.dp))
+                        Text("Install", softWrap = false, maxLines = 1)
+                    }
                 }
             }
         }
@@ -1794,14 +1919,14 @@ private fun SettingToggleRow(
                 text = title,
                 style = MaterialTheme.typography.bodyMedium,
                 fontWeight = FontWeight.Medium,
-                maxLines = 1,
+                maxLines = 2,
                 overflow = TextOverflow.Ellipsis,
             )
             Text(
                 text = subtitle,
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
-                maxLines = 2,
+                maxLines = 3,
                 overflow = TextOverflow.Ellipsis,
             )
         }
