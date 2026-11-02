@@ -45,6 +45,7 @@ object FileUtils {
             }
             if (!Files.exists(path, LinkOption.NOFOLLOW_LINKS)) return true
             if (Files.isDirectory(path, LinkOption.NOFOLLOW_LINKS)) {
+                chmod(target, 0b111_000_000)
                 target.listFiles()?.forEach { child -> deleteRecursively(child) }
             }
             return Files.deleteIfExists(path)

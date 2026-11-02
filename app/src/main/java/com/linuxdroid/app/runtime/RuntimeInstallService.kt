@@ -13,10 +13,11 @@ import android.provider.OpenableColumns
 import android.util.Log
 import androidx.core.app.NotificationCompat
 import com.linuxdroid.app.App
-import com.linuxdroid.app.R
 import com.linuxdroid.app.core.ArchiveExtractor
 import com.linuxdroid.app.core.FileUtils
 import com.linuxdroid.app.session.SessionPrefs
+import com.linuxdroid.app.session.SessionService
+import com.linuxdroid.app.session.SessionState
 import com.linuxdroid.app.ui.FrontEndActivity
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -29,12 +30,16 @@ import java.security.MessageDigest
 
 data class InstallProgress(
     val active: Boolean = false,
+    val deleting: Boolean = false,
     val stage: String = "",
     val fraction: Float = -1f,
+    val recentEntries: List<String> = emptyList(),
     val error: String? = null,
 )
 
 class RuntimeInstallService : Service() {
+    private val logEntries = ArrayDeque<String>()
+
     override fun onBind(intent: Intent?): IBinder? = null
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -44,42 +49,58 @@ class RuntimeInstallService : Service() {
                 return START_NOT_STICKY
             }
             ACTION_DOWNLOAD -> {
+                val editionId = intent.getStringExtra(EXTRA_EDITION_ID) ?: "ubuntu-arm64"
                 val url = intent.getStringExtra(EXTRA_URL) ?: return START_NOT_STICKY
                 val title = intent.getStringExtra(EXTRA_TITLE) ?: "Ubuntu ARM64 Desktop"
                 val desktop = intent.getStringExtra(EXTRA_DESKTOP) ?: "auto"
                 val sha256 = intent.getStringExtra(EXTRA_SHA256).orEmpty()
-                startForeground(NOTIFICATION_ID, buildNotification("Preparing $title...", -1f))
-                runWorker {
-                    installFromDownload(url, title, desktop, sha256)
+                startForeground(NOTIFICATION_ID, buildNotification("Preparing $title...", -1f, allowCancel = true))
+                runWorker(isDelete = false) {
+                    installFromDownload(editionId, url, title, desktop, sha256)
                 }
             }
             ACTION_IMPORT_URI -> {
                 val uri = intent.data ?: return START_NOT_STICKY
-                startForeground(NOTIFICATION_ID, buildNotification("Importing Linux rootfs archive...", -1f))
-                runWorker {
+                startForeground(NOTIFICATION_ID, buildNotification("Importing Linux rootfs archive...", -1f, allowCancel = true))
+                runWorker(isDelete = false) {
                     installFromUri(uri)
+                }
+            }
+            ACTION_DELETE -> {
+                val label = LinuxRuntime.detectInstalledDesktopLabel(this)
+                startForeground(NOTIFICATION_ID, buildNotification("Deleting $label...", -1f, allowCancel = false))
+                runWorker(isDelete = true) {
+                    deleteInstalledEdition(label)
                 }
             }
         }
         return START_NOT_STICKY
     }
 
-    private fun runWorker(block: () -> Unit) {
+    private fun runWorker(isDelete: Boolean, block: () -> Unit) {
         if (progressFlow.value.active) return
         cancelled = false
+        synchronized(logEntries) { logEntries.clear() }
         Thread({
             try {
                 block()
-                if (cancelled) {
-                    updateProgress(active = false, stage = "Installation cancelled", fraction = -1f)
+                if (cancelled && !isDelete) {
+                    appendLog("Installation cancelled by user.")
+                    updateProgress(active = false, deleting = false, stage = "Installation cancelled", fraction = -1f)
+                } else if (isDelete) {
+                    appendLog("Edition removed cleanly.")
+                    updateProgress(active = false, deleting = false, stage = "Edition deleted", fraction = -1f)
                 } else {
-                    updateProgress(active = false, stage = "Desktop installed and ready", fraction = 1f)
+                    appendLog("Workstation ready to launch.")
+                    updateProgress(active = false, deleting = false, stage = "Desktop installed and ready", fraction = 1f)
                 }
             } catch (e: Exception) {
-                Log.e(TAG, "Rootfs install failed", e)
+                Log.e(TAG, if (isDelete) "Rootfs delete failed" else "Rootfs install failed", e)
+                appendLog("Error: ${e.message ?: e.toString()}")
                 updateProgress(
                     active = false,
-                    stage = "Installation failed",
+                    deleting = false,
+                    stage = if (isDelete) "Deletion failed" else "Installation failed",
                     fraction = -1f,
                     error = e.message ?: e.toString(),
                 )
@@ -87,14 +108,28 @@ class RuntimeInstallService : Service() {
                 stopForeground(STOP_FOREGROUND_REMOVE)
                 stopSelf()
             }
-        }, "rootfs-installer").start()
+        }, if (isDelete) "rootfs-deleter" else "rootfs-installer").start()
     }
 
-    private fun installFromDownload(url: String, title: String, desktop: String, expectedSha256: String) {
+    private fun ensureNoEditionInstalled() {
+        if (LinuxRuntime.hasRootfs(this)) {
+            throw IOException("An edition is already installed. Delete the current edition first before installing another.")
+        }
+    }
+
+    private fun installFromDownload(
+        editionId: String,
+        url: String,
+        title: String,
+        desktop: String,
+        expectedSha256: String,
+    ) {
+        ensureNoEditionInstalled()
         val archiveFile = File(cacheDir, "download-rootfs.tar.zst")
         archiveFile.delete()
         try {
-            updateProgress(true, "Downloading $title...", 0f)
+            appendLog("Connecting to release server for $title...")
+            updateProgress(true, false, "Downloading $title...", 0f)
             val conn = followRedirects(url)
             val totalBytes = conn.contentLengthLong
             val digest = MessageDigest.getInstance("SHA-256")
@@ -103,6 +138,7 @@ class RuntimeInstallService : Service() {
                     val buf = ByteArray(128 * 1024)
                     var downloaded = 0L
                     var lastNotify = 0L
+                    var lastLoggedTenPct = -1
                     while (!cancelled) {
                         val n = input.read(buf)
                         if (n < 0) break
@@ -111,12 +147,19 @@ class RuntimeInstallService : Service() {
                             digest.update(buf, 0, n)
                             downloaded += n
                             val now = System.currentTimeMillis()
-                            if (now - lastNotify > 250L) {
+                            if (now - lastNotify >= 200L) {
                                 lastNotify = now
                                 val frac = if (totalBytes > 0) (downloaded.toFloat() / totalBytes).coerceIn(0f, 1f) else -1f
                                 val mb = downloaded / (1024 * 1024)
                                 val totalMb = if (totalBytes > 0) " / ${totalBytes / (1024 * 1024)} MB" else " MB"
-                                updateProgress(true, "Downloading $title ($mb$totalMb)", frac)
+                                if (frac >= 0f) {
+                                    val bucket = (frac * 10f).toInt()
+                                    if (bucket > lastLoggedTenPct) {
+                                        lastLoggedTenPct = bucket
+                                        appendLog("Downloaded ${bucket * 10}% ($mb$totalMb)")
+                                    }
+                                }
+                                updateProgress(true, false, "Downloading $title ($mb$totalMb)", frac)
                             }
                         }
                     }
@@ -124,48 +167,65 @@ class RuntimeInstallService : Service() {
             }
             if (cancelled) return
             if (expectedSha256.isNotBlank()) {
+                appendLog("Verifying SHA-256 archive integrity...")
+                updateProgress(true, false, "Verifying SHA-256 checksum...", 1f)
                 val actualSha = digest.digest().joinToString("") { "%02x".format(it) }
                 if (!actualSha.equals(expectedSha256, ignoreCase = true)) {
                     throw IOException("SHA-256 mismatch (expected ${expectedSha256.take(12)}..., got ${actualSha.take(12)}...)")
                 }
+                appendLog("SHA-256 verified (${actualSha.take(12)}...).")
             }
-            unpackIntoRootfs(archiveFile, title, desktop)
+            unpackIntoRootfs(archiveFile, editionId, title, desktop)
         } finally {
             archiveFile.delete()
         }
     }
 
     private fun installFromUri(uri: Uri) {
+        ensureNoEditionInstalled()
         val fileName = queryDisplayName(uri) ?: "custom-rootfs.tar.zst"
-        updateProgress(true, "Extracting $fileName...", -1f)
+        appendLog("Importing archive: $fileName")
+        updateProgress(true, false, "Extracting $fileName...", -1f)
         val stagingRoot = File(filesDir, "linuxfs-staging")
         FileUtils.deleteRecursively(stagingRoot)
         stagingRoot.mkdirs()
 
+        var lastNotify = 0L
         contentResolver.openInputStream(uri)?.use { stream ->
             ArchiveExtractor.extractStream(stream, fileName, stagingRoot) { count, entry ->
                 if (cancelled) throw IOException("Cancelled")
-                updateProgress(true, "Extracting $fileName ($count files) — $entry", -1f)
+                val now = System.currentTimeMillis()
+                if (now - lastNotify >= 150L) {
+                    lastNotify = now
+                    appendLog("[$count files] $entry")
+                    updateProgress(true, false, "Extracting $fileName ($count files)...", -1f)
+                }
             }
         } ?: throw IOException("Cannot open selected archive URI")
 
-        finalizeStaging(stagingRoot, "Custom Rootfs ($fileName)", "auto")
+        finalizeStaging(stagingRoot, "custom-rootfs", "Custom Rootfs ($fileName)", "auto")
     }
 
-    private fun unpackIntoRootfs(archiveFile: File, editionLabel: String, desktop: String) {
+    private fun unpackIntoRootfs(archiveFile: File, editionId: String, editionLabel: String, desktop: String) {
         val stagingRoot = File(filesDir, "linuxfs-staging")
         FileUtils.deleteRecursively(stagingRoot)
         stagingRoot.mkdirs()
-        updateProgress(true, "Extracting $editionLabel...", -1f)
+        appendLog("Extracting root filesystem...")
+        updateProgress(true, false, "Extracting $editionLabel...", -1f)
+        var lastNotify = 0L
         ArchiveExtractor.extractFile(archiveFile, stagingRoot) { count, entry ->
             if (cancelled) throw IOException("Cancelled")
-            updateProgress(true, "Extracting ($count files) — $entry", -1f)
+            val now = System.currentTimeMillis()
+            if (now - lastNotify >= 150L) {
+                lastNotify = now
+                appendLog("[$count files] $entry")
+                updateProgress(true, false, "Extracting $editionLabel ($count files)...", -1f)
+            }
         }
-        finalizeStaging(stagingRoot, editionLabel, desktop)
+        finalizeStaging(stagingRoot, editionId, editionLabel, desktop)
     }
 
-    private fun finalizeStaging(stagingRoot: File, editionLabel: String, desktop: String) {
-        // Handle archives wrapped in a single top-level directory (e.g. rootfs/usr/...)
+    private fun finalizeStaging(stagingRoot: File, editionId: String, editionLabel: String, desktop: String) {
         val actualRoot = unwrapSingleSubdirIfNeeded(stagingRoot)
         if (!File(actualRoot, "bin").exists() && !File(actualRoot, "usr/bin").exists()) {
             FileUtils.deleteRecursively(stagingRoot)
@@ -173,7 +233,8 @@ class RuntimeInstallService : Service() {
         }
 
         val targetRoot = LinuxRuntime.rootDir(this)
-        updateProgress(true, "Finalizing Linux workstation...", -1f)
+        appendLog("Provisioning runtime scripts & user account...")
+        updateProgress(true, false, "Finalizing Linux workstation...", -1f)
         FileUtils.deleteRecursively(targetRoot)
         if (!actualRoot.renameTo(targetRoot)) {
             throw IOException("Failed moving staged rootfs into place")
@@ -181,11 +242,33 @@ class RuntimeInstallService : Service() {
         FileUtils.deleteRecursively(stagingRoot)
 
         FileUtils.writeString(File(targetRoot, "etc/linuxdroid/edition"), "$editionLabel\n")
+        FileUtils.writeString(File(targetRoot, "etc/linuxdroid/edition-id"), "$editionId\n")
+        SessionPrefs.setInstalledEditionId(this, editionId)
         if (desktop != "auto") {
             SessionPrefs.setDesktopEnvironment(this, desktop)
         }
+        LinuxRuntime.clearCachedBinds()
         LinuxRuntime.stageBundledOverlay(this, SessionPrefs.prootFastPath(this))
         UserProvisioner.provisionRootfs(targetRoot, SessionPrefs.username(this), Process.myUid())
+    }
+
+    private fun deleteInstalledEdition(label: String) {
+        appendLog("Stopping any running Linux session...")
+        updateProgress(true, true, "Stopping active Linux session...", -1f)
+        SessionService.shutdownAndAwait(this, timeoutMs = 4_000L)
+
+        appendLog("Deleting $label root filesystem...")
+        updateProgress(true, true, "Deleting $label...", -1f)
+        FileUtils.deleteRecursively(LinuxRuntime.rootDir(this))
+        FileUtils.deleteRecursively(File(filesDir, "linuxfs-staging"))
+        FileUtils.deleteRecursively(File(LinuxRuntime.liveDir(this), "shm"))
+        FileUtils.deleteRecursively(File(LinuxRuntime.liveDir(this), "proot"))
+        File(LinuxRuntime.sessionDir(this), "boot-status.txt").delete()
+
+        LinuxRuntime.clearCachedBinds()
+        SessionPrefs.setInstalledEditionId(this, null)
+        SessionPrefs.setDesktopEnvironment(this, "auto")
+        SessionState.reset()
     }
 
     private fun unwrapSingleSubdirIfNeeded(dir: File): File {
@@ -229,36 +312,61 @@ class RuntimeInstallService : Service() {
         }
     }.getOrNull()
 
-    private fun updateProgress(active: Boolean, stage: String, fraction: Float, error: String? = null) {
-        progressFlow.value = InstallProgress(active = active, stage = stage, fraction = fraction, error = error)
-        if (active) {
-            val nm = getSystemService(NotificationManager::class.java)
-            nm?.notify(NOTIFICATION_ID, buildNotification(stage, fraction))
+    private fun appendLog(line: String) {
+        synchronized(logEntries) {
+            if (logEntries.size >= 24) logEntries.removeFirst()
+            logEntries.addLast(line)
         }
     }
 
-    private fun buildNotification(stage: String, fraction: Float): Notification {
+    private fun snapshotLogs(): List<String> = synchronized(logEntries) { logEntries.toList() }
+
+    private fun updateProgress(
+        active: Boolean,
+        deleting: Boolean,
+        stage: String,
+        fraction: Float,
+        error: String? = null,
+    ) {
+        progressFlow.value = InstallProgress(
+            active = active,
+            deleting = deleting,
+            stage = stage,
+            fraction = fraction,
+            recentEntries = snapshotLogs(),
+            error = error,
+        )
+        if (active) {
+            val nm = getSystemService(NotificationManager::class.java)
+            nm?.notify(NOTIFICATION_ID, buildNotification(stage, fraction, allowCancel = !deleting))
+        }
+    }
+
+    private fun buildNotification(stage: String, fraction: Float, allowCancel: Boolean): Notification {
         val openIntent = PendingIntent.getActivity(
             this,
             0,
             Intent(this, FrontEndActivity::class.java),
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
         )
-        val cancelIntent = PendingIntent.getService(
-            this,
-            1,
-            Intent(this, RuntimeInstallService::class.java).setAction(ACTION_CANCEL),
-            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
-        )
-        return NotificationCompat.Builder(this, App.CHANNEL_INSTALL)
+        val builder = NotificationCompat.Builder(this, App.CHANNEL_INSTALL)
             .setSmallIcon(android.R.drawable.stat_sys_download)
-            .setContentTitle("LinuxDroid Rootfs Setup")
+            .setContentTitle("LinuxDroid Rootfs Manager")
             .setContentText(stage)
             .setOngoing(true)
             .setContentIntent(openIntent)
             .setProgress(100, if (fraction >= 0f) (fraction * 100).toInt() else 0, fraction < 0f)
-            .addAction(0, "Cancel", cancelIntent)
-            .build()
+
+        if (allowCancel) {
+            val cancelIntent = PendingIntent.getService(
+                this,
+                1,
+                Intent(this, RuntimeInstallService::class.java).setAction(ACTION_CANCEL),
+                PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
+            )
+            builder.addAction(0, "Cancel", cancelIntent)
+        }
+        return builder.build()
     }
 
     companion object {
@@ -266,7 +374,9 @@ class RuntimeInstallService : Service() {
         private const val NOTIFICATION_ID = 1002
         const val ACTION_DOWNLOAD = "com.linuxdroid.app.action.DOWNLOAD_ROOTFS"
         const val ACTION_IMPORT_URI = "com.linuxdroid.app.action.IMPORT_URI_ROOTFS"
+        const val ACTION_DELETE = "com.linuxdroid.app.action.DELETE_ROOTFS"
         const val ACTION_CANCEL = "com.linuxdroid.app.action.CANCEL_INSTALL"
+        const val EXTRA_EDITION_ID = "edition_id"
         const val EXTRA_URL = "url"
         const val EXTRA_TITLE = "title"
         const val EXTRA_DESKTOP = "desktop"
@@ -281,6 +391,7 @@ class RuntimeInstallService : Service() {
         fun startDownload(context: Context, edition: DesktopEdition) {
             val intent = Intent(context, RuntimeInstallService::class.java).apply {
                 action = ACTION_DOWNLOAD
+                putExtra(EXTRA_EDITION_ID, edition.id)
                 putExtra(EXTRA_URL, edition.downloadUrl)
                 putExtra(EXTRA_TITLE, edition.title)
                 putExtra(EXTRA_DESKTOP, edition.desktop)
@@ -295,6 +406,11 @@ class RuntimeInstallService : Service() {
                 data = uri
                 addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
             }
+            context.startForegroundService(intent)
+        }
+
+        fun startDelete(context: Context) {
+            val intent = Intent(context, RuntimeInstallService::class.java).setAction(ACTION_DELETE)
             context.startForegroundService(intent)
         }
 

@@ -16,6 +16,33 @@ enum class TouchInputMode(val id: String, val label: String) {
     }
 }
 
+enum class ExternalDisplayMode(
+    val id: String,
+    val title: String,
+    val subtitle: String,
+) {
+    AUTO_EXTERNAL(
+        id = "auto_external",
+        title = "Auto Switch When Connected",
+        subtitle = "Outputs to an external HDMI / USB-C / wireless screen whenever connected; uses phone screen when unplugged.",
+    ),
+    EXTERNAL_ONLY(
+        id = "external_only",
+        title = "Use External Screen Only (VLC Mode)",
+        subtitle = "Outputs Linux exclusively to an external monitor without needing DeX. Your phone stays off the desktop and acts as a trackpad & keyboard.",
+    ),
+    PHONE_ONLY(
+        id = "phone_only",
+        title = "Phone / App Window Only",
+        subtitle = "Always renders inside the phone screen (for OS screen mirroring) or current Samsung DeX / multi-window.",
+    );
+
+    companion object {
+        fun fromId(id: String?): ExternalDisplayMode =
+            entries.firstOrNull { it.id == id } ?: AUTO_EXTERNAL
+    }
+}
+
 enum class ScreenOrientationPref(val id: String, val label: String, val androidOrientation: Int) {
     LANDSCAPE("landscape", "Landscape (Laptop Default)", ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE),
     AUTO("auto", "Auto-Rotate (Sensor)", ActivityInfo.SCREEN_ORIENTATION_FULL_USER),
@@ -40,13 +67,13 @@ enum class ResolutionPreset(
     val height: Int,
     val shortEdgeTarget: Int = 0,
 ) {
-    NATIVE("native", "Native Screen / Window Resolution (Crisp)", 0, 0),
-    BALANCED_900P("aspect_900p", "Auto Fullscreen 900p (Balanced Speed)", 0, 0, shortEdgeTarget = 900),
-    PERFORMANCE_720P("aspect_720p", "Auto Fullscreen 720p (Max FPS)", 0, 0, shortEdgeTarget = 720),
-    FHD_PLUS("1920x1200", "1920 × 1200 (16:10 Workstation)", 1920, 1200),
+    NATIVE("native", "Native Screen / Monitor", 0, 0),
+    BALANCED_900P("aspect_900p", "Balanced 900p (Full Aspect)", 0, 0, shortEdgeTarget = 900),
+    PERFORMANCE_720P("aspect_720p", "Fast 720p (Full Aspect)", 0, 0, shortEdgeTarget = 720),
+    FHD_PLUS("1920x1200", "1920 × 1200 (16:10)", 1920, 1200),
     FHD("1920x1080", "1920 × 1080 (1080p)", 1920, 1080),
-    QHD("2560x1600", "2560 × 1600 (HiDPI Tablet)", 2560, 1600),
-    HD_PLUS("1600x900", "1600 × 900 (Compact)", 1600, 900);
+    QHD("2560x1600", "2560 × 1600 (QHD+)", 2560, 1600),
+    HD_PLUS("1600x900", "1600 × 900", 1600, 900);
 
     fun resolveForSurface(surfaceW: Int, surfaceH: Int): Pair<Int, Int> {
         val safeW = (surfaceW and 1.inv()).coerceAtLeast(640)
@@ -94,6 +121,36 @@ object SessionPrefs {
 
     fun setGpuMode(context: Context, mode: GpuDriverMode) {
         prefs(context).edit().putString("gpu_mode", mode.id).apply()
+    }
+
+    /** 0 means All Hardware CPU Cores (maximum performance); 1..totalCores pins to N cores. */
+    fun cpuCoreLimit(context: Context): Int =
+        prefs(context).getInt("cpu_core_limit", 0).coerceAtLeast(0)
+
+    fun setCpuCoreLimit(context: Context, limit: Int) {
+        prefs(context).edit().putInt("cpu_core_limit", limit.coerceAtLeast(0)).apply()
+    }
+
+    fun effectiveCpuCores(context: Context, totalCores: Int): Int {
+        val safeTotal = totalCores.coerceAtLeast(1)
+        val limit = cpuCoreLimit(context)
+        return if (limit in 1 until safeTotal) limit else safeTotal
+    }
+
+    fun externalDisplayMode(context: Context): ExternalDisplayMode =
+        ExternalDisplayMode.fromId(prefs(context).getString("external_display_mode", ExternalDisplayMode.AUTO_EXTERNAL.id))
+
+    fun setExternalDisplayMode(context: Context, mode: ExternalDisplayMode) {
+        prefs(context).edit().putString("external_display_mode", mode.id).apply()
+    }
+
+    fun installedEditionId(context: Context): String? =
+        prefs(context).getString("installed_edition_id", null)?.takeIf { it.isNotBlank() }
+
+    fun setInstalledEditionId(context: Context, id: String?) {
+        val editor = prefs(context).edit()
+        if (id.isNullOrBlank()) editor.remove("installed_edition_id") else editor.putString("installed_edition_id", id)
+        editor.apply()
     }
 
     fun desktopEnvironment(context: Context): String =

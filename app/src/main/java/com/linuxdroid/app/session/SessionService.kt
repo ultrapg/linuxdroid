@@ -19,6 +19,7 @@ import com.linuxdroid.app.core.HostProcess
 import com.linuxdroid.app.gpu.GpuConfigGenerator
 import com.linuxdroid.app.gpu.GpuInfo
 import com.linuxdroid.app.gpu.VirglServerComponent
+import com.linuxdroid.app.runtime.CpuInfo
 import com.linuxdroid.app.runtime.LinuxNetworkLinkComponent
 import com.linuxdroid.app.runtime.LinuxRuntime
 import com.linuxdroid.app.runtime.ProotFastPath
@@ -140,17 +141,23 @@ class SessionService : Service() {
         LinuxRuntime.stageBundledOverlay(this, enableFastPath = fastPathPref)
         val username = UserProvisioner.provisionRootfs(root, SessionPrefs.username(this), Process.myUid())
 
+        val cpuTopology = CpuInfo.detect()
+        val cpuLimit = SessionPrefs.cpuCoreLimit(this)
+        val effectiveCpuCores = SessionPrefs.effectiveCpuCores(this, cpuTopology.totalCores)
+        val affinityCores = cpuTopology.selectPreferredCores(cpuLimit)
+
         val gpuInfo = GpuInfo.detect()
         val gpuConfig = GpuConfigGenerator.resolve(
             requested = SessionPrefs.gpuMode(this),
             gpu = gpuInfo,
             virglSocketGuestPath = LinuxRuntime.VIRGL_SOCKET_GUEST_PATH,
         )
+        val hwSummary = "${effectiveCpuCores}/${cpuTopology.totalCores} CPU Cores • ${gpuConfig.summary}"
         updateBootStep(
             generation = generation,
             step = 2,
             status = "Initializing GPU driver (${gpuConfig.activeBackend.uppercase()})...",
-            gpuSummary = gpuConfig.summary,
+            gpuSummary = hwSummary,
         )
         FileUtils.writeString(File(root, "etc/linuxdroid/gpu.env"), gpuConfig.toEnvFileContent())
 
@@ -233,6 +240,7 @@ class SessionService : Service() {
             context = this,
             batterySysfsDir = batterySysfs,
             customMounts = SessionPrefs.customMounts(this),
+            effectiveCpuCores = effectiveCpuCores,
         )
         val fastPathKey = if (fastPathPref) ProotFastPath.key(root, binds) else null
 
@@ -268,6 +276,10 @@ class SessionService : Service() {
             put("BL_HEIGHT", height.toString())
             put("BL_SCALE", scaleText)
             put("BL_REFRESH", refreshHz.toInt().toString())
+            put("BL_CPU_COUNT", effectiveCpuCores.toString())
+            if (affinityCores.isNotEmpty()) {
+                put("BL_CPU_CORES", affinityCores.joinToString(","))
+            }
             put("BL_ANDROID_CLIPBOARD", clipboardFile.absolutePath)
             put("BL_IME_STATE", imeStateFile.absolutePath)
             put("BL_LOG", sessionLogFile.absolutePath)
@@ -307,7 +319,7 @@ class SessionService : Service() {
             generation = generation,
             step = 4,
             status = "Booting ARM64 Ubuntu container (PRoot)...",
-            gpuSummary = gpuConfig.summary,
+            gpuSummary = hwSummary,
         )
 
         val pid = try {
@@ -346,7 +358,7 @@ class SessionService : Service() {
         SessionState.update { snap ->
             if (bootGeneration.get() != generation) snap
             else snap.copy(
-                activeGpuSummary = gpuConfig.summary,
+                activeGpuSummary = hwSummary,
                 guestPid = pid,
             )
         }
@@ -397,7 +409,7 @@ class SessionService : Service() {
                         }
                     }
                 }
-                val tail = collectDiagnosticLogTail(logDir, maxLines = 8)
+                val tail = collectDiagnosticLogTail(logDir, maxLines = 18)
                 if (nextStep != snap.bootStep || nextStatus != snap.statusText || tail != snap.bootLogTail) {
                     SessionState.update { cur ->
                         if (bootGeneration.get() != generation || cur.firstFrameReady || cur.phase != SessionPhase.STARTING) {
@@ -720,6 +732,22 @@ class SessionService : Service() {
 
         fun shutdown(context: Context) {
             context.startService(Intent(context, SessionService::class.java).setAction(ACTION_SHUTDOWN))
+        }
+
+        fun shutdownAndAwait(context: Context, timeoutMs: Long = 4_000L) {
+            val cur = SessionState.state.value
+            if (cur.phase == SessionPhase.STOPPED && cur.guestPid <= 0) return
+            shutdown(context)
+            val deadline = System.currentTimeMillis() + timeoutMs
+            while (System.currentTimeMillis() < deadline) {
+                val snap = SessionState.state.value
+                if (snap.phase == SessionPhase.STOPPED && snap.guestPid <= 0) return
+                try {
+                    Thread.sleep(80L)
+                } catch (_: InterruptedException) {
+                    return
+                }
+            }
         }
 
         internal fun collectDiagnosticLogTail(logDir: File, maxLines: Int = 12): List<String> {

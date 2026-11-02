@@ -14,7 +14,9 @@ keystore.properties
 
 # Android & Gradle build outputs
 .gradle/
+.kotlin/
 .cxx/
+__pycache__/
 build/
 app/build/
 local.properties

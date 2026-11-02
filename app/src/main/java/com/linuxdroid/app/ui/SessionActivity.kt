@@ -5,11 +5,14 @@ import android.content.Context
 import android.content.Intent
 import android.content.pm.ActivityInfo
 import android.content.res.Configuration
+import android.graphics.Typeface
+import android.graphics.drawable.GradientDrawable
 import android.hardware.display.DisplayManager
 import android.os.Build
 import android.os.Bundle
 import android.view.Choreographer
 import android.view.Display
+import android.view.Gravity
 import android.view.InputDevice
 import android.view.KeyEvent
 import android.view.MotionEvent
@@ -19,31 +22,34 @@ import android.view.View
 import android.view.ViewGroup
 import android.view.WindowManager
 import android.widget.FrameLayout
+import android.widget.TextView
 import androidx.activity.ComponentActivity
+import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ExperimentalLayoutApi
-import androidx.compose.foundation.layout.FlowRow
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
-import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
-import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.outlined.BrightnessLow
 import androidx.compose.material.icons.outlined.Dashboard
 import androidx.compose.material.icons.outlined.ErrorOutline
 import androidx.compose.material.icons.outlined.Keyboard
+import androidx.compose.material.icons.outlined.Monitor
 import androidx.compose.material.icons.outlined.Mouse
 import androidx.compose.material.icons.outlined.Pause
 import androidx.compose.material.icons.outlined.PowerSettingsNew
@@ -78,23 +84,27 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.ComposeView
+import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
+import androidx.lifecycle.lifecycleScope
 import com.linuxdroid.app.gpu.GpuDriverMode
 import com.linuxdroid.app.input.ImeBridge
 import com.linuxdroid.app.input.ImeCaptureView
 import com.linuxdroid.app.input.TrackpadController
 import com.linuxdroid.app.input.TwoFingerGestures
 import com.linuxdroid.app.runtime.LinuxRuntime
-import com.linuxdroid.app.session.ResolutionPreset
+import com.linuxdroid.app.session.ExternalDisplayMode
 import com.linuxdroid.app.session.SessionPhase
 import com.linuxdroid.app.session.SessionPrefs
 import com.linuxdroid.app.session.SessionService
+import com.linuxdroid.app.session.SessionSnapshot
 import com.linuxdroid.app.session.SessionState
 import com.linuxdroid.app.session.TouchInputMode
 import com.linuxdroid.app.wayland.CompositorHost
@@ -104,6 +114,7 @@ import com.linuxdroid.app.wayland.InputSpace
 import com.linuxdroid.app.wayland.KeyCodes
 import com.linuxdroid.app.wayland.WaylandCompositor
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 import java.io.File
 
 class SessionActivity : ComponentActivity() {
@@ -116,7 +127,10 @@ class SessionActivity : ComponentActivity() {
     private var prevMouseButtonMask = 0
 
     private val showQuickMenuState = mutableStateOf(false)
-    private val externalMonitorActiveState = mutableStateOf(false)
+    private val routingModeState = mutableStateOf(DisplayRoutingMode.INTERNAL_LAPTOP)
+    private val externalMonitorLabelState = mutableStateOf<String?>(null)
+    private val temporaryPhoneFallbackState = mutableStateOf(false)
+    private val phoneScreenDimmedState = mutableStateOf(false)
     private val touchModeState = mutableStateOf(TouchInputMode.TOUCHSCREEN)
 
     private var externalPresentation: ExternalMonitorPresentation? = null
@@ -132,9 +146,19 @@ class SessionActivity : ComponentActivity() {
     }
 
     private val displayListener = object : DisplayManager.DisplayListener {
-        override fun onDisplayAdded(displayId: Int) = refreshDisplayRouting()
+        override fun onDisplayAdded(displayId: Int) {
+            // Clear temporary phone fallback as soon as a real external monitor is plugged in
+            temporaryPhoneFallbackState.value = false
+            refreshDisplayRouting()
+        }
+
         override fun onDisplayRemoved(displayId: Int) = refreshDisplayRouting()
         override fun onDisplayChanged(displayId: Int) = refreshDisplayRouting()
+    }
+
+    private fun isInternalSurfaceActive(): Boolean {
+        val mode = routingModeState.value
+        return mode == DisplayRoutingMode.INTERNAL_LAPTOP || mode == DisplayRoutingMode.DEX_OR_FREEFORM_WINDOW
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -145,12 +169,15 @@ class SessionActivity : ComponentActivity() {
             return
         }
 
-        // Clear any leftover FAILED snapshot from an earlier attempt when freshly opening SessionActivity
         if (SessionState.state.value.phase == SessionPhase.FAILED) {
             SessionState.reset()
         }
 
         touchModeState.value = SessionPrefs.touchInputMode(this)
+        val (initialMode, initialExt) = evaluateCurrentRouting()
+        routingModeState.value = initialMode
+        externalMonitorLabelState.value = initialExt?.let { DeXEnvironmentDetector.describeDisplay(it) }
+
         applyWindowAndDisplayMode()
 
         val rootFrame = FrameLayout(this).apply {
@@ -163,13 +190,13 @@ class SessionActivity : ComponentActivity() {
             isFocusableInTouchMode = false
             holder.addCallback(object : SurfaceHolder.Callback {
                 override fun surfaceCreated(holder: SurfaceHolder) {
-                    if (!externalMonitorActiveState.value) {
+                    if (isInternalSurfaceActive()) {
                         bindInternalSurface(holder)
                     }
                 }
 
                 override fun surfaceChanged(holder: SurfaceHolder, format: Int, width: Int, height: Int) {
-                    if (!externalMonitorActiveState.value && width > 0 && height > 0) {
+                    if (isInternalSurfaceActive() && width > 0 && height > 0) {
                         val (outW, outH) = computeDesktopOutputSize(width, height)
                         val hz = selectBestRefreshRate()
                         CompositorHost.attachSurface(holder.surface, outW, outH, hz)
@@ -178,7 +205,7 @@ class SessionActivity : ComponentActivity() {
                 }
 
                 override fun surfaceDestroyed(holder: SurfaceHolder) {
-                    if (!externalMonitorActiveState.value) {
+                    if (isInternalSurfaceActive()) {
                         CompositorHost.detachSurface()
                     }
                 }
@@ -200,14 +227,40 @@ class SessionActivity : ComponentActivity() {
             setContent {
                 LinuxDroidTheme {
                     SessionOverlayUi(
-                        externalMonitorActive = externalMonitorActiveState.value,
+                        routingMode = routingModeState.value,
+                        externalMonitorLabel = externalMonitorLabelState.value,
+                        phoneDimmed = phoneScreenDimmedState.value,
                         showQuickMenu = showQuickMenuState.value,
                         touchMode = touchModeState.value,
+                        externalOnlyPref = SessionPrefs.externalDisplayMode(this@SessionActivity) == ExternalDisplayMode.EXTERNAL_ONLY,
                         onDismissQuickMenu = {
                             showQuickMenuState.value = false
                             hideSystemBarsIfFullscreen()
                         },
-                        onOpenQuickMenu = { showQuickMenuState.value = true },
+                        onOpenQuickMenu = {
+                            setPhoneDimmed(false)
+                            showQuickMenuState.value = true
+                        },
+                        onTogglePhoneDimmed = {
+                            setPhoneDimmed(!phoneScreenDimmedState.value)
+                        },
+                        onUsePhoneScreenTemporary = {
+                            temporaryPhoneFallbackState.value = true
+                            refreshDisplayRouting()
+                        },
+                        onToggleExternalOnlyMode = {
+                            val cur = SessionPrefs.externalDisplayMode(this@SessionActivity)
+                            val next = if (cur == ExternalDisplayMode.EXTERNAL_ONLY) {
+                                ExternalDisplayMode.PHONE_ONLY
+                            } else {
+                                ExternalDisplayMode.EXTERNAL_ONLY
+                            }
+                            SessionPrefs.setExternalDisplayMode(this@SessionActivity, next)
+                            temporaryPhoneFallbackState.value = false
+                            showQuickMenuState.value = false
+                            setPhoneDimmed(false)
+                            refreshDisplayRouting()
+                        },
                         onToggleKeyboard = {
                             showQuickMenuState.value = false
                             imeBridge.toggleKeyboard()
@@ -230,6 +283,7 @@ class SessionActivity : ComponentActivity() {
                         },
                         onOpenTerminal = {
                             showQuickMenuState.value = false
+                            setPhoneDimmed(false)
                             startActivity(Intent(this@SessionActivity, TerminalActivity::class.java))
                         },
                         onTogglePause = {
@@ -238,16 +292,19 @@ class SessionActivity : ComponentActivity() {
                         },
                         onOpenDashboard = {
                             showQuickMenuState.value = false
+                            setPhoneDimmed(false)
                             navigateBackToDashboard()
                         },
                         onRetryBoot = { safeMode ->
                             retryBootSession(safeMode = safeMode)
                         },
                         onSessionStoppedAfterRun = {
+                            setPhoneDimmed(false)
                             navigateBackToDashboard()
                         },
                         onShutdown = {
                             showQuickMenuState.value = false
+                            setPhoneDimmed(false)
                             SessionService.shutdown(this@SessionActivity)
                             navigateBackToDashboard()
                         },
@@ -269,6 +326,12 @@ class SessionActivity : ComponentActivity() {
 
         displayManager = getSystemService(DisplayManager::class.java)
         displayManager?.registerDisplayListener(displayListener, null)
+
+        lifecycleScope.launch {
+            SessionState.state.collect { snap ->
+                externalPresentation?.updateBootOverlay(snap)
+            }
+        }
     }
 
     override fun onStart() {
@@ -289,6 +352,7 @@ class SessionActivity : ComponentActivity() {
         vsyncRunning = false
         Choreographer.getInstance().removeFrameCallback(vsyncCallback)
         imeBridge.stop()
+        setPhoneDimmed(false)
         dismissExternalPresentation()
         super.onStop()
     }
@@ -305,28 +369,34 @@ class SessionActivity : ComponentActivity() {
         refreshDisplayRouting()
     }
 
+    private fun setPhoneDimmed(dimmed: Boolean) {
+        phoneScreenDimmedState.value = dimmed
+        val attrs = window.attributes
+        attrs.screenBrightness = if (dimmed) 0.01f else WindowManager.LayoutParams.BRIGHTNESS_OVERRIDE_NONE
+        window.attributes = attrs
+    }
+
     override fun dispatchKeyEvent(event: KeyEvent): Boolean {
         val kc = event.keyCode
-        // Volume keys remain native Android volume controls
         if (kc == KeyEvent.KEYCODE_VOLUME_UP || kc == KeyEvent.KEYCODE_VOLUME_DOWN || kc == KeyEvent.KEYCODE_VOLUME_MUTE) {
             return super.dispatchKeyEvent(event)
         }
 
-        // Ctrl + Alt + Shift + Esc opens the LinuxDroid Quick Menu from hardware keyboards
         if (kc == KeyEvent.KEYCODE_ESCAPE &&
             event.isCtrlPressed &&
             event.isAltPressed &&
             event.isShiftPressed
         ) {
             if (event.action == KeyEvent.ACTION_DOWN && event.repeatCount == 0) {
+                setPhoneDimmed(false)
                 showQuickMenuState.value = !showQuickMenuState.value
             }
             return true
         }
 
-        // System Back button/gesture opens Quick Menu (while hardware Escape goes 100% straight to Linux!)
         if (kc == KeyEvent.KEYCODE_BACK && (event.source and InputDevice.SOURCE_MOUSE) == 0) {
             if (event.action == KeyEvent.ACTION_UP && !event.isCanceled) {
+                setPhoneDimmed(false)
                 showQuickMenuState.value = !showQuickMenuState.value
             }
             return true
@@ -347,9 +417,21 @@ class SessionActivity : ComponentActivity() {
         if (event.isFromSource(InputDevice.SOURCE_MOUSE) || event.getToolType(0) == MotionEvent.TOOL_TYPE_MOUSE) {
             return handleMouseTouchEvent(view, event)
         }
-        // When external monitor hot-swap is active, phone screen automatically acts as a multi-touch trackpad
-        if (externalMonitorActiveState.value || touchModeState.value == TouchInputMode.TRACKPAD) {
+        if (routingModeState.value == DisplayRoutingMode.WAITING_FOR_EXTERNAL_MONITOR) {
+            return false
+        }
+        // When external monitor output is active, the phone screen acts as a precision multi-touch trackpad
+        if (routingModeState.value == DisplayRoutingMode.EXTERNAL_MONITOR_HOTSWAP ||
+            touchModeState.value == TouchInputMode.TRACKPAD
+        ) {
             return trackpadController.onTouchEvent(event)
+        }
+        return touchGestures.onTouchEvent(event, view.width, view.height)
+    }
+
+    private fun handleExternalSurfaceTouch(view: View, event: MotionEvent): Boolean {
+        if (event.isFromSource(InputDevice.SOURCE_MOUSE) || event.getToolType(0) == MotionEvent.TOOL_TYPE_MOUSE) {
+            return handleMouseTouchEvent(view, event)
         }
         return touchGestures.onTouchEvent(event, view.width, view.height)
     }
@@ -427,17 +509,30 @@ class SessionActivity : ComponentActivity() {
             SessionPrefs.setProotFastPath(this, false)
             SessionPrefs.setProotNoSeccomp(this, true)
         }
+        if (SessionState.isRunningOrPaused) {
+            SessionService.shutdown(this)
+        }
+        SessionState.reset()
+
+        val extDisp = externalPresentation?.display
+        if (routingModeState.value == DisplayRoutingMode.EXTERNAL_MONITOR_HOTSWAP && extDisp != null) {
+            val mode = extDisp.mode
+            val (outW, outH) = SessionPrefs.resolutionPreset(this).resolveForSurface(mode.physicalWidth, mode.physicalHeight)
+            val hz = selectBestRefreshRate(extDisp)
+            val extHolder = externalPresentation?.surfaceHolder
+            if (extHolder != null && extHolder.surface != null && extHolder.surface.isValid) {
+                CompositorHost.attachSurface(extHolder.surface, outW, outH, hz)
+            }
+            SessionService.startOrResume(this, outW, outH, hz, forceCompat = safeMode)
+            return
+        }
+
         val holder = desktopSurfaceView.holder
         val w = desktopSurfaceView.width.takeIf { it > 0 } ?: 1920
         val h = desktopSurfaceView.height.takeIf { it > 0 } ?: 1080
         val (outW, outH) = computeDesktopOutputSize(w, h)
         val hz = selectBestRefreshRate()
-
-        if (SessionState.isRunningOrPaused) {
-            SessionService.shutdown(this)
-        }
-        SessionState.reset()
-        if (holder.surface != null && holder.surface.isValid) {
+        if (isInternalSurfaceActive() && holder.surface != null && holder.surface.isValid) {
             CompositorHost.attachSurface(holder.surface, outW, outH, hz)
         }
         SessionService.startOrResume(this, outW, outH, hz, forceCompat = safeMode)
@@ -451,39 +546,64 @@ class SessionActivity : ComponentActivity() {
         finish()
     }
 
+    private fun evaluateCurrentRouting(): Pair<DisplayRoutingMode, Display?> {
+        val override = if (temporaryPhoneFallbackState.value) ExternalDisplayMode.PHONE_ONLY else null
+        return DeXEnvironmentDetector.detectForActivity(this, overrideExternalMode = override)
+    }
+
     private fun refreshDisplayRouting() {
-        val (mode, extDisplay) = DeXEnvironmentDetector.detectForActivity(this)
-        if (mode == DisplayRoutingMode.EXTERNAL_MONITOR_HOTSWAP && extDisplay != null) {
-            if (externalPresentation?.display?.displayId != extDisplay.displayId) {
-                dismissExternalPresentation()
-                externalMonitorActiveState.value = true
-                externalPresentation = ExternalMonitorPresentation(this, extDisplay).also {
-                    runCatching { it.show() }.onFailure {
-                        externalMonitorActiveState.value = false
-                        externalPresentation = null
+        val (mode, extDisplay) = evaluateCurrentRouting()
+        val prevMode = routingModeState.value
+        routingModeState.value = mode
+        externalMonitorLabelState.value = extDisplay?.let { DeXEnvironmentDetector.describeDisplay(it) }
+
+        when (mode) {
+            DisplayRoutingMode.EXTERNAL_MONITOR_HOTSWAP -> {
+                if (extDisplay != null && externalPresentation?.display?.displayId != extDisplay.displayId) {
+                    dismissExternalPresentation()
+                    CompositorHost.detachSurface()
+                    externalPresentation = ExternalMonitorPresentation(this, extDisplay).also { pres ->
+                        runCatching {
+                            pres.show()
+                            pres.updateBootOverlay(SessionState.state.value)
+                        }.onFailure {
+                            externalPresentation = null
+                            routingModeState.value = DisplayRoutingMode.INTERNAL_LAPTOP
+                        }
                     }
                 }
             }
-        } else {
-            if (externalPresentation != null || externalMonitorActiveState.value) {
+
+            DisplayRoutingMode.WAITING_FOR_EXTERNAL_MONITOR -> {
+                setPhoneDimmed(false)
                 dismissExternalPresentation()
-                val holder = desktopSurfaceView.holder
-                if (holder.surface != null && holder.surface.isValid) {
-                    bindInternalSurface(holder)
+                CompositorHost.detachSurface()
+            }
+
+            DisplayRoutingMode.INTERNAL_LAPTOP,
+            DisplayRoutingMode.DEX_OR_FREEFORM_WINDOW -> {
+                setPhoneDimmed(false)
+                val hadExternal = externalPresentation != null ||
+                    prevMode == DisplayRoutingMode.EXTERNAL_MONITOR_HOTSWAP ||
+                    prevMode == DisplayRoutingMode.WAITING_FOR_EXTERNAL_MONITOR
+                dismissExternalPresentation()
+                if (hadExternal) {
+                    val holder = desktopSurfaceView.holder
+                    if (holder.surface != null && holder.surface.isValid) {
+                        bindInternalSurface(holder)
+                    }
                 }
             }
         }
     }
 
     private fun dismissExternalPresentation() {
-        externalMonitorActiveState.value = false
         runCatching { externalPresentation?.dismiss() }
         externalPresentation = null
     }
 
     private fun computeDesktopOutputSize(surfaceW: Int, surfaceH: Int): Pair<Int, Int> {
-        val (routing, _) = DeXEnvironmentDetector.detectForActivity(this)
-        if (routing == DisplayRoutingMode.DEX_OR_FREEFORM_WINDOW) {
+        if (routingModeState.value == DisplayRoutingMode.DEX_OR_FREEFORM_WINDOW) {
             return (surfaceW and 1.inv()).coerceAtLeast(640) to (surfaceH and 1.inv()).coerceAtLeast(480)
         }
         return SessionPrefs.resolutionPreset(this).resolveForSurface(surfaceW, surfaceH)
@@ -520,8 +640,8 @@ class SessionActivity : ComponentActivity() {
     }
 
     private fun applyWindowAndDisplayMode() {
-        val (routing, _) = DeXEnvironmentDetector.detectForActivity(this)
-        requestedOrientation = if (routing == DisplayRoutingMode.DEX_OR_FREEFORM_WINDOW) {
+        val mode = routingModeState.value
+        requestedOrientation = if (mode == DisplayRoutingMode.DEX_OR_FREEFORM_WINDOW) {
             ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED
         } else {
             SessionPrefs.orientation(this).androidOrientation
@@ -531,7 +651,7 @@ class SessionActivity : ComponentActivity() {
                 layoutInDisplayCutoutMode = WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES
             }
         }
-        if (routing != DisplayRoutingMode.DEX_OR_FREEFORM_WINDOW) {
+        if (mode != DisplayRoutingMode.DEX_OR_FREEFORM_WINDOW) {
             hideSystemBarsIfFullscreen()
         } else {
             WindowCompat.setDecorFitsSystemWindows(window, true)
@@ -539,8 +659,7 @@ class SessionActivity : ComponentActivity() {
     }
 
     private fun hideSystemBarsIfFullscreen() {
-        val (routing, _) = DeXEnvironmentDetector.detectForActivity(this)
-        if (routing == DisplayRoutingMode.DEX_OR_FREEFORM_WINDOW) return
+        if (routingModeState.value == DisplayRoutingMode.DEX_OR_FREEFORM_WINDOW) return
         WindowCompat.setDecorFitsSystemWindows(window, false)
         WindowInsetsControllerCompat(window, window.decorView).apply {
             hide(WindowInsetsCompat.Type.systemBars())
@@ -552,31 +671,110 @@ class SessionActivity : ComponentActivity() {
         outerContext: Context,
         display: Display,
     ) : Presentation(outerContext, display) {
+        var surfaceHolder: SurfaceHolder? = null
+            private set
+        private var statusBanner: TextView? = null
+
         override fun onCreate(savedInstanceState: Bundle?) {
             super.onCreate(savedInstanceState)
+            window?.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+
+            val container = FrameLayout(context).apply {
+                setBackgroundColor(android.graphics.Color.BLACK)
+            }
+
             val extSurfaceView = SurfaceView(context).apply {
                 holder.addCallback(object : SurfaceHolder.Callback {
                     override fun surfaceCreated(holder: SurfaceHolder) {
+                        surfaceHolder = holder
                         val mode = display.mode
-                        val w = (mode.physicalWidth and 1.inv()).coerceAtLeast(1280)
-                        val h = (mode.physicalHeight and 1.inv()).coerceAtLeast(720)
+                        val (outW, outH) = SessionPrefs.resolutionPreset(this@SessionActivity)
+                            .resolveForSurface(mode.physicalWidth, mode.physicalHeight)
                         val hz = selectBestRefreshRate(display)
-                        CompositorHost.ensureStarted(this@SessionActivity, LinuxRuntime.runtimeDir(this@SessionActivity), w, h, hz, holder.surface)
-                        CompositorHost.attachSurface(holder.surface, w, h, hz)
-                        ensureSessionStarted(w, h, hz)
+                        CompositorHost.ensureStarted(
+                            this@SessionActivity,
+                            LinuxRuntime.runtimeDir(this@SessionActivity),
+                            outW,
+                            outH,
+                            hz,
+                            holder.surface,
+                        )
+                        CompositorHost.attachSurface(holder.surface, outW, outH, hz)
+                        ensureSessionStarted(outW, outH, hz)
                     }
 
                     override fun surfaceChanged(holder: SurfaceHolder, format: Int, width: Int, height: Int) {
+                        surfaceHolder = holder
                         if (width > 0 && height > 0) {
+                            val (outW, outH) = SessionPrefs.resolutionPreset(this@SessionActivity)
+                                .resolveForSurface(width, height)
                             val hz = selectBestRefreshRate(display)
-                            CompositorHost.attachSurface(holder.surface, width and 1.inv(), height and 1.inv(), hz)
+                            CompositorHost.attachSurface(holder.surface, outW, outH, hz)
                         }
                     }
 
-                    override fun surfaceDestroyed(holder: SurfaceHolder) = Unit
+                    override fun surfaceDestroyed(holder: SurfaceHolder) {
+                        if (surfaceHolder === holder) surfaceHolder = null
+                        if (routingModeState.value == DisplayRoutingMode.EXTERNAL_MONITOR_HOTSWAP) {
+                            CompositorHost.detachSurface()
+                        }
+                    }
                 })
+                setOnTouchListener { v, ev -> handleExternalSurfaceTouch(v, ev) }
+                setOnGenericMotionListener { v, ev -> handleGenericPointer(v, ev) }
             }
-            setContentView(extSurfaceView)
+
+            val density = context.resources.displayMetrics.density
+            val banner = TextView(context).apply {
+                setTextColor(0xFFE5EDF5.toInt())
+                textSize = 15f
+                typeface = Typeface.MONOSPACE
+                gravity = Gravity.CENTER
+                val padH = (24 * density).toInt()
+                val padV = (14 * density).toInt()
+                setPadding(padH, padV, padH, padV)
+                background = GradientDrawable().apply {
+                    shape = GradientDrawable.RECTANGLE
+                    cornerRadius = 14f * density
+                    setColor(0xE6131B24.toInt())
+                    setStroke((1 * density).toInt().coerceAtLeast(1), 0xFF334155.toInt())
+                }
+                text = "LinuxDroid • Starting Linux Desktop..."
+            }
+            statusBanner = banner
+
+            container.addView(
+                extSurfaceView,
+                FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT)
+            )
+            container.addView(
+                banner,
+                FrameLayout.LayoutParams(
+                    ViewGroup.LayoutParams.WRAP_CONTENT,
+                    ViewGroup.LayoutParams.WRAP_CONTENT,
+                    Gravity.CENTER,
+                )
+            )
+            setContentView(container)
+        }
+
+        override fun dispatchKeyEvent(event: KeyEvent): Boolean {
+            return this@SessionActivity.dispatchKeyEvent(event) || super.dispatchKeyEvent(event)
+        }
+
+        fun updateBootOverlay(snap: SessionSnapshot) {
+            val view = statusBanner ?: return
+            if (snap.firstFrameReady && snap.phase == SessionPhase.RUNNING) {
+                view.visibility = View.GONE
+            } else if (snap.phase == SessionPhase.FAILED) {
+                view.visibility = View.VISIBLE
+                view.text = "LinuxDroid Startup Failed — Check Phone Screen"
+            } else {
+                view.visibility = View.VISIBLE
+                val step = snap.bootStep.coerceIn(1, snap.bootTotalSteps.coerceAtLeast(1))
+                val total = snap.bootTotalSteps.coerceAtLeast(1)
+                view.text = "LinuxDroid • Step $step/$total\n${snap.statusText}"
+            }
         }
     }
 }
@@ -584,11 +782,17 @@ class SessionActivity : ComponentActivity() {
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalLayoutApi::class)
 @Composable
 private fun SessionOverlayUi(
-    externalMonitorActive: Boolean,
+    routingMode: DisplayRoutingMode,
+    externalMonitorLabel: String?,
+    phoneDimmed: Boolean,
     showQuickMenu: Boolean,
     touchMode: TouchInputMode,
+    externalOnlyPref: Boolean,
     onDismissQuickMenu: () -> Unit,
     onOpenQuickMenu: () -> Unit,
+    onTogglePhoneDimmed: () -> Unit,
+    onUsePhoneScreenTemporary: () -> Unit,
+    onToggleExternalOnlyMode: () -> Unit,
     onToggleKeyboard: () -> Unit,
     onToggleTouchMode: () -> Unit,
     onCycleOrientation: () -> Unit,
@@ -623,282 +827,42 @@ private fun SessionOverlayUi(
         }
     }
 
-    if (snap.phase == SessionPhase.FAILED) {
-        Box(
-            modifier = Modifier
-                .fillMaxSize()
-                .background(Color(0xFF0B1117))
-                .padding(20.dp),
-            contentAlignment = Alignment.Center,
-        ) {
-            Card(
-                shape = RoundedCornerShape(16.dp),
-                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
-                border = BorderStroke(1.dp, MaterialTheme.colorScheme.error.copy(alpha = 0.6f)),
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .widthIn(max = 620.dp),
-            ) {
-                Column(
-                    modifier = Modifier
-                        .padding(20.dp)
-                        .verticalScroll(rememberScrollState()),
-                    verticalArrangement = Arrangement.spacedBy(10.dp),
-                ) {
-                    Row(
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(10.dp),
-                    ) {
-                        Icon(
-                            imageVector = Icons.Outlined.ErrorOutline,
-                            contentDescription = null,
-                            tint = MaterialTheme.colorScheme.error,
-                            modifier = Modifier.size(28.dp),
-                        )
-                        Column {
-                            Text(
-                                text = "Linux Desktop Startup Failed",
-                                style = MaterialTheme.typography.titleMedium,
-                                fontWeight = FontWeight.Bold,
-                            )
-                            Text(
-                                text = snap.errorMessage ?: "The Linux session exited before presenting a desktop frame.",
-                                style = MaterialTheme.typography.bodySmall,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                            )
-                        }
-                    }
-
-                    if (snap.bootLogTail.isNotEmpty()) {
-                        Surface(
-                            shape = RoundedCornerShape(8.dp),
-                            color = Color(0xFF070B10),
-                            border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline),
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .heightIn(max = 180.dp),
-                        ) {
-                            Column(
-                                modifier = Modifier
-                                    .padding(10.dp)
-                                    .verticalScroll(rememberScrollState()),
-                            ) {
-                                Text(
-                                    text = snap.bootLogTail.joinToString("\n"),
-                                    fontFamily = FontFamily.Monospace,
-                                    fontSize = 11.sp,
-                                    lineHeight = 15.sp,
-                                    color = Color(0xFFD0D8E4),
-                                )
-                            }
-                        }
-                    }
-
-                    FlowRow(
-                        horizontalArrangement = Arrangement.spacedBy(8.dp),
-                        verticalArrangement = Arrangement.spacedBy(8.dp),
-                    ) {
-                        Button(onClick = { onRetryBoot(true) }) {
-                            Icon(Icons.Outlined.Refresh, contentDescription = null)
-                            Spacer(Modifier.width(6.dp))
-                            Text("Retry in Safe Mode")
-                        }
-                        OutlinedButton(onClick = { onRetryBoot(false) }) {
-                            Text("Retry")
-                        }
-                        OutlinedButton(onClick = onOpenTerminal) {
-                            Icon(Icons.Outlined.Terminal, contentDescription = null)
-                            Spacer(Modifier.width(6.dp))
-                            Text("Diagnostic Terminal")
-                        }
-                        TextButton(onClick = onOpenDashboard) {
-                            Text("Back to Dashboard")
-                        }
-                    }
-                }
-            }
-        }
-    } else if (externalMonitorActive) {
-        // Trackpad UI shown ONLY on the phone screen while outputting desktop fullscreen to an external USB-C/HDMI monitor
-        Box(
-            modifier = Modifier
-                .fillMaxSize()
-                .background(Color(0xFF0B1117))
-                .padding(24.dp),
-        ) {
-            Column(
-                modifier = Modifier.align(Alignment.Center),
-                horizontalAlignment = Alignment.CenterHorizontally,
-            ) {
-                Icon(
-                    imageVector = Icons.Outlined.Mouse,
-                    contentDescription = null,
-                    tint = MaterialTheme.colorScheme.primary,
-                    modifier = Modifier.size(40.dp),
-                )
-                Spacer(Modifier.height(10.dp))
-                Text(
-                    text = "External Monitor Active • Multi-Touch Trackpad",
-                    style = MaterialTheme.typography.titleMedium,
-                    color = MaterialTheme.colorScheme.onBackground,
-                )
-                Text(
-                    text = "1-finger move/tap • 2-finger scroll & right-click • 3-finger middle-click",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-            }
-            Row(
-                modifier = Modifier
-                    .align(Alignment.BottomCenter)
-                    .fillMaxWidth(),
-                horizontalArrangement = Arrangement.spacedBy(12.dp, Alignment.CenterHorizontally),
-            ) {
-                OutlinedButton(onClick = onToggleKeyboard) {
-                    Icon(Icons.Outlined.Keyboard, contentDescription = null)
-                    Spacer(Modifier.width(6.dp))
-                    Text("Keyboard")
-                }
-                OutlinedButton(onClick = onOpenQuickMenu) {
-                    Text("Quick Menu")
-                }
-            }
-        }
-    } else if (!snap.firstFrameReady) {
-        // Live step-by-step boot progress indicator (always visible until first Wayland frame arrives; never black)
-        val curStep = snap.bootStep.coerceIn(1, snap.bootTotalSteps.coerceAtLeast(1))
-        val totalSteps = snap.bootTotalSteps.coerceAtLeast(1)
-        val stageTitle = if (snap.phase == SessionPhase.STOPPED || snap.phase == SessionPhase.STOPPING) {
-            "Preparing display surface & session service..."
-        } else {
-            snap.statusText
+    when {
+        routingMode == DisplayRoutingMode.WAITING_FOR_EXTERNAL_MONITOR -> {
+            WaitingForExternalMonitorOverlay(
+                onUsePhoneScreenTemporary = onUsePhoneScreenTemporary,
+                onOpenDashboard = onOpenDashboard,
+            )
         }
 
-        Box(
-            modifier = Modifier
-                .fillMaxSize()
-                .background(Color(0xFF0B1117))
-                .padding(20.dp),
-            contentAlignment = Alignment.Center,
-        ) {
-            Card(
-                shape = RoundedCornerShape(16.dp),
-                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
-                border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline),
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .widthIn(max = 560.dp),
-            ) {
-                Column(
-                    modifier = Modifier.padding(20.dp),
-                    verticalArrangement = Arrangement.spacedBy(10.dp),
-                ) {
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.SpaceBetween,
-                    ) {
-                        Row(
-                            verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.spacedBy(12.dp),
-                        ) {
-                            CircularProgressIndicator(
-                                color = MaterialTheme.colorScheme.primary,
-                                strokeWidth = 2.5.dp,
-                                modifier = Modifier.size(22.dp),
-                            )
-                            Text(
-                                text = "Starting Linux Desktop",
-                                style = MaterialTheme.typography.titleMedium,
-                                fontWeight = FontWeight.SemiBold,
-                            )
-                        }
-                        Text(
-                            text = "Step $curStep/$totalSteps • ${elapsedSec}s",
-                            style = MaterialTheme.typography.labelMedium,
-                            color = MaterialTheme.colorScheme.primary,
-                        )
-                    }
+        snap.phase == SessionPhase.FAILED -> {
+            BootFailedOverlay(
+                snap = snap,
+                onRetryBoot = onRetryBoot,
+                onOpenTerminal = onOpenTerminal,
+                onOpenDashboard = onOpenDashboard,
+            )
+        }
 
-                    LinearProgressIndicator(
-                        progress = { curStep.toFloat() / totalSteps.toFloat() },
-                        modifier = Modifier.fillMaxWidth(),
-                        color = MaterialTheme.colorScheme.primary,
-                    )
+        !snap.firstFrameReady -> {
+            BootProgressOverlay(
+                snap = snap,
+                elapsedSec = elapsedSec,
+                externalMonitorLabel = if (routingMode == DisplayRoutingMode.EXTERNAL_MONITOR_HOTSWAP) externalMonitorLabel else null,
+                onRetryBoot = onRetryBoot,
+                onOpenDashboard = onOpenDashboard,
+            )
+        }
 
-                    Text(
-                        text = stageTitle,
-                        style = MaterialTheme.typography.bodyMedium,
-                        color = MaterialTheme.colorScheme.onSurface,
-                    )
-
-                    if (snap.activeGpuSummary.isNotEmpty() || snap.resolutionText.isNotEmpty()) {
-                        val meta = listOf(snap.activeGpuSummary, snap.resolutionText)
-                            .filter { it.isNotEmpty() }
-                            .joinToString(" • ")
-                        Text(
-                            text = meta,
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        )
-                    }
-
-                    if (snap.bootLogTail.isNotEmpty()) {
-                        Surface(
-                            shape = RoundedCornerShape(8.dp),
-                            color = Color(0xFF070B10),
-                            border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline),
-                            modifier = Modifier.fillMaxWidth(),
-                        ) {
-                            Text(
-                                text = snap.bootLogTail.takeLast(5).joinToString("\n"),
-                                fontFamily = FontFamily.Monospace,
-                                fontSize = 11.sp,
-                                lineHeight = 15.sp,
-                                color = Color(0xFFB8C4D4),
-                                modifier = Modifier.padding(10.dp),
-                            )
-                        }
-                    }
-
-                    if (elapsedSec >= 30) {
-                        Text(
-                            text = "Initializing desktop caches — first boot after installation can take 20–45 seconds.",
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        )
-                    }
-
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.End),
-                        verticalAlignment = Alignment.CenterVertically,
-                    ) {
-                        if (snap.bootStep >= 5 && elapsedSec >= 8) {
-                            TextButton(
-                                onClick = {
-                                    SessionState.update {
-                                        it.copy(
-                                            firstFrameReady = true,
-                                            phase = SessionPhase.RUNNING,
-                                        )
-                                    }
-                                }
-                            ) {
-                                Text("Show Canvas")
-                            }
-                        }
-                        if (elapsedSec >= 15) {
-                            OutlinedButton(onClick = { onRetryBoot(true) }) {
-                                Text("Retry in Safe Mode")
-                            }
-                        }
-                        TextButton(onClick = onOpenDashboard) {
-                            Text("Dashboard")
-                        }
-                    }
-                }
-            }
+        routingMode == DisplayRoutingMode.EXTERNAL_MONITOR_HOTSWAP -> {
+            ExternalMonitorTrackpadOverlay(
+                externalMonitorLabel = externalMonitorLabel ?: "External Display",
+                phoneDimmed = phoneDimmed,
+                onTogglePhoneDimmed = onTogglePhoneDimmed,
+                onToggleKeyboard = onToggleKeyboard,
+                onOpenTerminal = onOpenTerminal,
+                onOpenQuickMenu = onOpenQuickMenu,
+            )
         }
     }
 
@@ -922,6 +886,8 @@ private fun SessionOverlayUi(
                     text = "${snap.statusText} • ${snap.activeGpuSummary.ifEmpty { "ARM64 Workstation" }}",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
                 )
                 HorizontalDivider(modifier = Modifier.padding(vertical = 8.dp))
 
@@ -930,6 +896,11 @@ private fun SessionOverlayUi(
                     if (touchMode == TouchInputMode.TOUCHSCREEN) Icons.Outlined.Mouse else Icons.Outlined.TouchApp,
                     if (touchMode == TouchInputMode.TOUCHSCREEN) "Switch to Virtual Trackpad" else "Switch to Direct Touchscreen",
                     onToggleTouchMode,
+                )
+                QuickMenuAction(
+                    Icons.Outlined.Monitor,
+                    if (externalOnlyPref) "Disable External Screen Only Mode" else "Enable External Screen Only (VLC Mode)",
+                    onToggleExternalOnlyMode,
                 )
                 QuickMenuAction(Icons.Outlined.ScreenRotation, "Cycle Screen Orientation (Landscape / Auto / Portrait)", onCycleOrientation)
                 QuickMenuAction(Icons.Outlined.Terminal, "Open Linux Terminal", onOpenTerminal)
@@ -955,8 +926,567 @@ private fun SessionOverlayUi(
     }
 }
 
+/**
+ * Fixed-geometry startup overlay with an internal scrollable console container.
+ * Width and height remain 100% constant during boot so log updates never cause flickering or layout shifts.
+ */
 @Composable
-private fun QuickMenuAction(icon: ImageVector, label: String, onClick: () -> Unit) {
+private fun BootProgressOverlay(
+    snap: SessionSnapshot,
+    elapsedSec: Int,
+    externalMonitorLabel: String?,
+    onRetryBoot: (safeMode: Boolean) -> Unit,
+    onOpenDashboard: () -> Unit,
+) {
+    val curStep = snap.bootStep.coerceIn(1, snap.bootTotalSteps.coerceAtLeast(1))
+    val totalSteps = snap.bootTotalSteps.coerceAtLeast(1)
+    val animatedProgress by animateFloatAsState(
+        targetValue = curStep.toFloat() / totalSteps.toFloat(),
+        label = "bootStepProgress",
+    )
+    val stageTitle = if (snap.phase == SessionPhase.STOPPED || snap.phase == SessionPhase.STOPPING) {
+        "Preparing display surface & session service..."
+    } else {
+        snap.statusText
+    }
+    val metaLine = remember(externalMonitorLabel, snap.activeGpuSummary, snap.resolutionText) {
+        buildList {
+            if (!externalMonitorLabel.isNullOrEmpty()) add("External: $externalMonitorLabel")
+            if (snap.activeGpuSummary.isNotEmpty()) add(snap.activeGpuSummary)
+            if (snap.resolutionText.isNotEmpty()) add(snap.resolutionText)
+        }.joinToString(" • ").ifEmpty { "Initializing ARM64 container runtime..." }
+    }
+
+    val logScrollState = rememberScrollState()
+    val logContent = remember(snap.bootLogTail) {
+        if (snap.bootLogTail.isEmpty()) "Waiting for guest startup output..."
+        else snap.bootLogTail.joinToString("\n")
+    }
+    LaunchedEffect(logContent) {
+        logScrollState.scrollTo(logScrollState.maxValue)
+    }
+
+    BoxWithConstraints(
+        modifier = Modifier
+            .fillMaxSize()
+            .background(Color(0xFF090E14))
+            .padding(16.dp),
+        contentAlignment = Alignment.Center,
+    ) {
+        val cardWidth = minOf(maxWidth, 600.dp)
+        val cardHeight = minOf(maxHeight, 336.dp).coerceAtLeast(220.dp)
+
+        Card(
+            shape = RoundedCornerShape(16.dp),
+            colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+            border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline),
+            modifier = Modifier.size(width = cardWidth, height = cardHeight),
+        ) {
+            Column(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .padding(18.dp),
+                verticalArrangement = Arrangement.spacedBy(10.dp),
+            ) {
+                // Fixed Header Row
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(28.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                ) {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(10.dp),
+                        modifier = Modifier.weight(1f),
+                    ) {
+                        CircularProgressIndicator(
+                            color = MaterialTheme.colorScheme.primary,
+                            strokeWidth = 2.5.dp,
+                            modifier = Modifier.size(20.dp),
+                        )
+                        Text(
+                            text = if (externalMonitorLabel != null) {
+                                "Starting on External Screen"
+                            } else {
+                                "Starting Linux Workstation"
+                            },
+                            style = MaterialTheme.typography.titleMedium,
+                            fontWeight = FontWeight.SemiBold,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                        )
+                    }
+                    Spacer(Modifier.width(8.dp))
+                    Surface(
+                        shape = RoundedCornerShape(12.dp),
+                        color = MaterialTheme.colorScheme.surfaceVariant,
+                    ) {
+                        Text(
+                            text = "Step $curStep/$totalSteps • ${elapsedSec}s",
+                            style = MaterialTheme.typography.labelMedium.merge(
+                                TextStyle(fontFeatureSettings = "tnum")
+                            ),
+                            color = MaterialTheme.colorScheme.primary,
+                            modifier = Modifier.padding(horizontal = 10.dp, vertical = 4.dp),
+                        )
+                    }
+                }
+
+                // Smooth Progress Bar
+                LinearProgressIndicator(
+                    progress = { animatedProgress },
+                    modifier = Modifier.fillMaxWidth(),
+                    color = MaterialTheme.colorScheme.primary,
+                )
+
+                // Fixed 2-line Status & Hardware Strip (never wraps or expands)
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(38.dp),
+                    verticalArrangement = Arrangement.Center,
+                ) {
+                    Text(
+                        text = stageTitle,
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurface,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                    Text(
+                        text = metaLine,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                }
+
+                // Fixed-Height Scrollable Console Container
+                Surface(
+                    shape = RoundedCornerShape(8.dp),
+                    color = Color(0xFF060A0F),
+                    border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .weight(1f),
+                ) {
+                    Column(
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .verticalScroll(logScrollState)
+                            .padding(horizontal = 10.dp, vertical = 8.dp),
+                    ) {
+                        Text(
+                            text = logContent,
+                            fontFamily = FontFamily.Monospace,
+                            fontSize = 11.sp,
+                            lineHeight = 15.sp,
+                            color = Color(0xFFB8C4D4),
+                        )
+                    }
+                }
+
+                // Fixed Footer Action Bar
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(36.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                ) {
+                    Text(
+                        text = if (elapsedSec >= 20) {
+                            "First boot builds caches (~20–45s)"
+                        } else {
+                            ""
+                        },
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier.weight(1f),
+                    )
+
+                    if (snap.bootStep >= 5 && elapsedSec >= 8) {
+                        TextButton(
+                            onClick = {
+                                SessionState.update {
+                                    it.copy(
+                                        firstFrameReady = true,
+                                        phase = SessionPhase.RUNNING,
+                                    )
+                                }
+                            },
+                            contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp),
+                        ) {
+                            Text("Show Canvas")
+                        }
+                    }
+                    if (elapsedSec >= 15) {
+                        OutlinedButton(
+                            onClick = { onRetryBoot(true) },
+                            contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp),
+                            modifier = Modifier.height(34.dp),
+                        ) {
+                            Text("Safe Mode")
+                        }
+                    }
+                    TextButton(
+                        onClick = onOpenDashboard,
+                        contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp),
+                    ) {
+                        Text("Dashboard")
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun BootFailedOverlay(
+    snap: SessionSnapshot,
+    onRetryBoot: (safeMode: Boolean) -> Unit,
+    onOpenTerminal: () -> Unit,
+    onOpenDashboard: () -> Unit,
+) {
+    val logScrollState = rememberScrollState()
+    val logText = remember(snap.bootLogTail) {
+        if (snap.bootLogTail.isEmpty()) "No log lines captured." else snap.bootLogTail.joinToString("\n")
+    }
+
+    BoxWithConstraints(
+        modifier = Modifier
+            .fillMaxSize()
+            .background(Color(0xFF090E14))
+            .padding(16.dp),
+        contentAlignment = Alignment.Center,
+    ) {
+        val cardWidth = minOf(maxWidth, 620.dp)
+        val cardHeight = minOf(maxHeight, 360.dp).coerceAtLeast(240.dp)
+
+        Card(
+            shape = RoundedCornerShape(16.dp),
+            colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+            border = BorderStroke(1.dp, MaterialTheme.colorScheme.error.copy(alpha = 0.65f)),
+            modifier = Modifier.size(width = cardWidth, height = cardHeight),
+        ) {
+            Column(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .padding(18.dp),
+                verticalArrangement = Arrangement.spacedBy(10.dp),
+            ) {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(10.dp),
+                ) {
+                    Icon(
+                        imageVector = Icons.Outlined.ErrorOutline,
+                        contentDescription = null,
+                        tint = MaterialTheme.colorScheme.error,
+                        modifier = Modifier.size(26.dp),
+                    )
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text(
+                            text = "Linux Desktop Startup Failed",
+                            style = MaterialTheme.typography.titleMedium,
+                            fontWeight = FontWeight.Bold,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                        )
+                        Text(
+                            text = snap.errorMessage ?: "The Linux session exited before presenting a desktop frame.",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            maxLines = 2,
+                            overflow = TextOverflow.Ellipsis,
+                        )
+                    }
+                }
+
+                Surface(
+                    shape = RoundedCornerShape(8.dp),
+                    color = Color(0xFF060A0F),
+                    border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .weight(1f),
+                ) {
+                    Column(
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .verticalScroll(logScrollState)
+                            .padding(10.dp),
+                    ) {
+                        Text(
+                            text = logText,
+                            fontFamily = FontFamily.Monospace,
+                            fontSize = 11.sp,
+                            lineHeight = 15.sp,
+                            color = Color(0xFFD0D8E4),
+                        )
+                    }
+                }
+
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(38.dp),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.End),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Button(
+                        onClick = { onRetryBoot(true) },
+                        contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp),
+                        modifier = Modifier.height(36.dp),
+                    ) {
+                        Icon(Icons.Outlined.Refresh, contentDescription = null, modifier = Modifier.size(16.dp))
+                        Spacer(Modifier.width(6.dp))
+                        Text("Safe Mode")
+                    }
+                    OutlinedButton(
+                        onClick = { onRetryBoot(false) },
+                        contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp),
+                        modifier = Modifier.height(36.dp),
+                    ) {
+                        Text("Retry")
+                    }
+                    OutlinedButton(
+                        onClick = onOpenTerminal,
+                        contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp),
+                        modifier = Modifier.height(36.dp),
+                    ) {
+                        Icon(Icons.Outlined.Terminal, contentDescription = null, modifier = Modifier.size(16.dp))
+                        Spacer(Modifier.width(4.dp))
+                        Text("Terminal")
+                    }
+                    TextButton(onClick = onOpenDashboard) {
+                        Text("Dashboard")
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun WaitingForExternalMonitorOverlay(
+    onUsePhoneScreenTemporary: () -> Unit,
+    onOpenDashboard: () -> Unit,
+) {
+    BoxWithConstraints(
+        modifier = Modifier
+            .fillMaxSize()
+            .background(Color(0xFF090E14))
+            .padding(16.dp),
+        contentAlignment = Alignment.Center,
+    ) {
+        val cardWidth = minOf(maxWidth, 520.dp)
+        val cardHeight = minOf(maxHeight, 250.dp).coerceAtLeast(210.dp)
+
+        Card(
+            shape = RoundedCornerShape(16.dp),
+            colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+            border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline),
+            modifier = Modifier.size(width = cardWidth, height = cardHeight),
+        ) {
+            Column(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .padding(20.dp),
+                verticalArrangement = Arrangement.SpaceBetween,
+            ) {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(12.dp),
+                ) {
+                    Icon(
+                        imageVector = Icons.Outlined.Monitor,
+                        contentDescription = null,
+                        tint = MaterialTheme.colorScheme.primary,
+                        modifier = Modifier.size(30.dp),
+                    )
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text(
+                            text = "Waiting for External Screen",
+                            style = MaterialTheme.typography.titleMedium,
+                            fontWeight = FontWeight.Bold,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                        )
+                        Text(
+                            text = "External Screen Only mode (VLC style) is enabled",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.primary,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                        )
+                    }
+                }
+
+                Text(
+                    text = "Connect a USB-C / HDMI monitor or Wireless Display. LinuxDroid will automatically output the desktop fullscreen onto the external monitor without needing Samsung DeX.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    maxLines = 4,
+                    overflow = TextOverflow.Ellipsis,
+                )
+
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(10.dp, Alignment.End),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    TextButton(onClick = onOpenDashboard) {
+                        Text("Dashboard Settings")
+                    }
+                    Button(onClick = onUsePhoneScreenTemporary) {
+                        Text("Use Phone Screen Now")
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun ExternalMonitorTrackpadOverlay(
+    externalMonitorLabel: String,
+    phoneDimmed: Boolean,
+    onTogglePhoneDimmed: () -> Unit,
+    onToggleKeyboard: () -> Unit,
+    onOpenTerminal: () -> Unit,
+    onOpenQuickMenu: () -> Unit,
+) {
+    if (phoneDimmed) {
+        // Pure OLED black power-save trackpad surface (all touch gestures continue working underneath!)
+        Box(
+            modifier = Modifier
+                .fillMaxSize()
+                .background(Color.Black)
+                .padding(16.dp),
+        ) {
+            TextButton(
+                onClick = onTogglePhoneDimmed,
+                modifier = Modifier.align(Alignment.BottomEnd),
+            ) {
+                Text(
+                    text = "Wake Controls",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = Color(0xFF475569),
+                )
+            }
+        }
+        return
+    }
+
+    Box(
+        modifier = Modifier
+            .fillMaxSize()
+            .background(Color(0xFF090E14))
+            .padding(20.dp),
+    ) {
+        Surface(
+            shape = RoundedCornerShape(20.dp),
+            color = MaterialTheme.colorScheme.surface,
+            border = BorderStroke(1.dp, MaterialTheme.colorScheme.secondary.copy(alpha = 0.5f)),
+            modifier = Modifier.align(Alignment.TopCenter),
+        ) {
+            Row(
+                modifier = Modifier.padding(horizontal = 14.dp, vertical = 6.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                Icon(
+                    imageVector = Icons.Outlined.Monitor,
+                    contentDescription = null,
+                    tint = MaterialTheme.colorScheme.secondary,
+                    modifier = Modifier.size(16.dp),
+                )
+                Text(
+                    text = "Output: $externalMonitorLabel",
+                    style = MaterialTheme.typography.labelMedium,
+                    color = MaterialTheme.colorScheme.onSurface,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+            }
+        }
+
+        Column(
+            modifier = Modifier.align(Alignment.Center),
+            horizontalAlignment = Alignment.CenterHorizontally,
+        ) {
+            Icon(
+                imageVector = Icons.Outlined.Mouse,
+                contentDescription = null,
+                tint = MaterialTheme.colorScheme.primary,
+                modifier = Modifier.size(38.dp),
+            )
+            Spacer(Modifier.height(8.dp))
+            Text(
+                text = "External Screen Trackpad",
+                style = MaterialTheme.typography.titleMedium,
+                fontWeight = FontWeight.SemiBold,
+                color = MaterialTheme.colorScheme.onBackground,
+            )
+            Text(
+                text = "1-finger move & tap • 2-finger scroll & right-click • 3-finger middle-click",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
+
+        Row(
+            modifier = Modifier
+                .align(Alignment.BottomCenter)
+                .fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(10.dp, Alignment.CenterHorizontally),
+        ) {
+            OutlinedButton(
+                onClick = onToggleKeyboard,
+                contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp),
+            ) {
+                Icon(Icons.Outlined.Keyboard, contentDescription = null, modifier = Modifier.size(18.dp))
+                Spacer(Modifier.width(6.dp))
+                Text("Keyboard")
+            }
+            OutlinedButton(
+                onClick = onTogglePhoneDimmed,
+                contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp),
+            ) {
+                Icon(Icons.Outlined.BrightnessLow, contentDescription = null, modifier = Modifier.size(18.dp))
+                Spacer(Modifier.width(6.dp))
+                Text("Dim Screen")
+            }
+            OutlinedButton(
+                onClick = onOpenTerminal,
+                contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp),
+            ) {
+                Icon(Icons.Outlined.Terminal, contentDescription = null, modifier = Modifier.size(18.dp))
+                Spacer(Modifier.width(6.dp))
+                Text("Terminal")
+            }
+            OutlinedButton(
+                onClick = onOpenQuickMenu,
+                contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp),
+            ) {
+                Text("Quick Menu")
+            }
+        }
+    }
+}
+
+@Composable
+private fun QuickMenuAction(
+    icon: ImageVector,
+    label: String,
+    onClick: () -> Unit,
+) {
     TextButton(
         onClick = onClick,
         modifier = Modifier.fillMaxWidth(),
@@ -964,11 +1494,16 @@ private fun QuickMenuAction(icon: ImageVector, label: String, onClick: () -> Uni
         Row(
             modifier = Modifier.fillMaxWidth(),
             verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.Start,
+            horizontalArrangement = Arrangement.spacedBy(12.dp),
         ) {
             Icon(icon, contentDescription = null, tint = MaterialTheme.colorScheme.primary)
-            Spacer(Modifier.width(12.dp))
-            Text(label, color = MaterialTheme.colorScheme.onSurface, style = MaterialTheme.typography.bodyLarge)
+            Text(
+                text = label,
+                style = MaterialTheme.typography.bodyLarge,
+                color = MaterialTheme.colorScheme.onSurface,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
         }
     }
 }

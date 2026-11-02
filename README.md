@@ -15,9 +15,13 @@ It pairs a native Vulkan/AHardwareBuffer Wayland compositor on Android with clea
   - **Unified Driver Mode**: Optional **Unified (SoC Venus Vulkan + VirGL)** mode runs the exact same Mesa driver pipeline across Snapdragon, MediaTek, and Exynos devices.
 - **FEX-Emu Preferred for `x86_64` Apps**: Ships **FEX-Emu** (`fex-emu-armv8.0`: `FEXInterpreter`, `FEXLoader`, `FEXRootFSFetcher`) wired into `libblsession.so` transparent `execve` interception (`linuxdroid-open` -> `linuxdroid-fex`) with Vulkan, GL, and Wayland thunks preconfigured.
 - **High-Throughput PRoot Fastpath (`libblfastpath.so`)**: Binary-patches `libc.so.6` and `ld-linux-aarch64.so.1` `svc` call sites in-process via a seccomp-exempt trampoline (`0xffff00000`), cutting path syscall latency from ~25 µs down to ~0.6 µs alongside `GLIBC_TUNABLES` `rseq` & heap-padding optimizations and Android SELinux hardlink lockfile translation (`libblsession.so`).
-- **Samsung DeX & Live USB-C / HDMI External Monitor Hot-Swap**:
-  - In **Samsung DeX** or Android Freeform Multi-Window, LinuxDroid runs as a dynamically resizable desktop window without hijacking the DeX display.
-  - Outside DeX, plugging in a USB-C / HDMI external monitor moves the Linux desktop onto the external monitor at its native resolution & refresh rate (60/90/120 Hz) and turns the phone screen into a full-screen multi-touch trackpad (`1-finger move/tap`, `2-finger right-click & smooth scroll`, `3-finger middle-click`, `tap-and-drag`).
+- **Configurable CPU Core Allocation & Full SoC GPU Control**:
+  - Pin the Linux desktop & terminal sessions to any exact number of hardware CPU cores (automatically preferring high-frequency Prime/Performance cores on ARM64 `big.LITTLE` / `DynamIQ` chips) or run across all CPU cores at 100% performance, alongside full hardware SoC GPU acceleration.
+- **Single-Edition Safe Installer & Rootfs Manager**:
+  - Dedicated tabbed Workstation UI with fixed-size, flicker-free scrollable log and list containers, single-edition active lock for stability, and 1-tap **Delete** with confirmation dialog.
+- **External Screen Only Mode (VLC Style, No DeX Required) + Samsung DeX**:
+  - **External Screen Only**: Outputs the Linux desktop fullscreen directly onto any connected USB-C / HDMI monitor or Wireless Cast screen via Android's `Presentation` API — without requiring Samsung DeX — while turning the phone into a multi-touch trackpad & keyboard controller with 1-tap OLED screen dimming.
+  - **Auto External & Samsung DeX**: Automatically switches to an external display when plugged in, or runs as a dynamically resizable desktop window inside Samsung DeX / Android Freeform Multi-Window.
 - **Complete Android ↔ Linux Workstation Integration**:
   - Non-root workstation user (`linux`, `/home/linux`) with passwordless `sudo`, `pkexec`, and `linuxdroid-root` (`RootSpawner`).
   - Automatic Android soft keyboard popup via Wayland `zwp_text_input_v3` & AT-SPI2 focus bridge (`linuxdroid-ime`).

@@ -28,6 +28,12 @@ if [ -n "${BL_LOG:-}" ]; then
   echo "== linuxdroid-session $(date -u '+%Y-%m-%d %H:%M:%S UTC') user=$USER uid=$(id -u) ${BL_WIDTH:-1920}x${BL_HEIGHT:-1080}@${BL_REFRESH:-60}"
 fi
 
+if [ -n "${BL_CPU_CORES:-}" ] && command -v taskset >/dev/null 2>&1; then
+  if taskset -pc "$BL_CPU_CORES" $$ >/dev/null 2>&1; then
+    echo "== cpu affinity pinned to cores: ${BL_CPU_CORES} (${BL_CPU_COUNT:-custom} cores)"
+  fi
+fi
+
 boot_step 4 "Preparing Ubuntu environment, locale & system D-Bus..."
 
 sync_timezone() {

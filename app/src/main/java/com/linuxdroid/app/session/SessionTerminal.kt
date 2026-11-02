@@ -1,6 +1,7 @@
 package com.linuxdroid.app.session
 
 import android.content.Context
+import com.linuxdroid.app.runtime.CpuInfo
 import com.linuxdroid.app.runtime.LinuxRuntime
 import com.linuxdroid.app.runtime.ProotFastPath
 import com.linuxdroid.app.runtime.UserProvisioner
@@ -19,6 +20,11 @@ object SessionTerminal {
         val user = if (asRoot) "root" else SessionPrefs.username(context)
         val home = if (asRoot) "/root" else "/home/${UserProvisioner.sanitizeUsername(user)}"
         File(root, home.removePrefix("/")).mkdirs()
+
+        val cpuTopology = CpuInfo.detect()
+        val cpuLimit = SessionPrefs.cpuCoreLimit(context)
+        val effectiveCores = SessionPrefs.effectiveCpuCores(context, cpuTopology.totalCores)
+        val affinityCores = if (!asRoot) cpuTopology.selectPreferredCores(cpuLimit) else emptyList()
 
         val binds = LinuxRuntime.lastBinds(context).filter { !it.startsWith("/proc/self/fd/") }
         val useNoSeccomp = SessionPrefs.prootNoSeccomp(context)
@@ -48,10 +54,19 @@ object SessionTerminal {
         cmd.add("WAYLAND_DISPLAY=wayland-0")
         cmd.add("DISPLAY=:0")
         cmd.add("PULSE_SERVER=unix:${File(context.filesDir, "pulseaudio/PS0").absolutePath}")
+        cmd.add("BL_CPU_COUNT=$effectiveCores")
+        if (affinityCores.isNotEmpty()) {
+            cmd.add("BL_CPU_CORES=${affinityCores.joinToString(",")}")
+        }
         if (fastPathKey != null) {
             for ((k, v) in ProotFastPath.guestEnv(root, binds, fastPathKey)) {
                 cmd.add("$k=$v")
             }
+        }
+        if (affinityCores.isNotEmpty() && File(root, "usr/bin/taskset").isFile) {
+            cmd.add("/usr/bin/taskset")
+            cmd.add("-c")
+            cmd.add(affinityCores.joinToString(","))
         }
         cmd.add("/bin/bash")
         cmd.add("--login")

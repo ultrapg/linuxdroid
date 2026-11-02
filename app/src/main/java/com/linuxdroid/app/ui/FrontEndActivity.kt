@@ -3,6 +3,7 @@ package com.linuxdroid.app.ui
 import android.Manifest
 import android.content.Intent
 import android.content.pm.PackageManager
+import android.hardware.display.DisplayManager
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
@@ -13,32 +14,43 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ExperimentalLayoutApi
 import androidx.compose.foundation.layout.FlowRow
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.Add
+import androidx.compose.material.icons.outlined.CheckCircle
 import androidx.compose.material.icons.outlined.CloudDownload
 import androidx.compose.material.icons.outlined.Computer
 import androidx.compose.material.icons.outlined.DeleteOutline
 import androidx.compose.material.icons.outlined.FolderOpen
 import androidx.compose.material.icons.outlined.Memory
+import androidx.compose.material.icons.outlined.Monitor
 import androidx.compose.material.icons.outlined.Pause
 import androidx.compose.material.icons.outlined.PlayArrow
 import androidx.compose.material.icons.outlined.PowerSettingsNew
+import androidx.compose.material.icons.outlined.Refresh
+import androidx.compose.material.icons.outlined.Settings
 import androidx.compose.material.icons.outlined.Share
 import androidx.compose.material.icons.outlined.Terminal
 import androidx.compose.material3.AlertDialog
@@ -56,11 +68,15 @@ import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.RadioButton
 import androidx.compose.material3.Scaffold
+import androidx.compose.material3.Slider
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Switch
+import androidx.compose.material3.Tab
+import androidx.compose.material3.TabRow
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
@@ -68,19 +84,30 @@ import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.text.TextStyle
+import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import androidx.core.content.FileProvider
+import com.linuxdroid.app.core.FileUtils
 import com.linuxdroid.app.gpu.GpuConfigGenerator
 import com.linuxdroid.app.gpu.GpuDriverMode
 import com.linuxdroid.app.gpu.GpuInfo
+import com.linuxdroid.app.runtime.CpuInfo
 import com.linuxdroid.app.runtime.DesktopCatalog
 import com.linuxdroid.app.runtime.DesktopEdition
 import com.linuxdroid.app.runtime.LinuxRuntime
 import com.linuxdroid.app.runtime.RuntimeInstallService
+import com.linuxdroid.app.session.ExternalDisplayMode
 import com.linuxdroid.app.session.ResolutionPreset
 import com.linuxdroid.app.session.ScreenOrientationPref
 import com.linuxdroid.app.session.SessionPhase
@@ -88,9 +115,11 @@ import com.linuxdroid.app.session.SessionPrefs
 import com.linuxdroid.app.session.SessionService
 import com.linuxdroid.app.session.SessionState
 import com.linuxdroid.app.session.TouchInputMode
+import com.linuxdroid.app.wayland.DeXEnvironmentDetector
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import java.io.File
+import kotlin.math.roundToInt
 
 class FrontEndActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -144,11 +173,14 @@ class FrontEndActivity : ComponentActivity() {
     private fun shareSessionLogs() {
         val logDir = LinuxRuntime.logDir(this)
         val combinedFile = File(logDir, "linuxdroid-diagnostics.log")
+        val cpu = CpuInfo.detect()
         val report = buildString {
             appendLine("=== LinuxDroid Diagnostics Report ===")
             appendLine("Device: ${Build.MANUFACTURER} ${Build.MODEL} (SDK ${Build.VERSION.SDK_INT})")
             appendLine("SoC / Hardware: ${Build.SOC_MODEL} / ${Build.HARDWARE}")
+            appendLine("CPU: ${cpu.summary} (limit=${SessionPrefs.cpuCoreLimit(this@FrontEndActivity)})")
             appendLine("GPU: ${GpuInfo.detect().shortSummary()}")
+            appendLine("External Display Mode: ${SessionPrefs.externalDisplayMode(this@FrontEndActivity).id}")
             appendLine("Desktop: ${LinuxRuntime.detectInstalledDesktopLabel(this@FrontEndActivity)}")
             appendLine()
             val sources = listOf(
@@ -167,7 +199,7 @@ class FrontEndActivity : ComponentActivity() {
                 }
             }
         }
-        com.linuxdroid.app.core.FileUtils.writeString(combinedFile, report)
+        FileUtils.writeString(combinedFile, report)
         val uri = FileProvider.getUriForFile(this, "$packageName.fileprovider", combinedFile)
         val share = Intent(Intent.ACTION_SEND).apply {
             type = "text/plain"
@@ -182,6 +214,13 @@ class FrontEndActivity : ComponentActivity() {
     }
 }
 
+private enum class DashboardTab(val label: String, val icon: ImageVector) {
+    WORKSTATION("Workstation", Icons.Outlined.Computer),
+    HARDWARE("CPU & GPU", Icons.Outlined.Memory),
+    DISPLAY("Display", Icons.Outlined.Monitor),
+    SYSTEM("System", Icons.Outlined.Settings),
+}
+
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
 private fun DashboardScreen(
@@ -194,16 +233,22 @@ private fun DashboardScreen(
     val installSnap by RuntimeInstallService.state.collectAsState()
 
     val gpuInfo = remember { GpuInfo.detect() }
+    val cpuTopology = remember { CpuInfo.detect() }
+
+    var selectedTab by rememberSaveable { mutableIntStateOf(0) }
     var catalog by remember { mutableStateOf(DesktopCatalog.FALLBACK_EDITIONS) }
-    var installedReady by remember(installSnap.active, installSnap.stage) {
-        mutableStateOf(LinuxRuntime.isReady(context))
-    }
-    var installedLabel by remember(installSnap.active, installSnap.stage) {
-        mutableStateOf(LinuxRuntime.detectInstalledDesktopLabel(context))
-    }
+    var installedReady by remember { mutableStateOf(LinuxRuntime.isReady(context)) }
+    var installedLabel by remember { mutableStateOf(LinuxRuntime.detectInstalledDesktopLabel(context)) }
+    var installedEditionId by remember { mutableStateOf(LinuxRuntime.detectInstalledEditionId(context)) }
+    var showDeleteConfirmDialog by remember { mutableStateOf(false) }
 
     var autoBoot by remember { mutableStateOf(SessionPrefs.autoBootOnLaunch(context)) }
     var gpuMode by remember { mutableStateOf(SessionPrefs.gpuMode(context)) }
+    var cpuCoreLimit by remember { mutableIntStateOf(SessionPrefs.cpuCoreLimit(context)) }
+    var externalMode by remember { mutableStateOf(SessionPrefs.externalDisplayMode(context)) }
+    var connectedExternalSummary by remember {
+        mutableStateOf(DeXEnvironmentDetector.findExternalDisplay(context)?.let { DeXEnvironmentDetector.describeDisplay(it) })
+    }
     var resolution by remember { mutableStateOf(SessionPrefs.resolutionPreset(context)) }
     var scalePref by remember { mutableFloatStateOf(SessionPrefs.displayScale(context)) }
     var refreshHzPref by remember { mutableIntStateOf(SessionPrefs.targetRefreshHz(context)) }
@@ -215,9 +260,42 @@ private fun DashboardScreen(
     var username by remember { mutableStateOf(SessionPrefs.username(context)) }
     var customMounts by remember { mutableStateOf(SessionPrefs.customMounts(context)) }
     var showAddMountDialog by remember { mutableStateOf(false) }
+    var logRefreshTick by remember { mutableIntStateOf(0) }
+    var diagnosticLogPreview by remember { mutableStateOf("") }
 
     val resolvedGpu = remember(gpuMode, gpuInfo) {
         GpuConfigGenerator.resolve(gpuMode, gpuInfo, LinuxRuntime.VIRGL_SOCKET_GUEST_PATH)
+    }
+
+    val effectiveCpuCores = remember(cpuCoreLimit, cpuTopology.totalCores) {
+        if (cpuCoreLimit in 1 until cpuTopology.totalCores) cpuCoreLimit else cpuTopology.totalCores
+    }
+
+    val selectedCoreIndices = remember(cpuCoreLimit, cpuTopology) {
+        cpuTopology.selectPreferredCores(cpuCoreLimit)
+    }
+
+    // Live External Display detection (updates immediately when plugging/unplugging USB-C HDMI or Wireless Cast)
+    DisposableEffect(context) {
+        val dm = context.getSystemService(DisplayManager::class.java)
+        val listener = object : DisplayManager.DisplayListener {
+            override fun onDisplayAdded(displayId: Int) {
+                connectedExternalSummary = DeXEnvironmentDetector.findExternalDisplay(context)
+                    ?.let { DeXEnvironmentDetector.describeDisplay(it) }
+            }
+
+            override fun onDisplayRemoved(displayId: Int) {
+                connectedExternalSummary = DeXEnvironmentDetector.findExternalDisplay(context)
+                    ?.let { DeXEnvironmentDetector.describeDisplay(it) }
+            }
+
+            override fun onDisplayChanged(displayId: Int) {
+                connectedExternalSummary = DeXEnvironmentDetector.findExternalDisplay(context)
+                    ?.let { DeXEnvironmentDetector.describeDisplay(it) }
+            }
+        }
+        dm?.registerDisplayListener(listener, null)
+        onDispose { dm?.unregisterDisplayListener(listener) }
     }
 
     LaunchedEffect(Unit) {
@@ -225,15 +303,25 @@ private fun DashboardScreen(
         catalog = fetched
     }
 
-    LaunchedEffect(installSnap.active) {
+    LaunchedEffect(installSnap.active, installSnap.stage) {
         installedReady = LinuxRuntime.isReady(context)
         installedLabel = LinuxRuntime.detectInstalledDesktopLabel(context)
+        installedEditionId = LinuxRuntime.detectInstalledEditionId(context)
+    }
+
+    LaunchedEffect(selectedTab, logRefreshTick, sessionSnap.phase) {
+        if (selectedTab == DashboardTab.SYSTEM.ordinal) {
+            diagnosticLogPreview = withContext(Dispatchers.IO) {
+                val tail = SessionService.collectDiagnosticLogTail(LinuxRuntime.logDir(context), maxLines = 30)
+                if (tail.isEmpty()) "No session logs recorded yet." else tail.joinToString("\n")
+            }
+        }
     }
 
     val importArchiveLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.OpenDocument()
     ) { uri: Uri? ->
-        if (uri != null) {
+        if (uri != null && installedEditionId == null) {
             RuntimeInstallService.startImport(context, uri)
         }
     }
@@ -261,447 +349,273 @@ private fun DashboardScreen(
     Scaffold(
         containerColor = MaterialTheme.colorScheme.background,
     ) { innerPadding ->
-        Column(
+        Box(
             modifier = Modifier
                 .fillMaxSize()
-                .padding(innerPadding)
-                .verticalScroll(rememberScrollState())
-                .padding(horizontal = 20.dp, vertical = 16.dp),
-            verticalArrangement = Arrangement.spacedBy(16.dp),
+                .padding(innerPadding),
+            contentAlignment = Alignment.TopCenter,
         ) {
-            // Header
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically,
+            Column(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .widthIn(max = 880.dp),
             ) {
-                Column {
-                    Text(
-                        text = "LinuxDroid",
-                        style = MaterialTheme.typography.headlineMedium,
-                        fontWeight = FontWeight.Bold,
-                        color = MaterialTheme.colorScheme.onBackground,
-                    )
-                    Text(
-                        text = "ARM64 GPU-Accelerated Linux Desktop Workstation",
-                        style = MaterialTheme.typography.bodyMedium,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
-                }
-                IconButton(onClick = onShareLogs) {
-                    Icon(
-                        imageVector = Icons.Outlined.Share,
-                        contentDescription = "Share Session Log",
-                        tint = MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
-                }
-            }
-
-            // Hero Workstation Launch & Session Control Card
-            SectionCard {
+                // Fixed Top Header Bar (never changes height)
                 Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(64.dp)
+                        .padding(horizontal = 18.dp),
+                    horizontalArrangement = Arrangement.SpaceBetween,
                     verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(12.dp),
                 ) {
-                    Icon(
-                        imageVector = Icons.Outlined.Computer,
-                        contentDescription = null,
-                        tint = MaterialTheme.colorScheme.primary,
-                    )
                     Column(modifier = Modifier.weight(1f)) {
                         Text(
-                            text = installedLabel,
-                            style = MaterialTheme.typography.titleMedium,
-                            fontWeight = FontWeight.SemiBold,
+                            text = "LinuxDroid",
+                            style = MaterialTheme.typography.titleLarge,
+                            fontWeight = FontWeight.Bold,
+                            color = MaterialTheme.colorScheme.onBackground,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
                         )
                         Text(
-                            text = when (sessionSnap.phase) {
-                                SessionPhase.STOPPED -> {
-                                    if (installedReady) "Ready to boot • User '$username'" else "Install or import an ARM64 Linux rootfs below"
-                                }
-                                SessionPhase.FAILED -> {
-                                    sessionSnap.errorMessage ?: "Last desktop startup failed — check logs or retry in Safe Mode"
-                                }
-                                SessionPhase.STARTING -> {
-                                    "Step ${sessionSnap.bootStep.coerceAtLeast(1)}/${sessionSnap.bootTotalSteps}: ${sessionSnap.statusText}"
-                                }
-                                else -> {
-                                    "${sessionSnap.statusText} • ${sessionSnap.resolutionText}"
-                                }
-                            },
-                            style = MaterialTheme.typography.bodySmall,
-                            color = if (sessionSnap.phase == SessionPhase.FAILED) {
-                                MaterialTheme.colorScheme.error
-                            } else {
-                                MaterialTheme.colorScheme.onSurfaceVariant
-                            },
-                        )
-                    }
-                }
-
-                Spacer(Modifier.height(14.dp))
-
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.spacedBy(10.dp),
-                ) {
-                    Button(
-                        onClick = onLaunchDesktop,
-                        enabled = installedReady && !installSnap.active,
-                        modifier = Modifier.weight(1f),
-                    ) {
-                        Icon(Icons.Outlined.PlayArrow, contentDescription = null)
-                        Spacer(Modifier.width(6.dp))
-                        Text(
-                            when (sessionSnap.phase) {
-                                SessionPhase.STARTING -> "View Startup Progress"
-                                SessionPhase.RUNNING -> "Open Desktop"
-                                SessionPhase.PAUSED -> "Resume Desktop"
-                                SessionPhase.FAILED -> "Retry Desktop Launch"
-                                else -> "Launch Desktop"
-                            }
-                        )
-                    }
-
-                    if (sessionSnap.phase == SessionPhase.RUNNING || sessionSnap.phase == SessionPhase.PAUSED) {
-                        OutlinedButton(onClick = { SessionService.togglePause(context) }) {
-                            Icon(Icons.Outlined.Pause, contentDescription = null)
-                            Spacer(Modifier.width(4.dp))
-                            Text(if (sessionSnap.phase == SessionPhase.PAUSED) "Unfreeze" else "Pause")
-                        }
-                        OutlinedButton(
-                            onClick = { SessionService.shutdown(context) },
-                            colors = ButtonDefaults.outlinedButtonColors(contentColor = MaterialTheme.colorScheme.error),
-                        ) {
-                            Icon(Icons.Outlined.PowerSettingsNew, contentDescription = null)
-                        }
-                    }
-                }
-
-                if (installedReady) {
-                    Spacer(Modifier.height(10.dp))
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.spacedBy(10.dp),
-                    ) {
-                        OutlinedButton(
-                            onClick = { onOpenTerminal(false) },
-                            modifier = Modifier.weight(1f),
-                        ) {
-                            Icon(Icons.Outlined.Terminal, contentDescription = null)
-                            Spacer(Modifier.width(6.dp))
-                            Text("Terminal ($username)")
-                        }
-                        OutlinedButton(
-                            onClick = { onOpenTerminal(true) },
-                            modifier = Modifier.weight(1f),
-                        ) {
-                            Icon(Icons.Outlined.Terminal, contentDescription = null)
-                            Spacer(Modifier.width(6.dp))
-                            Text("Root Shell")
-                        }
-                    }
-                }
-
-                Spacer(Modifier.height(10.dp))
-                SettingToggleRow(
-                    title = "Auto-boot directly into Linux on launch",
-                    subtitle = "Skip this dashboard when opening LinuxDroid (accessible anytime via Back -> Quick Menu).",
-                    checked = autoBoot,
-                    onCheckedChange = {
-                        autoBoot = it
-                        SessionPrefs.setAutoBootOnLaunch(context, it)
-                    },
-                )
-            }
-
-            // Desktop Rootfs Installer & Custom Archive Import
-            SectionCard {
-                SectionHeader("Linux Desktop Editions & Rootfs Import")
-                Text(
-                    text = "Clean Ubuntu 24.04 LTS ARM64 workstation desktops with Firefox, MPV, FEX-Emu (x86_64 emulation), and SoC Vulkan/OpenGL drivers — or import your own rootfs archive.",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-
-                if (installSnap.active) {
-                    Spacer(Modifier.height(12.dp))
-                    Text(
-                        text = installSnap.stage,
-                        style = MaterialTheme.typography.bodyMedium,
-                        fontWeight = FontWeight.Medium,
-                    )
-                    Spacer(Modifier.height(6.dp))
-                    if (installSnap.fraction >= 0f) {
-                        LinearProgressIndicator(
-                            progress = { installSnap.fraction },
-                            modifier = Modifier.fillMaxWidth(),
-                        )
-                    } else {
-                        LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
-                    }
-                    Spacer(Modifier.height(8.dp))
-                    OutlinedButton(onClick = { RuntimeInstallService.cancel(context) }) {
-                        Text("Cancel Installation")
-                    }
-                } else {
-                    if (installSnap.error != null) {
-                        Spacer(Modifier.height(8.dp))
-                        Text(
-                            text = "Error: ${installSnap.error}",
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.error,
-                        )
-                    }
-                    Spacer(Modifier.height(12.dp))
-                    for (edition in catalog) {
-                        EditionRow(
-                            edition = edition,
-                            onInstall = { RuntimeInstallService.startDownload(context, edition) },
-                        )
-                        Spacer(Modifier.height(8.dp))
-                    }
-                    OutlinedButton(
-                        onClick = { importArchiveLauncher.launch(arrayOf("*/*")) },
-                        modifier = Modifier.fillMaxWidth(),
-                    ) {
-                        Icon(Icons.Outlined.FolderOpen, contentDescription = null)
-                        Spacer(Modifier.width(8.dp))
-                        Text("Import Custom Rootfs (.tar.zst / .tar.xz / .tar.gz)")
-                    }
-                }
-            }
-
-            // GPU Driver & Hardware Acceleration Card
-            SectionCard {
-                Row(
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(10.dp),
-                ) {
-                    Icon(Icons.Outlined.Memory, contentDescription = null, tint = MaterialTheme.colorScheme.primary)
-                    Column {
-                        Text("SoC GPU Acceleration", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
-                        Text(
-                            text = "Detected: ${gpuInfo.shortSummary()} • Active: ${resolvedGpu.summary}",
+                            text = "${cpuTopology.totalCores} ARM64 Cores • ${gpuInfo.shortSummary()}",
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                        )
+                    }
+
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(6.dp),
+                    ) {
+                        if (installedReady && !installSnap.active && selectedTab != DashboardTab.WORKSTATION.ordinal) {
+                            Button(
+                                onClick = onLaunchDesktop,
+                                contentPadding = PaddingValues(horizontal = 14.dp, vertical = 6.dp),
+                                modifier = Modifier.height(36.dp),
+                            ) {
+                                Icon(Icons.Outlined.PlayArrow, contentDescription = null, modifier = Modifier.size(18.dp))
+                                Spacer(Modifier.width(4.dp))
+                                Text(
+                                    text = if (sessionSnap.phase == SessionPhase.RUNNING) "Open" else "Launch",
+                                    style = MaterialTheme.typography.labelLarge,
+                                )
+                            }
+                        }
+                        IconButton(onClick = onShareLogs) {
+                            Icon(
+                                imageVector = Icons.Outlined.Share,
+                                contentDescription = "Share Session Logs",
+                                tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                        }
+                    }
+                }
+
+                // Fixed Navigation Tab Row
+                TabRow(
+                    selectedTabIndex = selectedTab,
+                    containerColor = MaterialTheme.colorScheme.surface,
+                    contentColor = MaterialTheme.colorScheme.primary,
+                    modifier = Modifier.fillMaxWidth(),
+                ) {
+                    DashboardTab.entries.forEachIndexed { index, tab ->
+                        Tab(
+                            selected = selectedTab == index,
+                            onClick = { selectedTab = index },
+                            modifier = Modifier.height(46.dp),
+                            text = {
+                                Row(
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                                ) {
+                                    Icon(tab.icon, contentDescription = null, modifier = Modifier.size(16.dp))
+                                    Text(
+                                        text = tab.label,
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis,
+                                    )
+                                }
+                            },
                         )
                     }
                 }
-                Spacer(Modifier.height(10.dp))
-                for (mode in GpuDriverMode.entries) {
-                    Surface(
-                        shape = RoundedCornerShape(10.dp),
-                        color = if (gpuMode == mode) MaterialTheme.colorScheme.surfaceVariant else MaterialTheme.colorScheme.surface,
-                        border = BorderStroke(
-                            1.dp,
-                            if (gpuMode == mode) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.outline,
-                        ),
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(vertical = 4.dp)
-                            .clickable {
+
+                // Tab Viewport (Independent scrollable container per tab)
+                val tabScrollState = rememberScrollState()
+                LaunchedEffect(selectedTab) {
+                    tabScrollState.scrollTo(0)
+                }
+
+                Column(
+                    modifier = Modifier
+                        .weight(1f)
+                        .fillMaxWidth()
+                        .verticalScroll(tabScrollState)
+                        .padding(horizontal = 18.dp, vertical = 16.dp),
+                    verticalArrangement = Arrangement.spacedBy(14.dp),
+                ) {
+                    when (DashboardTab.entries[selectedTab]) {
+                        DashboardTab.WORKSTATION -> WorkstationTabContent(
+                            sessionSnap = sessionSnap,
+                            installSnap = installSnap,
+                            installedReady = installedReady,
+                            installedLabel = installedLabel,
+                            installedEditionId = installedEditionId,
+                            username = username,
+                            effectiveCpuCores = effectiveCpuCores,
+                            totalCpuCores = cpuTopology.totalCores,
+                            gpuSummary = resolvedGpu.summary,
+                            externalMode = externalMode,
+                            connectedExternalSummary = connectedExternalSummary,
+                            catalog = catalog,
+                            onLaunchDesktop = onLaunchDesktop,
+                            onTogglePause = { SessionService.togglePause(context) },
+                            onShutdown = { SessionService.shutdown(context) },
+                            onOpenTerminal = onOpenTerminal,
+                            onInstallEdition = { edition -> RuntimeInstallService.startDownload(context, edition) },
+                            onRequestDeleteEdition = { showDeleteConfirmDialog = true },
+                            onCancelInstall = { RuntimeInstallService.cancel(context) },
+                            onImportCustomRootfs = { importArchiveLauncher.launch(arrayOf("*/*")) },
+                        )
+
+                        DashboardTab.HARDWARE -> HardwareTabContent(
+                            cpuTopology = cpuTopology,
+                            cpuCoreLimit = cpuCoreLimit,
+                            effectiveCpuCores = effectiveCpuCores,
+                            selectedCoreIndices = selectedCoreIndices,
+                            onSelectCpuCoreLimit = { newLimit ->
+                                val normalized = if (newLimit <= 0 || newLimit >= cpuTopology.totalCores) 0 else newLimit
+                                cpuCoreLimit = normalized
+                                SessionPrefs.setCpuCoreLimit(context, normalized)
+                            },
+                            gpuInfo = gpuInfo,
+                            gpuMode = gpuMode,
+                            resolvedGpuSummary = resolvedGpu.summary,
+                            onSelectGpuMode = { mode ->
                                 gpuMode = mode
                                 SessionPrefs.setGpuMode(context, mode)
                             },
-                    ) {
-                        Row(
-                            modifier = Modifier.padding(12.dp),
-                            verticalAlignment = Alignment.CenterVertically,
-                        ) {
-                            RadioButton(
-                                selected = gpuMode == mode,
-                                onClick = {
-                                    gpuMode = mode
-                                    SessionPrefs.setGpuMode(context, mode)
-                                },
-                            )
-                            Spacer(Modifier.width(8.dp))
-                            Column {
-                                Text(mode.title, style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.Medium)
-                                Text(mode.subtitle, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                            }
-                        }
-                    }
-                }
-            }
+                            fastPathEnabled = fastPathEnabled,
+                            onToggleFastPath = {
+                                fastPathEnabled = it
+                                SessionPrefs.setProotFastPath(context, it)
+                            },
+                            noSeccompEnabled = noSeccompEnabled,
+                            onToggleNoSeccomp = {
+                                noSeccompEnabled = it
+                                SessionPrefs.setProotNoSeccomp(context, it)
+                            },
+                        )
 
-            // Display, HiDPI, Refresh Rate & Input
-            SectionCard {
-                SectionHeader("Display, DeX & Input")
-
-                Text("Desktop Resolution", style = MaterialTheme.typography.labelLarge)
-                FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    for (preset in ResolutionPreset.entries) {
-                        FilterChip(
-                            selected = resolution == preset,
-                            onClick = {
+                        DashboardTab.DISPLAY -> DisplayTabContent(
+                            externalMode = externalMode,
+                            connectedExternalSummary = connectedExternalSummary,
+                            onSelectExternalMode = { mode ->
+                                externalMode = mode
+                                SessionPrefs.setExternalDisplayMode(context, mode)
+                            },
+                            resolution = resolution,
+                            onSelectResolution = { preset ->
                                 resolution = preset
                                 SessionPrefs.setResolutionPreset(context, preset)
                             },
-                            label = { Text(preset.label) },
-                        )
-                    }
-                }
-
-                Spacer(Modifier.height(10.dp))
-                Text("HiDPI Scaling", style = MaterialTheme.typography.labelLarge)
-                val scales = listOf(0f to "Auto HiDPI", 1.0f to "100%", 1.25f to "125%", 1.5f to "150%", 1.75f to "175%", 2.0f to "200%")
-                FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    for ((value, label) in scales) {
-                        FilterChip(
-                            selected = scalePref == value,
-                            onClick = {
+                            scalePref = scalePref,
+                            onSelectScale = { value ->
                                 scalePref = value
                                 SessionPrefs.setDisplayScale(context, value)
                             },
-                            label = { Text(label) },
-                        )
-                    }
-                }
-
-                Spacer(Modifier.height(10.dp))
-                Text("Refresh Rate", style = MaterialTheme.typography.labelLarge)
-                val rates = listOf(0 to "Auto Max (90/120Hz)", 60 to "60 Hz", 90 to "90 Hz", 120 to "120 Hz")
-                FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    for ((hz, label) in rates) {
-                        FilterChip(
-                            selected = refreshHzPref == hz,
-                            onClick = {
+                            refreshHzPref = refreshHzPref,
+                            onSelectRefreshHz = { hz ->
                                 refreshHzPref = hz
                                 SessionPrefs.setTargetRefreshHz(context, hz)
                             },
-                            label = { Text(label) },
-                        )
-                    }
-                }
-
-                Spacer(Modifier.height(10.dp))
-                Text("Screen Orientation", style = MaterialTheme.typography.labelLarge)
-                FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    for (orient in ScreenOrientationPref.entries) {
-                        FilterChip(
-                            selected = orientationPref == orient,
-                            onClick = {
+                            orientationPref = orientationPref,
+                            onSelectOrientation = { orient ->
                                 orientationPref = orient
                                 SessionPrefs.setOrientation(context, orient)
                             },
-                            label = { Text(orient.label) },
-                        )
-                    }
-                }
-
-                Spacer(Modifier.height(10.dp))
-                Text("Touchscreen Behavior", style = MaterialTheme.typography.labelLarge)
-                FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    for (mode in TouchInputMode.entries) {
-                        FilterChip(
-                            selected = touchMode == mode,
-                            onClick = {
+                            touchMode = touchMode,
+                            onSelectTouchMode = { mode ->
                                 touchMode = mode
                                 SessionPrefs.setTouchInputMode(context, mode)
                             },
-                            label = { Text(mode.label) },
+                        )
+
+                        DashboardTab.SYSTEM -> SystemTabContent(
+                            autoBoot = autoBoot,
+                            onToggleAutoBoot = {
+                                autoBoot = it
+                                SessionPrefs.setAutoBootOnLaunch(context, it)
+                            },
+                            username = username,
+                            onUsernameChange = {
+                                username = it
+                                SessionPrefs.setUsername(context, it)
+                            },
+                            customMounts = customMounts,
+                            onPickFolder = { folderPickerLauncher.launch(null) },
+                            onAddPathClick = { showAddMountDialog = true },
+                            onRemoveMount = { name ->
+                                SessionPrefs.removeCustomMount(context, name)
+                                customMounts = SessionPrefs.customMounts(context)
+                            },
+                            micEnabled = micEnabled,
+                            onToggleMic = { want ->
+                                if (want && context.checkSelfPermission(Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
+                                    micPermLauncher.launch(Manifest.permission.RECORD_AUDIO)
+                                } else {
+                                    micEnabled = want
+                                    SessionPrefs.setMicEnabled(context, want)
+                                }
+                            },
+                            diagnosticLogPreview = diagnosticLogPreview,
+                            onRefreshLogs = { logRefreshTick++ },
+                            onShareLogs = onShareLogs,
                         )
                     }
                 }
             }
-
-            // Storage, Audio & User Account
-            SectionCard {
-                SectionHeader("Storage, Audio & Workstation Account")
-
-                OutlinedTextField(
-                    value = username,
-                    onValueChange = {
-                        username = it
-                        SessionPrefs.setUsername(context, it)
-                    },
-                    label = { Text("Linux Non-Root Username (passwordless sudo enabled)") },
-                    singleLine = true,
-                    modifier = Modifier.fillMaxWidth(),
-                )
-
-                Spacer(Modifier.height(10.dp))
-                Text(
-                    text = "Android shared storage is automatically mounted at /home/$username/Android.",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-
-                if (customMounts.isNotEmpty()) {
-                    Spacer(Modifier.height(8.dp))
-                    for ((name, path) in customMounts) {
-                        Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.SpaceBetween,
-                        ) {
-                            Column(modifier = Modifier.weight(1f)) {
-                                Text("/home/$username/Mounts/$name", style = MaterialTheme.typography.bodyMedium)
-                                Text(path, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                            }
-                            IconButton(onClick = {
-                                SessionPrefs.removeCustomMount(context, name)
-                                customMounts = SessionPrefs.customMounts(context)
-                            }) {
-                                Icon(Icons.Outlined.DeleteOutline, contentDescription = "Remove Mount")
-                            }
-                        }
-                    }
-                }
-
-                Spacer(Modifier.height(8.dp))
-                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    OutlinedButton(onClick = { folderPickerLauncher.launch(null) }) {
-                        Icon(Icons.Outlined.FolderOpen, contentDescription = null)
-                        Spacer(Modifier.width(6.dp))
-                        Text("Pick Folder")
-                    }
-                    OutlinedButton(onClick = { showAddMountDialog = true }) {
-                        Icon(Icons.Outlined.Add, contentDescription = null)
-                        Spacer(Modifier.width(6.dp))
-                        Text("Add Path")
-                    }
-                }
-
-                HorizontalDivider(modifier = Modifier.padding(vertical = 12.dp))
-
-                SettingToggleRow(
-                    title = "Microphone Forwarding (PulseAudio Source)",
-                    subtitle = "Expose Android microphone inside Linux for voice/video calls and recording.",
-                    checked = micEnabled,
-                    onCheckedChange = { want ->
-                        if (want && context.checkSelfPermission(Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
-                            micPermLauncher.launch(Manifest.permission.RECORD_AUDIO)
-                        } else {
-                            micEnabled = want
-                            SessionPrefs.setMicEnabled(context, want)
-                        }
-                    },
-                )
-
-                SettingToggleRow(
-                    title = "PRoot Fast-Path Syscall Bypass",
-                    subtitle = "Accelerates filesystem I/O for Firefox, compilers, Git, and FEX-Emu.",
-                    checked = fastPathEnabled,
-                    onCheckedChange = {
-                        fastPathEnabled = it
-                        SessionPrefs.setProotFastPath(context, it)
-                    },
-                )
-
-                SettingToggleRow(
-                    title = "PRoot Seccomp Compatibility Mode",
-                    subtitle = "Disables PRoot seccomp filters (PROOT_NO_SECCOMP=1) for strict vendor kernels.",
-                    checked = noSeccompEnabled,
-                    onCheckedChange = {
-                        noSeccompEnabled = it
-                        SessionPrefs.setProotNoSeccomp(context, it)
-                    },
-                )
-            }
         }
+    }
+
+    if (showDeleteConfirmDialog) {
+        AlertDialog(
+            onDismissRequest = { showDeleteConfirmDialog = false },
+            title = { Text("Delete Linux Edition?") },
+            text = {
+                Text(
+                    "Are you sure you want to delete \"$installedLabel\"?\n\n" +
+                        "Only one Linux edition can be installed at a time for stability. " +
+                        "Deleting this edition will stop any running Linux session and permanently remove " +
+                        "its root filesystem and /home/$username data (your Android shared storage is untouched)."
+                )
+            },
+            confirmButton = {
+                Button(
+                    onClick = {
+                        showDeleteConfirmDialog = false
+                        RuntimeInstallService.startDelete(context)
+                    },
+                    colors = ButtonDefaults.buttonColors(
+                        containerColor = MaterialTheme.colorScheme.error,
+                        contentColor = Color(0xFF1A0404),
+                    ),
+                ) {
+                    Icon(Icons.Outlined.DeleteOutline, contentDescription = null, modifier = Modifier.size(18.dp))
+                    Spacer(Modifier.width(6.dp))
+                    Text("Yes, Delete")
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { showDeleteConfirmDialog = false }) {
+                    Text("Cancel")
+                }
+            },
+        )
     }
 
     if (showAddMountDialog) {
@@ -743,6 +657,919 @@ private fun DashboardScreen(
     }
 }
 
+@OptIn(ExperimentalLayoutApi::class)
+@Composable
+private fun WorkstationTabContent(
+    sessionSnap: com.linuxdroid.app.session.SessionSnapshot,
+    installSnap: com.linuxdroid.app.runtime.InstallProgress,
+    installedReady: Boolean,
+    installedLabel: String,
+    installedEditionId: String?,
+    username: String,
+    effectiveCpuCores: Int,
+    totalCpuCores: Int,
+    gpuSummary: String,
+    externalMode: ExternalDisplayMode,
+    connectedExternalSummary: String?,
+    catalog: List<DesktopEdition>,
+    onLaunchDesktop: () -> Unit,
+    onTogglePause: () -> Unit,
+    onShutdown: () -> Unit,
+    onOpenTerminal: (Boolean) -> Unit,
+    onInstallEdition: (DesktopEdition) -> Unit,
+    onRequestDeleteEdition: () -> Unit,
+    onCancelInstall: () -> Unit,
+    onImportCustomRootfs: () -> Unit,
+) {
+    // 1. Workstation Launch & Live Session Status Card (Fixed-line text so height never jitters)
+    SectionCard {
+        val statusColor = when (sessionSnap.phase) {
+            SessionPhase.RUNNING -> MaterialTheme.colorScheme.secondary
+            SessionPhase.STARTING, SessionPhase.PAUSED -> Color(0xFFFBBF24)
+            SessionPhase.FAILED -> MaterialTheme.colorScheme.error
+            else -> if (installedReady) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.outline
+        }
+
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(12.dp),
+        ) {
+            Box(
+                modifier = Modifier
+                    .size(12.dp)
+                    .clip(CircleShape)
+                    .background(statusColor)
+            )
+            Column(modifier = Modifier.weight(1f)) {
+                Text(
+                    text = installedLabel,
+                    style = MaterialTheme.typography.titleMedium,
+                    fontWeight = FontWeight.SemiBold,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+                Text(
+                    text = when (sessionSnap.phase) {
+                        SessionPhase.STOPPED -> {
+                            if (installedReady) "Ready to launch • Non-root user '$username'"
+                            else "No Linux edition installed — download an edition below"
+                        }
+                        SessionPhase.FAILED -> {
+                            sessionSnap.errorMessage ?: "Last desktop startup failed — check System logs or retry"
+                        }
+                        SessionPhase.STARTING -> {
+                            "Step ${sessionSnap.bootStep.coerceAtLeast(1)}/${sessionSnap.bootTotalSteps}: ${sessionSnap.statusText}"
+                        }
+                        else -> "${sessionSnap.statusText} • ${sessionSnap.resolutionText}"
+                    },
+                    style = MaterialTheme.typography.bodySmall,
+                    color = if (sessionSnap.phase == SessionPhase.FAILED) {
+                        MaterialTheme.colorScheme.error
+                    } else {
+                        MaterialTheme.colorScheme.onSurfaceVariant
+                    },
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+            }
+        }
+
+        Spacer(Modifier.height(10.dp))
+
+        // Hardware & Output Summary Badges
+        FlowRow(
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+            verticalArrangement = Arrangement.spacedBy(6.dp),
+        ) {
+            InfoPill(
+                text = if (effectiveCpuCores >= totalCpuCores) {
+                    "CPU: All $totalCpuCores Cores"
+                } else {
+                    "CPU: $effectiveCpuCores / $totalCpuCores Cores"
+                }
+            )
+            InfoPill(text = "GPU: Full ($gpuSummary)")
+            InfoPill(
+                text = when {
+                    externalMode == ExternalDisplayMode.EXTERNAL_ONLY && connectedExternalSummary != null ->
+                        "External Screen Only (Ready)"
+                    externalMode == ExternalDisplayMode.EXTERNAL_ONLY ->
+                        "External Screen Only (Waiting)"
+                    connectedExternalSummary != null ->
+                        "External Connected"
+                    else -> "Display: ${externalMode.title}"
+                },
+                accent = connectedExternalSummary != null,
+            )
+        }
+
+        Spacer(Modifier.height(14.dp))
+
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(10.dp),
+        ) {
+            Button(
+                onClick = onLaunchDesktop,
+                enabled = installedReady && !installSnap.active,
+                modifier = Modifier
+                    .weight(1f)
+                    .height(44.dp),
+            ) {
+                Icon(Icons.Outlined.PlayArrow, contentDescription = null)
+                Spacer(Modifier.width(6.dp))
+                Text(
+                    text = when (sessionSnap.phase) {
+                        SessionPhase.STARTING -> "View Startup Progress"
+                        SessionPhase.RUNNING -> "Open Desktop"
+                        SessionPhase.PAUSED -> "Resume Desktop"
+                        SessionPhase.FAILED -> "Retry Launch"
+                        else -> "Launch Desktop"
+                    },
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+            }
+
+            if (sessionSnap.phase == SessionPhase.RUNNING || sessionSnap.phase == SessionPhase.PAUSED) {
+                OutlinedButton(
+                    onClick = onTogglePause,
+                    modifier = Modifier.height(44.dp),
+                ) {
+                    Icon(Icons.Outlined.Pause, contentDescription = null)
+                    Spacer(Modifier.width(4.dp))
+                    Text(if (sessionSnap.phase == SessionPhase.PAUSED) "Unfreeze" else "Pause")
+                }
+                OutlinedButton(
+                    onClick = onShutdown,
+                    modifier = Modifier.height(44.dp),
+                    colors = ButtonDefaults.outlinedButtonColors(contentColor = MaterialTheme.colorScheme.error),
+                ) {
+                    Icon(Icons.Outlined.PowerSettingsNew, contentDescription = null)
+                }
+            }
+        }
+
+        if (installedReady && !installSnap.active) {
+            Spacer(Modifier.height(10.dp))
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(10.dp),
+            ) {
+                OutlinedButton(
+                    onClick = { onOpenTerminal(false) },
+                    modifier = Modifier
+                        .weight(1f)
+                        .height(40.dp),
+                ) {
+                    Icon(Icons.Outlined.Terminal, contentDescription = null, modifier = Modifier.size(18.dp))
+                    Spacer(Modifier.width(6.dp))
+                    Text("Terminal ($username)", maxLines = 1, overflow = TextOverflow.Ellipsis)
+                }
+                OutlinedButton(
+                    onClick = { onOpenTerminal(true) },
+                    modifier = Modifier
+                        .weight(1f)
+                        .height(40.dp),
+                ) {
+                    Icon(Icons.Outlined.Terminal, contentDescription = null, modifier = Modifier.size(18.dp))
+                    Spacer(Modifier.width(6.dp))
+                    Text("Root Shell", maxLines = 1, overflow = TextOverflow.Ellipsis)
+                }
+            }
+        }
+    }
+
+    // 2. Linux Desktop Editions Manager (Fixed-height scrollable containers + Single-Edition Delete Confirmation)
+    SectionCard {
+        SectionHeader("Linux Desktop Editions")
+        Text(
+            text = if (installedEditionId != null) {
+                "One edition is active. To keep the system stable, delete the installed edition first before installing another."
+            } else {
+                "Install one Ubuntu 24.04 LTS ARM64 desktop edition (includes Firefox, MPV, FEX-Emu x86_64, and SoC GPU drivers)."
+            },
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+
+        Spacer(Modifier.height(12.dp))
+
+        if (installSnap.active) {
+            // Fixed-height 184.dp progress box so downloading/extracting/deleting NEVER flickers or shifts layout
+            val animatedFraction by animateFloatAsState(
+                targetValue = installSnap.fraction.coerceIn(0f, 1f),
+                label = "installProgress",
+            )
+            val installLogScroll = rememberScrollState()
+            val logContent = remember(installSnap.recentEntries) {
+                if (installSnap.recentEntries.isEmpty()) "Preparing operation..."
+                else installSnap.recentEntries.joinToString("\n")
+            }
+            LaunchedEffect(logContent) {
+                installLogScroll.scrollTo(installLogScroll.maxValue)
+            }
+
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(184.dp),
+                verticalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Text(
+                        text = installSnap.stage,
+                        style = MaterialTheme.typography.bodyMedium,
+                        fontWeight = FontWeight.Medium,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier.weight(1f),
+                    )
+                    if (installSnap.fraction >= 0f) {
+                        Spacer(Modifier.width(8.dp))
+                        Text(
+                            text = "${(installSnap.fraction * 100f).roundToInt()}%",
+                            style = MaterialTheme.typography.labelMedium.merge(
+                                TextStyle(fontFeatureSettings = "tnum")
+                            ),
+                            color = MaterialTheme.colorScheme.primary,
+                        )
+                    }
+                }
+
+                if (installSnap.fraction >= 0f) {
+                    LinearProgressIndicator(
+                        progress = { animatedFraction },
+                        modifier = Modifier.fillMaxWidth(),
+                    )
+                } else {
+                    LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
+                }
+
+                // Fixed-height scrollable console box
+                Surface(
+                    shape = RoundedCornerShape(8.dp),
+                    color = Color(0xFF070B10),
+                    border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .weight(1f),
+                ) {
+                    Column(
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .verticalScroll(installLogScroll)
+                            .padding(horizontal = 10.dp, vertical = 8.dp),
+                    ) {
+                        Text(
+                            text = logContent,
+                            fontFamily = FontFamily.Monospace,
+                            fontSize = 11.sp,
+                            lineHeight = 15.sp,
+                            color = Color(0xFFB8C4D4),
+                        )
+                    }
+                }
+
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(36.dp),
+                    horizontalArrangement = Arrangement.End,
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    if (!installSnap.deleting) {
+                        OutlinedButton(
+                            onClick = onCancelInstall,
+                            modifier = Modifier.height(34.dp),
+                            contentPadding = PaddingValues(horizontal = 12.dp, vertical = 4.dp),
+                        ) {
+                            Text("Cancel")
+                        }
+                    } else {
+                        Text(
+                            text = "Cleaning up root filesystem...",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+                }
+            }
+        } else {
+            if (installSnap.error != null) {
+                Surface(
+                    shape = RoundedCornerShape(8.dp),
+                    color = MaterialTheme.colorScheme.error.copy(alpha = 0.12f),
+                    border = BorderStroke(1.dp, MaterialTheme.colorScheme.error.copy(alpha = 0.5f)),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(bottom = 10.dp),
+                ) {
+                    Text(
+                        text = "Error: ${installSnap.error}",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.error,
+                        maxLines = 2,
+                        overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier.padding(10.dp),
+                    )
+                }
+            }
+
+            // Fixed-height 236.dp scrollable editions container (zero dynamic resizing)
+            val editionsScroll = rememberScrollState()
+            Surface(
+                shape = RoundedCornerShape(10.dp),
+                color = Color(0xFF0E151D),
+                border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(236.dp),
+            ) {
+                Column(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .verticalScroll(editionsScroll)
+                        .padding(10.dp),
+                    verticalArrangement = Arrangement.spacedBy(8.dp),
+                ) {
+                    if (installedEditionId == "custom-rootfs") {
+                        EditionRow(
+                            title = installedLabel,
+                            description = "Custom imported ARM64 Linux root filesystem.",
+                            sizeLabel = "Custom Archive",
+                            isInstalled = true,
+                            anotherInstalled = false,
+                            onInstall = {},
+                            onDelete = onRequestDeleteEdition,
+                        )
+                    }
+
+                    for (edition in catalog) {
+                        val isThisInstalled = installedEditionId == edition.id
+                        val isAnotherInstalled = installedEditionId != null && !isThisInstalled
+                        EditionRow(
+                            title = edition.title,
+                            description = edition.description,
+                            sizeLabel = edition.formattedSize(),
+                            isInstalled = isThisInstalled,
+                            anotherInstalled = isAnotherInstalled,
+                            onInstall = { onInstallEdition(edition) },
+                            onDelete = onRequestDeleteEdition,
+                        )
+                    }
+                }
+            }
+
+            Spacer(Modifier.height(10.dp))
+
+            OutlinedButton(
+                onClick = onImportCustomRootfs,
+                enabled = installedEditionId == null,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(42.dp),
+            ) {
+                Icon(Icons.Outlined.FolderOpen, contentDescription = null, modifier = Modifier.size(18.dp))
+                Spacer(Modifier.width(8.dp))
+                Text(
+                    text = if (installedEditionId == null) {
+                        "Import Custom Rootfs (.tar.zst / .tar.xz / .tar.gz)"
+                    } else {
+                        "Delete Installed Edition First to Import Custom Rootfs"
+                    },
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+            }
+        }
+    }
+}
+
+@OptIn(ExperimentalLayoutApi::class)
+@Composable
+private fun HardwareTabContent(
+    cpuTopology: com.linuxdroid.app.runtime.CpuTopology,
+    cpuCoreLimit: Int,
+    effectiveCpuCores: Int,
+    selectedCoreIndices: List<Int>,
+    onSelectCpuCoreLimit: (Int) -> Unit,
+    gpuInfo: GpuInfo,
+    gpuMode: GpuDriverMode,
+    resolvedGpuSummary: String,
+    onSelectGpuMode: (GpuDriverMode) -> Unit,
+    fastPathEnabled: Boolean,
+    onToggleFastPath: (Boolean) -> Unit,
+    noSeccompEnabled: Boolean,
+    onToggleNoSeccomp: (Boolean) -> Unit,
+) {
+    val totalCores = cpuTopology.totalCores
+
+    // 1. CPU Core Allocation Card
+    SectionCard {
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(10.dp),
+        ) {
+            Icon(Icons.Outlined.Memory, contentDescription = null, tint = MaterialTheme.colorScheme.primary)
+            Column(modifier = Modifier.weight(1f)) {
+                Text(
+                    text = "CPU Core Allocation",
+                    style = MaterialTheme.typography.titleMedium,
+                    fontWeight = FontWeight.SemiBold,
+                )
+                Text(
+                    text = "Detected: ${cpuTopology.summary}",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+            }
+        }
+
+        Spacer(Modifier.height(10.dp))
+
+        Surface(
+            shape = RoundedCornerShape(10.dp),
+            color = MaterialTheme.colorScheme.surfaceVariant,
+            modifier = Modifier.fillMaxWidth(),
+        ) {
+            Column(modifier = Modifier.padding(12.dp)) {
+                val usingAll = cpuCoreLimit <= 0 || cpuCoreLimit >= totalCores
+                Text(
+                    text = if (usingAll) {
+                        "Active: All $totalCores CPU Cores (100% Full CPU Performance)"
+                    } else {
+                        "Active: $effectiveCpuCores of $totalCores CPU Cores"
+                    },
+                    style = MaterialTheme.typography.bodyMedium,
+                    fontWeight = FontWeight.SemiBold,
+                    color = MaterialTheme.colorScheme.onSurface,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+                Text(
+                    text = if (usingAll) {
+                        "Linux desktop & apps can schedule across every hardware CPU core."
+                    } else {
+                        "Pinned to highest-clocked cores (${selectedCoreIndices.joinToString(", ")}) to save power/thermals."
+                    },
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    maxLines = 2,
+                    overflow = TextOverflow.Ellipsis,
+                )
+
+                if (totalCores > 1) {
+                    Spacer(Modifier.height(8.dp))
+                    Slider(
+                        value = effectiveCpuCores.toFloat(),
+                        onValueChange = { raw -> onSelectCpuCoreLimit(raw.roundToInt().coerceIn(1, totalCores)) },
+                        valueRange = 1f..totalCores.toFloat(),
+                        steps = (totalCores - 2).coerceAtLeast(0),
+                        modifier = Modifier.fillMaxWidth(),
+                    )
+                    FlowRow(
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        verticalArrangement = Arrangement.spacedBy(4.dp),
+                    ) {
+                        for (preset in cpuTopology.presetCoreCounts()) {
+                            val isAll = preset == totalCores
+                            val selected = if (isAll) (cpuCoreLimit == 0 || cpuCoreLimit >= totalCores) else (cpuCoreLimit == preset)
+                            FilterChip(
+                                selected = selected,
+                                onClick = { onSelectCpuCoreLimit(if (isAll) 0 else preset) },
+                                label = { Text(if (isAll) "All ($totalCores)" else "$preset ${if (preset == 1) "Core" else "Cores"}") },
+                            )
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // 2. Full SoC GPU Acceleration Card (Fixed-height scrollable driver list)
+    SectionCard {
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(10.dp),
+        ) {
+            Icon(Icons.Outlined.Memory, contentDescription = null, tint = MaterialTheme.colorScheme.secondary)
+            Column(modifier = Modifier.weight(1f)) {
+                Text(
+                    text = "Full SoC GPU Acceleration",
+                    style = MaterialTheme.typography.titleMedium,
+                    fontWeight = FontWeight.SemiBold,
+                )
+                Text(
+                    text = "100% Hardware GPU Exposed • ${gpuInfo.shortSummary()} • $resolvedGpuSummary",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+            }
+        }
+
+        Spacer(Modifier.height(10.dp))
+
+        val gpuListScroll = rememberScrollState()
+        Surface(
+            shape = RoundedCornerShape(10.dp),
+            color = Color(0xFF0E151D),
+            border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline),
+            modifier = Modifier
+                .fillMaxWidth()
+                .height(250.dp),
+        ) {
+            Column(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .verticalScroll(gpuListScroll)
+                    .padding(10.dp),
+                verticalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                for (mode in GpuDriverMode.entries) {
+                    SelectableOptionCard(
+                        selected = gpuMode == mode,
+                        title = mode.title,
+                        subtitle = mode.subtitle,
+                        onClick = { onSelectGpuMode(mode) },
+                    )
+                }
+            }
+        }
+    }
+
+    // 3. Execution Engine Tuning Card
+    SectionCard {
+        SectionHeader("Container Execution Engine")
+        SettingToggleRow(
+            title = "PRoot Fast-Path Syscall Bypass",
+            subtitle = "Patches ARM64 syscalls in-process for near-native filesystem speed in browsers, compilers, and FEX-Emu.",
+            checked = fastPathEnabled,
+            onCheckedChange = onToggleFastPath,
+        )
+        HorizontalDivider(modifier = Modifier.padding(vertical = 8.dp))
+        SettingToggleRow(
+            title = "PRoot Seccomp Compatibility Mode",
+            subtitle = "Sets PROOT_NO_SECCOMP=1 for strict vendor kernels (enable only if normal startup fails).",
+            checked = noSeccompEnabled,
+            onCheckedChange = onToggleNoSeccomp,
+        )
+    }
+}
+
+@OptIn(ExperimentalLayoutApi::class)
+@Composable
+private fun DisplayTabContent(
+    externalMode: ExternalDisplayMode,
+    connectedExternalSummary: String?,
+    onSelectExternalMode: (ExternalDisplayMode) -> Unit,
+    resolution: ResolutionPreset,
+    onSelectResolution: (ResolutionPreset) -> Unit,
+    scalePref: Float,
+    onSelectScale: (Float) -> Unit,
+    refreshHzPref: Int,
+    onSelectRefreshHz: (Int) -> Unit,
+    orientationPref: ScreenOrientationPref,
+    onSelectOrientation: (ScreenOrientationPref) -> Unit,
+    touchMode: TouchInputMode,
+    onSelectTouchMode: (TouchInputMode) -> Unit,
+) {
+    // 1. External Monitor Output Card (VLC-style Non-DeX Presentation + DeX)
+    SectionCard {
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(10.dp),
+        ) {
+            Icon(
+                imageVector = Icons.Outlined.Monitor,
+                contentDescription = null,
+                tint = if (connectedExternalSummary != null) MaterialTheme.colorScheme.secondary else MaterialTheme.colorScheme.primary,
+            )
+            Column(modifier = Modifier.weight(1f)) {
+                Text(
+                    text = "External Screen Output (HDMI / USB-C / Cast)",
+                    style = MaterialTheme.typography.titleMedium,
+                    fontWeight = FontWeight.SemiBold,
+                )
+                Text(
+                    text = if (connectedExternalSummary != null) {
+                        "Connected: $connectedExternalSummary"
+                    } else {
+                        "No external display detected • Works on any phone without Samsung DeX"
+                    },
+                    style = MaterialTheme.typography.bodySmall,
+                    color = if (connectedExternalSummary != null) {
+                        MaterialTheme.colorScheme.secondary
+                    } else {
+                        MaterialTheme.colorScheme.onSurfaceVariant
+                    },
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+            }
+        }
+
+        Spacer(Modifier.height(10.dp))
+
+        SettingToggleRow(
+            title = "Use External Screen Only (VLC Style)",
+            subtitle = "Send the Linux desktop exclusively to a connected external monitor/TV while using your phone as a multi-touch trackpad & keyboard.",
+            checked = externalMode == ExternalDisplayMode.EXTERNAL_ONLY,
+            onCheckedChange = { onlyExt ->
+                onSelectExternalMode(
+                    if (onlyExt) ExternalDisplayMode.EXTERNAL_ONLY else ExternalDisplayMode.AUTO_EXTERNAL
+                )
+            },
+        )
+
+        Spacer(Modifier.height(8.dp))
+
+        // Fixed-height scrollable mode list
+        val extScroll = rememberScrollState()
+        Surface(
+            shape = RoundedCornerShape(10.dp),
+            color = Color(0xFF0E151D),
+            border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline),
+            modifier = Modifier
+                .fillMaxWidth()
+                .height(206.dp),
+        ) {
+            Column(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .verticalScroll(extScroll)
+                    .padding(10.dp),
+                verticalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                for (mode in ExternalDisplayMode.entries) {
+                    SelectableOptionCard(
+                        selected = externalMode == mode,
+                        title = mode.title,
+                        subtitle = mode.subtitle,
+                        onClick = { onSelectExternalMode(mode) },
+                    )
+                }
+            }
+        }
+    }
+
+    // 2. Resolution, Scaling, Refresh Rate & Touch Input
+    SectionCard {
+        SectionHeader("Resolution, HiDPI & Input")
+
+        Text("Desktop Resolution", style = MaterialTheme.typography.labelLarge)
+        FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            for (preset in ResolutionPreset.entries) {
+                FilterChip(
+                    selected = resolution == preset,
+                    onClick = { onSelectResolution(preset) },
+                    label = { Text(preset.label) },
+                )
+            }
+        }
+
+        Spacer(Modifier.height(10.dp))
+        Text("HiDPI Scaling", style = MaterialTheme.typography.labelLarge)
+        val scales = listOf(0f to "Auto HiDPI", 1.0f to "100%", 1.25f to "125%", 1.5f to "150%", 1.75f to "175%", 2.0f to "200%")
+        FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            for ((value, label) in scales) {
+                FilterChip(
+                    selected = scalePref == value,
+                    onClick = { onSelectScale(value) },
+                    label = { Text(label) },
+                )
+            }
+        }
+
+        Spacer(Modifier.height(10.dp))
+        Text("Refresh Rate", style = MaterialTheme.typography.labelLarge)
+        val rates = listOf(0 to "Auto Max (90/120Hz)", 60 to "60 Hz", 90 to "90 Hz", 120 to "120 Hz")
+        FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            for ((hz, label) in rates) {
+                FilterChip(
+                    selected = refreshHzPref == hz,
+                    onClick = { onSelectRefreshHz(hz) },
+                    label = { Text(label) },
+                )
+            }
+        }
+
+        Spacer(Modifier.height(10.dp))
+        Text("Phone Screen Orientation", style = MaterialTheme.typography.labelLarge)
+        FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            for (orient in ScreenOrientationPref.entries) {
+                FilterChip(
+                    selected = orientationPref == orient,
+                    onClick = { onSelectOrientation(orient) },
+                    label = { Text(orient.label) },
+                )
+            }
+        }
+
+        Spacer(Modifier.height(10.dp))
+        Text("Touchscreen Behavior", style = MaterialTheme.typography.labelLarge)
+        FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            for (mode in TouchInputMode.entries) {
+                FilterChip(
+                    selected = touchMode == mode,
+                    onClick = { onSelectTouchMode(mode) },
+                    label = { Text(mode.label) },
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun SystemTabContent(
+    autoBoot: Boolean,
+    onToggleAutoBoot: (Boolean) -> Unit,
+    username: String,
+    onUsernameChange: (String) -> Unit,
+    customMounts: Map<String, String>,
+    onPickFolder: () -> Unit,
+    onAddPathClick: () -> Unit,
+    onRemoveMount: (String) -> Unit,
+    micEnabled: Boolean,
+    onToggleMic: (Boolean) -> Unit,
+    diagnosticLogPreview: String,
+    onRefreshLogs: () -> Unit,
+    onShareLogs: () -> Unit,
+) {
+    // 1. Startup & Workstation Account
+    SectionCard {
+        SectionHeader("Startup & Workstation Account")
+        SettingToggleRow(
+            title = "Auto-boot directly into Linux on launch",
+            subtitle = "Open the Linux desktop immediately when starting LinuxDroid (dashboard remains accessible via Back -> Quick Menu).",
+            checked = autoBoot,
+            onCheckedChange = onToggleAutoBoot,
+        )
+        Spacer(Modifier.height(10.dp))
+        OutlinedTextField(
+            value = username,
+            onValueChange = onUsernameChange,
+            label = { Text("Linux Non-Root Username (passwordless sudo enabled)") },
+            singleLine = true,
+            modifier = Modifier.fillMaxWidth(),
+        )
+    }
+
+    // 2. Shared Storage & Fixed-Height Custom Mounts List
+    SectionCard {
+        SectionHeader("Storage & Shared Folders")
+        Text(
+            text = "Android shared storage is mounted automatically at /home/$username/Android.",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+        Spacer(Modifier.height(10.dp))
+
+        val mountsScroll = rememberScrollState()
+        Surface(
+            shape = RoundedCornerShape(10.dp),
+            color = Color(0xFF0E151D),
+            border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline),
+            modifier = Modifier
+                .fillMaxWidth()
+                .height(104.dp),
+        ) {
+            if (customMounts.isEmpty()) {
+                Box(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .padding(12.dp),
+                    contentAlignment = Alignment.CenterStart,
+                ) {
+                    Text(
+                        text = "No extra folder mounts configured. Pick an Android folder below to mount it under /home/$username/Mounts/.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+            } else {
+                Column(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .verticalScroll(mountsScroll)
+                        .padding(horizontal = 12.dp, vertical = 6.dp),
+                ) {
+                    for ((name, path) in customMounts) {
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                        ) {
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text(
+                                    text = "/home/$username/Mounts/$name",
+                                    style = MaterialTheme.typography.bodyMedium,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis,
+                                )
+                                Text(
+                                    text = path,
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis,
+                                )
+                            }
+                            IconButton(onClick = { onRemoveMount(name) }) {
+                                Icon(Icons.Outlined.DeleteOutline, contentDescription = "Remove Mount")
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        Spacer(Modifier.height(10.dp))
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            OutlinedButton(onClick = onPickFolder) {
+                Icon(Icons.Outlined.FolderOpen, contentDescription = null, modifier = Modifier.size(18.dp))
+                Spacer(Modifier.width(6.dp))
+                Text("Pick Folder")
+            }
+            OutlinedButton(onClick = onAddPathClick) {
+                Icon(Icons.Outlined.Add, contentDescription = null, modifier = Modifier.size(18.dp))
+                Spacer(Modifier.width(6.dp))
+                Text("Add Path")
+            }
+        }
+    }
+
+    // 3. Audio & Fixed-Height Scrollable Diagnostics Console
+    SectionCard {
+        SectionHeader("Audio & Diagnostics")
+        SettingToggleRow(
+            title = "Microphone Forwarding (PulseAudio Source)",
+            subtitle = "Expose Android microphone input inside Linux for calls and audio recording.",
+            checked = micEnabled,
+            onCheckedChange = onToggleMic,
+        )
+
+        HorizontalDivider(modifier = Modifier.padding(vertical = 10.dp))
+
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Text(
+                text = "Recent Session Logs",
+                style = MaterialTheme.typography.labelLarge,
+            )
+            Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                TextButton(onClick = onRefreshLogs) {
+                    Icon(Icons.Outlined.Refresh, contentDescription = null, modifier = Modifier.size(16.dp))
+                    Spacer(Modifier.width(4.dp))
+                    Text("Refresh")
+                }
+                TextButton(onClick = onShareLogs) {
+                    Icon(Icons.Outlined.Share, contentDescription = null, modifier = Modifier.size(16.dp))
+                    Spacer(Modifier.width(4.dp))
+                    Text("Share Full Report")
+                }
+            }
+        }
+
+        val diagScroll = rememberScrollState()
+        Surface(
+            shape = RoundedCornerShape(8.dp),
+            color = Color(0xFF070B10),
+            border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline),
+            modifier = Modifier
+                .fillMaxWidth()
+                .height(160.dp),
+        ) {
+            Column(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .verticalScroll(diagScroll)
+                    .padding(10.dp),
+            ) {
+                Text(
+                    text = diagnosticLogPreview.ifBlank { "No session logs recorded yet." },
+                    fontFamily = FontFamily.Monospace,
+                    fontSize = 11.sp,
+                    lineHeight = 15.sp,
+                    color = Color(0xFFB8C4D4),
+                )
+            }
+        }
+    }
+}
+
 @Composable
 private fun SectionCard(content: @Composable () -> Unit) {
     Card(
@@ -768,10 +1595,95 @@ private fun SectionHeader(title: String) {
 }
 
 @Composable
-private fun EditionRow(edition: DesktopEdition, onInstall: () -> Unit) {
+private fun InfoPill(text: String, accent: Boolean = false) {
+    Surface(
+        shape = RoundedCornerShape(20.dp),
+        color = if (accent) {
+            MaterialTheme.colorScheme.secondary.copy(alpha = 0.16f)
+        } else {
+            MaterialTheme.colorScheme.surfaceVariant
+        },
+        border = BorderStroke(
+            1.dp,
+            if (accent) MaterialTheme.colorScheme.secondary.copy(alpha = 0.6f) else MaterialTheme.colorScheme.outline,
+        ),
+    ) {
+        Text(
+            text = text,
+            style = MaterialTheme.typography.labelSmall,
+            color = if (accent) MaterialTheme.colorScheme.secondary else MaterialTheme.colorScheme.onSurface,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+            modifier = Modifier.padding(horizontal = 10.dp, vertical = 5.dp),
+        )
+    }
+}
+
+@Composable
+private fun SelectableOptionCard(
+    selected: Boolean,
+    title: String,
+    subtitle: String,
+    onClick: () -> Unit,
+) {
     Surface(
         shape = RoundedCornerShape(10.dp),
-        color = MaterialTheme.colorScheme.surfaceVariant,
+        color = if (selected) MaterialTheme.colorScheme.surfaceVariant else MaterialTheme.colorScheme.surface,
+        border = BorderStroke(
+            1.dp,
+            if (selected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.outline,
+        ),
+        modifier = Modifier
+            .fillMaxWidth()
+            .clickable(onClick = onClick),
+    ) {
+        Row(
+            modifier = Modifier.padding(horizontal = 12.dp, vertical = 10.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            RadioButton(selected = selected, onClick = onClick)
+            Spacer(Modifier.width(8.dp))
+            Column(modifier = Modifier.weight(1f)) {
+                Text(
+                    text = title,
+                    style = MaterialTheme.typography.bodyMedium,
+                    fontWeight = FontWeight.Medium,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+                Text(
+                    text = subtitle,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    maxLines = 2,
+                    overflow = TextOverflow.Ellipsis,
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun EditionRow(
+    title: String,
+    description: String,
+    sizeLabel: String,
+    isInstalled: Boolean,
+    anotherInstalled: Boolean,
+    onInstall: () -> Unit,
+    onDelete: () -> Unit,
+) {
+    Surface(
+        shape = RoundedCornerShape(10.dp),
+        color = if (isInstalled) {
+            MaterialTheme.colorScheme.surfaceVariant
+        } else {
+            MaterialTheme.colorScheme.surface
+        },
+        border = BorderStroke(
+            1.dp,
+            if (isInstalled) MaterialTheme.colorScheme.secondary else MaterialTheme.colorScheme.outline,
+        ),
         modifier = Modifier.fillMaxWidth(),
     ) {
         Row(
@@ -780,24 +1692,84 @@ private fun EditionRow(edition: DesktopEdition, onInstall: () -> Unit) {
             horizontalArrangement = Arrangement.spacedBy(12.dp),
         ) {
             Column(modifier = Modifier.weight(1f)) {
-                Text(edition.title, style = MaterialTheme.typography.bodyLarge, fontWeight = FontWeight.SemiBold)
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                ) {
+                    Text(
+                        text = title,
+                        style = MaterialTheme.typography.bodyMedium,
+                        fontWeight = FontWeight.SemiBold,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier.weight(1f, fill = false),
+                    )
+                    if (isInstalled) {
+                        Surface(
+                            shape = RoundedCornerShape(12.dp),
+                            color = MaterialTheme.colorScheme.secondary.copy(alpha = 0.18f),
+                        ) {
+                            Row(
+                                modifier = Modifier.padding(horizontal = 8.dp, vertical = 2.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(4.dp),
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Outlined.CheckCircle,
+                                    contentDescription = null,
+                                    tint = MaterialTheme.colorScheme.secondary,
+                                    modifier = Modifier.size(13.dp),
+                                )
+                                Text(
+                                    text = "Installed",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = MaterialTheme.colorScheme.secondary,
+                                )
+                            }
+                        }
+                    }
+                }
+                Spacer(Modifier.height(2.dp))
                 Text(
-                    edition.description,
+                    text = description,
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    maxLines = 2,
+                    overflow = TextOverflow.Ellipsis,
                 )
-                if (edition.sizeBytes > 0) {
-                    Text(
-                        edition.formattedSize(),
-                        style = MaterialTheme.typography.labelSmall,
-                        color = MaterialTheme.colorScheme.primary,
-                    )
-                }
+                Spacer(Modifier.height(4.dp))
+                Text(
+                    text = if (anotherInstalled) "$sizeLabel • Locked while another edition is installed" else sizeLabel,
+                    style = MaterialTheme.typography.labelSmall,
+                    color = if (anotherInstalled) MaterialTheme.colorScheme.onSurfaceVariant else MaterialTheme.colorScheme.primary,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
             }
-            Button(onClick = onInstall) {
-                Icon(Icons.Outlined.CloudDownload, contentDescription = null)
-                Spacer(Modifier.width(6.dp))
-                Text("Install")
+
+            if (isInstalled) {
+                OutlinedButton(
+                    onClick = onDelete,
+                    colors = ButtonDefaults.outlinedButtonColors(contentColor = MaterialTheme.colorScheme.error),
+                    border = BorderStroke(1.dp, MaterialTheme.colorScheme.error.copy(alpha = 0.7f)),
+                    contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp),
+                    modifier = Modifier.height(38.dp),
+                ) {
+                    Icon(Icons.Outlined.DeleteOutline, contentDescription = null, modifier = Modifier.size(18.dp))
+                    Spacer(Modifier.width(4.dp))
+                    Text("Delete")
+                }
+            } else {
+                Button(
+                    onClick = onInstall,
+                    enabled = !anotherInstalled,
+                    contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp),
+                    modifier = Modifier.height(38.dp),
+                ) {
+                    Icon(Icons.Outlined.CloudDownload, contentDescription = null, modifier = Modifier.size(18.dp))
+                    Spacer(Modifier.width(5.dp))
+                    Text("Install")
+                }
             }
         }
     }
@@ -818,8 +1790,20 @@ private fun SettingToggleRow(
         horizontalArrangement = Arrangement.spacedBy(12.dp),
     ) {
         Column(modifier = Modifier.weight(1f)) {
-            Text(title, style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.Medium)
-            Text(subtitle, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            Text(
+                text = title,
+                style = MaterialTheme.typography.bodyMedium,
+                fontWeight = FontWeight.Medium,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
+            Text(
+                text = subtitle,
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                maxLines = 2,
+                overflow = TextOverflow.Ellipsis,
+            )
         }
         Switch(checked = checked, onCheckedChange = onCheckedChange)
     }

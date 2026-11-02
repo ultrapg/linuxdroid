@@ -7,6 +7,7 @@ import android.system.ErrnoException
 import android.system.Os
 import android.util.Log
 import com.linuxdroid.app.core.FileUtils
+import com.linuxdroid.app.session.SessionPrefs
 import java.io.File
 import java.io.FileOutputStream
 import java.nio.file.Files
@@ -76,6 +77,32 @@ object LinuxRuntime {
             File(root, "usr/bin/startxfce4").exists() -> "Ubuntu ARM64 (XFCE4)"
             else -> "Custom ARM64 Linux Rootfs"
         }
+    }
+
+    /**
+     * Identifies the currently installed edition ID (`"ubuntu-kde-arm64"`, `"ubuntu-xfce-arm64"`,
+     * `"custom-rootfs"`, etc.), or `null` if no Linux rootfs is currently installed.
+     * Auto-detects existing installations even if upgraded from an earlier APK.
+     */
+    fun detectInstalledEditionId(context: Context): String? {
+        if (!hasRootfs(context)) return null
+        val root = rootDir(context)
+        val fileId = FileUtils.readString(File(root, "etc/linuxdroid/edition-id"))?.trim()
+        if (!fileId.isNullOrEmpty()) return fileId
+        val prefId = SessionPrefs.installedEditionId(context)
+        if (!prefId.isNullOrEmpty()) return prefId
+        val stamp = FileUtils.readString(File(root, "etc/linuxdroid/edition"))?.trim().orEmpty()
+        return when {
+            stamp.contains("KDE", ignoreCase = true) || File(root, "usr/bin/startplasma-wayland").exists() ->
+                "ubuntu-kde-arm64"
+            stamp.contains("XFCE", ignoreCase = true) || File(root, "usr/bin/startxfce4").exists() ->
+                "ubuntu-xfce-arm64"
+            else -> "custom-rootfs"
+        }
+    }
+
+    fun clearCachedBinds() {
+        cachedBinds = null
     }
 
     /**
@@ -181,6 +208,7 @@ object LinuxRuntime {
         context: Context,
         batterySysfsDir: File?,
         customMounts: Map<String, String>,
+        effectiveCpuCores: Int = SessionPrefs.effectiveCpuCores(context, CpuInfo.detect().totalCores),
     ): List<String> {
         val root = rootDir(context)
         val specs = ArrayList<String>()
@@ -229,7 +257,7 @@ object LinuxRuntime {
             specs.add("$SYSTEM_FONTS:$GUEST_SYSTEM_FONTS")
         }
 
-        seedSyntheticProc(root, specs)
+        seedSyntheticProc(root, specs, effectiveCpuCores)
         bindKgslDrmIfNeeded(context, specs)
 
         if (customMounts.isNotEmpty()) {
@@ -250,11 +278,20 @@ object LinuxRuntime {
     fun lastBinds(context: Context): List<String> =
         cachedBinds ?: buildBinds(context, null, emptyMap())
 
-    private fun seedSyntheticProc(root: File, specs: MutableList<String>) {
+    internal fun generateProcStatText(cpuCores: Int): String = buildString {
+        val count = cpuCores.coerceIn(1, 128)
+        append("cpu  ${1000 * count} 0 ${500 * count} ${8500 * count} 0 0 0 0 0 0\n")
+        for (i in 0 until count) {
+            append("cpu$i 1000 0 500 8500 0 0 0 0 0 0\n")
+        }
+    }
+
+    private fun seedSyntheticProc(root: File, specs: MutableList<String>, effectiveCpuCores: Int) {
         val fakeProc = File(root, "etc/linuxdroid/proc").apply { mkdirs() }
+        // Always refresh synthetic /proc/stat so configured CPU core count takes effect immediately
+        FileUtils.writeString(File(fakeProc, "stat"), generateProcStatText(effectiveCpuCores))
         val defaults = mapOf(
             "pci_devices" to "",
-            "stat" to "cpu  1000 0 500 8500 0 0 0 0 0 0\ncpu0 1000 0 500 8500 0 0 0 0 0 0\n",
             "loadavg" to "0.20 0.15 0.10 1/256 1000\n",
             "uptime" to "3600.00 3500.00\n",
             "vmstat" to "nr_free_pages 262144\n",
