@@ -9,6 +9,7 @@ enum class SessionPhase {
     RUNNING,
     PAUSED,
     STOPPING,
+    FAILED,
 }
 
 data class SessionSnapshot(
@@ -18,6 +19,12 @@ data class SessionSnapshot(
     val resolutionText: String = "",
     val firstFrameReady: Boolean = false,
     val guestPid: Int = -1,
+    val bootStep: Int = 0,
+    val bootTotalSteps: Int = 6,
+    val bootLogTail: List<String> = emptyList(),
+    val errorMessage: String? = null,
+    val compatibilityRetryUsed: Boolean = false,
+    val startedAtMs: Long = 0L,
 )
 
 object SessionState {

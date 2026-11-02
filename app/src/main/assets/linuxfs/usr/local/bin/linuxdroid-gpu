@@ -1,0 +1,26 @@
+#!/bin/bash
+# Run an application with full hardware SoC OpenGL (Zink / VirGL) and Vulkan enabled.
+set -u
+
+if [ -r /etc/linuxdroid/gpu.env ]; then
+  set -a
+  # shellcheck disable=SC1091
+  . /etc/linuxdroid/gpu.env
+  set +a
+fi
+
+unset QT_QUICK_BACKEND
+if [ "${LINUXDROID_GPU_ACTIVE:-}" = "turnip" ]; then
+  unset LIBGL_ALWAYS_SOFTWARE
+  if [ "${XDG_SESSION_TYPE:-}" = "wayland" ] && [ "${KWIN_COMPOSE:-}" = "Q" ]; then
+    export GDK_BACKEND=x11
+    export QT_QPA_PLATFORM=xcb
+    export SDL_VIDEODRIVER=x11
+  fi
+fi
+
+if [ "$#" -eq 0 ]; then
+  echo "usage: linuxdroid-gpu PROGRAM [ARGS...]" >&2
+  exit 2
+fi
+exec "$@"

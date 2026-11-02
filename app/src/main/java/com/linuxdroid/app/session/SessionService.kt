@@ -29,6 +29,9 @@ import com.linuxdroid.app.wayland.CompositorHost
 import com.linuxdroid.app.wayland.WaylandCompositor
 import java.io.File
 import java.util.TimeZone
+import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicInteger
+import java.util.concurrent.atomic.AtomicLong
 
 class SessionService : Service() {
     private var wakeLock: PowerManager.WakeLock? = null
@@ -38,6 +41,8 @@ class SessionService : Service() {
     private var networkComponent: LinuxNetworkLinkComponent? = null
     private var clipboard: SessionClipboard? = null
     private var suspendController: SessionSuspendController? = null
+
+    private val bootGeneration = AtomicInteger(0)
 
     @Volatile
     private var guestPid: Int = -1
@@ -50,9 +55,14 @@ class SessionService : Service() {
                 val width = intent.getIntExtra(EXTRA_WIDTH, 1920).coerceAtLeast(640)
                 val height = intent.getIntExtra(EXTRA_HEIGHT, 1080).coerceAtLeast(480)
                 val refreshHz = intent.getFloatExtra(EXTRA_REFRESH_HZ, 60f).coerceIn(30f, 240f)
+                val forceCompat = intent.getBooleanExtra(EXTRA_FORCE_COMPAT, false)
                 startForeground(NOTIFICATION_ID, buildNotification("Starting Linux workstation...", paused = false))
                 if (!SessionState.isRunningOrPaused) {
-                    Thread({ bootWorkstation(width, height, refreshHz) }, "session-boot").start()
+                    val gen = bootGeneration.incrementAndGet()
+                    Thread(
+                        { bootWorkstation(width, height, refreshHz, forceCompatRetry = forceCompat, generation = gen) },
+                        "session-boot-$gen"
+                    ).start()
                 } else if (SessionState.isPaused) {
                     resumeWorkstation()
                 }
@@ -67,11 +77,20 @@ class SessionService : Service() {
         return START_STICKY
     }
 
-    private fun bootWorkstation(width: Int, height: Int, refreshHz: Float) {
+    private fun bootWorkstation(
+        width: Int,
+        height: Int,
+        refreshHz: Float,
+        forceCompatRetry: Boolean,
+        generation: Int,
+    ) {
+        val logDir = LinuxRuntime.logDir(this)
         if (!LinuxRuntime.isReady(this)) {
-            SessionState.reset()
-            stopForeground(STOP_FOREGROUND_REMOVE)
-            stopSelf()
+            failBoot(
+                generation = generation,
+                message = "Linux rootfs or PRoot native binaries are missing. Please install or re-import a desktop edition.",
+                logDir = logDir,
+            )
             return
         }
 
@@ -81,17 +100,38 @@ class SessionService : Service() {
         val root = LinuxRuntime.rootDir(this)
         val sessionDir = LinuxRuntime.sessionDir(this)
         val xdgDir = LinuxRuntime.runtimeDir(this)
-        val logDir = LinuxRuntime.logDir(this)
+        val bootStatusFile = File(sessionDir, "boot-status.txt")
+        val sessionLogFile = File(logDir, "session.log")
+        val prootLogFile = File(logDir, "proot-host.log")
+
+        rotateFreshBootLog(sessionLogFile)
+        rotateFreshBootLog(prootLogFile)
+        bootStatusFile.delete()
+
+        val startedMs = SessionState.state.value.startedAtMs.takeIf { forceCompatRetry && it > 0L }
+            ?: System.currentTimeMillis()
 
         SessionState.update {
             SessionSnapshot(
                 phase = SessionPhase.STARTING,
-                statusText = "Configuring GPU & Linux environment...",
+                statusText = if (forceCompatRetry) {
+                    "Retrying in PRoot compatibility mode (seccomp disabled)..."
+                } else {
+                    "Staging Linux runtime & user account..."
+                },
                 resolutionText = "${width}×${height} @ ${refreshHz.toInt()}Hz",
+                bootStep = 1,
+                bootTotalSteps = 6,
+                compatibilityRetryUsed = forceCompatRetry,
+                startedAtMs = startedMs,
             )
         }
+        refreshNotification()
 
-        val fastPathPref = SessionPrefs.prootFastPath(this) && !SessionPrefs.prootNoSeccomp(this)
+        val fastPathPref = !forceCompatRetry &&
+            SessionPrefs.prootFastPath(this) &&
+            !SessionPrefs.prootNoSeccomp(this)
+
         LinuxRuntime.stageBundledOverlay(this, enableFastPath = fastPathPref)
         val username = UserProvisioner.provisionRootfs(root, SessionPrefs.username(this), Process.myUid())
 
@@ -101,14 +141,64 @@ class SessionService : Service() {
             gpu = gpuInfo,
             virglSocketGuestPath = LinuxRuntime.VIRGL_SOCKET_GUEST_PATH,
         )
+        updateBootStep(
+            generation = generation,
+            step = 2,
+            status = "Initializing GPU driver (${gpuConfig.activeBackend.uppercase()})...",
+            gpuSummary = gpuConfig.summary,
+        )
         FileUtils.writeString(File(root, "etc/linuxdroid/gpu.env"), gpuConfig.toEnvFileContent())
+
+        updateBootStep(
+            generation = generation,
+            step = 3,
+            status = "Starting Android Wayland compositor & PulseAudio...",
+        )
+        val waylandFirstFrameAtMs = AtomicLong(0L)
+        val guestShellReady = AtomicBoolean(false)
+
+        fun completeDesktopReadyIfEligible() {
+            if (bootGeneration.get() != generation) return
+            val wfMs = waylandFirstFrameAtMs.get()
+            if (wfMs <= 0L) return
+            val elapsedSinceFirstWaylandFrame = System.currentTimeMillis() - wfMs
+            if (!guestShellReady.get() && elapsedSinceFirstWaylandFrame < DESKTOP_SHELL_READY_FALLBACK_MS) {
+                return
+            }
+            SessionState.update {
+                if (it.firstFrameReady || it.phase == SessionPhase.FAILED || it.phase == SessionPhase.STOPPING) {
+                    it
+                } else {
+                    it.copy(
+                        firstFrameReady = true,
+                        phase = SessionPhase.RUNNING,
+                        bootStep = 6,
+                        statusText = "Running ($username)",
+                        errorMessage = null,
+                    )
+                }
+            }
+            refreshNotification()
+        }
 
         WaylandCompositor.nativeResetFirstFrame()
         WaylandCompositor.setFirstFrameListener {
-            SessionState.update { it.copy(firstFrameReady = true, phase = SessionPhase.RUNNING, statusText = "Running ($username)") }
-            refreshNotification()
+            if (bootGeneration.get() == generation) {
+                waylandFirstFrameAtMs.compareAndSet(0L, System.currentTimeMillis())
+                completeDesktopReadyIfEligible()
+            }
         }
-        CompositorHost.ensureStarted(this, xdgDir, width, height, refreshHz)
+        val waylandReady = CompositorHost.ensureStarted(this, xdgDir, width, height, refreshHz)
+        if (!waylandReady) {
+            failBoot(
+                generation = generation,
+                message = "Android Wayland compositor failed to create socket ${xdgDir.absolutePath}/wayland-0.",
+                logDir = logDir,
+            )
+            return
+        }
+
+        stopHelpersOnly()
 
         if (gpuConfig.requiresVirglServer) {
             virglServer = VirglServerComponent(
@@ -143,7 +233,11 @@ class SessionService : Service() {
 
         val homePath = "/home/$username"
         val scale = SessionPrefs.computeEffectiveScale(this, width, height)
-        val scaleText = if (scale % 1.0f == 0f) scale.toInt().toString() else "%.2f".format(java.util.Locale.US, scale).trimEnd('0').trimEnd('.')
+        val scaleText = if (scale % 1.0f == 0f) {
+            scale.toInt().toString()
+        } else {
+            "%.2f".format(java.util.Locale.US, scale).trimEnd('0').trimEnd('.')
+        }
 
         val prootCmd = LinuxRuntime.prootPrefix(this, root, homePath, fakeRoot = false)
         for (spec in binds) {
@@ -152,6 +246,7 @@ class SessionService : Service() {
         }
 
         val guestEnv = LinkedHashMap<String, String>().apply {
+            put("BL_DESKTOP", "1")
             put("HOME", homePath)
             put("USER", username)
             put("LOGNAME", username)
@@ -169,7 +264,8 @@ class SessionService : Service() {
             put("BL_REFRESH", refreshHz.toInt().toString())
             put("BL_ANDROID_CLIPBOARD", clipboardFile.absolutePath)
             put("BL_IME_STATE", imeStateFile.absolutePath)
-            put("BL_LOG", File(logDir, "session.log").absolutePath)
+            put("BL_LOG", sessionLogFile.absolutePath)
+            put("BL_BOOT_STATUS", bootStatusFile.absolutePath)
             put("LINUXDROID_DESKTOP", SessionPrefs.desktopEnvironment(this@SessionService))
             putAll(gpuConfig.envVars)
             if (fastPathKey != null) {
@@ -182,10 +278,11 @@ class SessionService : Service() {
         for ((k, v) in guestEnv) prootCmd.add("$k=$v")
         prootCmd.add(LinuxRuntime.SESSION_SCRIPT)
 
+        val useNoSeccomp = forceCompatRetry || SessionPrefs.prootNoSeccomp(this)
         val hostEnv = LinkedHashMap<String, String>().apply {
             put("PROOT_LOADER", LinuxRuntime.prootLoader(this@SessionService).absolutePath)
             put("PROOT_TMP_DIR", LinuxRuntime.prootTempDir(this@SessionService).absolutePath)
-            if (SessionPrefs.prootNoSeccomp(this@SessionService)) put("PROOT_NO_SECCOMP", "1")
+            if (useNoSeccomp) put("PROOT_NO_SECCOMP", "1")
             if (fastPathKey != null) {
                 val (k, v) = ProotFastPath.hostEnv(fastPathKey)
                 put(k, v)
@@ -200,29 +297,237 @@ class SessionService : Service() {
             clockControlFile = File(root, "tmp/.bl-clock"),
         )
 
-        val pid = HostProcess.start(
-            argv = prootCmd,
-            env = hostEnv,
-            dir = root,
-            onExit = { code ->
-                Log.i(TAG, "Linux session exited ($code)")
-                if (SessionState.state.value.phase != SessionPhase.STOPPING) {
-                    shutdownWorkstation()
-                }
-            },
-            outputFile = File(logDir, "proot-host.log"),
+        updateBootStep(
+            generation = generation,
+            step = 4,
+            status = "Booting ARM64 Ubuntu container (PRoot)...",
+            gpuSummary = gpuConfig.summary,
         )
+
+        val pid = try {
+            HostProcess.start(
+                argv = prootCmd,
+                env = hostEnv,
+                dir = root,
+                onExit = { code ->
+                    onGuestProcessExited(
+                        code = code,
+                        width = width,
+                        height = height,
+                        refreshHz = refreshHz,
+                        forceCompatRetry = forceCompatRetry,
+                        usedFastPath = fastPathPref,
+                        usedNoSeccomp = useNoSeccomp,
+                        waylandPresented = { waylandFirstFrameAtMs.get() > 0L },
+                        generation = generation,
+                        logDir = logDir,
+                    )
+                },
+                outputFile = prootLogFile,
+            )
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed starting PRoot guest process", e)
+            failBoot(
+                generation = generation,
+                message = "Failed to spawn PRoot process: ${e.message ?: e.javaClass.simpleName}",
+                logDir = logDir,
+            )
+            return
+        }
         guestPid = pid
 
-        SessionState.update {
-            it.copy(
-                phase = SessionPhase.RUNNING,
-                statusText = "Running ($username)",
+        SessionState.update { snap ->
+            if (bootGeneration.get() != generation) snap
+            else snap.copy(
                 activeGpuSummary = gpuConfig.summary,
                 guestPid = pid,
             )
         }
         refreshNotification()
+        startBootProgressMonitor(
+            generation = generation,
+            bootStatusFile = bootStatusFile,
+            logDir = logDir,
+            guestShellReady = guestShellReady,
+            onCheckComplete = ::completeDesktopReadyIfEligible,
+        )
+    }
+
+    private fun startBootProgressMonitor(
+        generation: Int,
+        bootStatusFile: File,
+        logDir: File,
+        guestShellReady: AtomicBoolean,
+        onCheckComplete: () -> Unit,
+    ) {
+        Thread({
+            while (bootGeneration.get() == generation) {
+                val snap = SessionState.state.value
+                if (snap.firstFrameReady || snap.phase != SessionPhase.STARTING) break
+
+                val rawStatus = FileUtils.readString(bootStatusFile)?.trim()
+                var nextStep = snap.bootStep
+                var nextStatus = snap.statusText
+                if (!rawStatus.isNullOrEmpty()) {
+                    val bar = rawStatus.indexOf('|')
+                    if (bar > 0) {
+                        val prefix = rawStatus.substring(0, bar).trim()
+                        val parsedMsg = rawStatus.substring(bar + 1).trim()
+                        if (prefix.equals("READY", ignoreCase = true)) {
+                            guestShellReady.set(true)
+                            nextStep = 6
+                            if (parsedMsg.isNotEmpty()) {
+                                nextStatus = parsedMsg
+                            }
+                        } else {
+                            val parsedStep = prefix.toIntOrNull()
+                            if (parsedStep != null && parsedStep >= nextStep) {
+                                nextStep = parsedStep.coerceIn(1, 6)
+                            }
+                            if (parsedMsg.isNotEmpty()) {
+                                nextStatus = parsedMsg
+                            }
+                        }
+                    }
+                }
+                val tail = collectDiagnosticLogTail(logDir, maxLines = 8)
+                if (nextStep != snap.bootStep || nextStatus != snap.statusText || tail != snap.bootLogTail) {
+                    SessionState.update { cur ->
+                        if (bootGeneration.get() != generation || cur.firstFrameReady || cur.phase != SessionPhase.STARTING) {
+                            cur
+                        } else {
+                            cur.copy(
+                                bootStep = nextStep,
+                                statusText = nextStatus,
+                                bootLogTail = tail,
+                            )
+                        }
+                    }
+                    if (nextStatus != snap.statusText) {
+                        refreshNotification()
+                    }
+                }
+                onCheckComplete()
+                if (SessionState.state.value.firstFrameReady) break
+                try {
+                    Thread.sleep(200L)
+                } catch (_: InterruptedException) {
+                    break
+                }
+            }
+        }, "session-boot-monitor-$generation").apply {
+            isDaemon = true
+            start()
+        }
+    }
+
+    private fun onGuestProcessExited(
+        code: Int,
+        width: Int,
+        height: Int,
+        refreshHz: Float,
+        forceCompatRetry: Boolean,
+        usedFastPath: Boolean,
+        usedNoSeccomp: Boolean,
+        waylandPresented: () -> Boolean,
+        generation: Int,
+        logDir: File,
+    ) {
+        if (bootGeneration.get() != generation) return
+        val snap = SessionState.state.value
+        val hasPresented = snap.firstFrameReady || waylandPresented()
+        Log.i(TAG, "Linux session exited (code=$code, phase=${snap.phase}, hasPresented=$hasPresented)")
+
+        if (snap.phase == SessionPhase.STOPPING) return
+
+        if (!hasPresented) {
+            if (!forceCompatRetry && (usedFastPath || !usedNoSeccomp)) {
+                Log.w(TAG, "Early exit ($code) before first frame; retrying in PRoot compatibility mode")
+                val nextGen = bootGeneration.incrementAndGet()
+                guestPid = -1
+                stopHelpersOnly()
+                Thread(
+                    { bootWorkstation(width, height, refreshHz, forceCompatRetry = true, generation = nextGen) },
+                    "session-boot-compat-$nextGen"
+                ).start()
+                return
+            }
+
+            failBoot(
+                generation = generation,
+                message = "Linux desktop exited before rendering its first frame (exit code $code).",
+                logDir = logDir,
+            )
+            return
+        }
+
+        shutdownWorkstation()
+    }
+
+    private fun updateBootStep(
+        generation: Int,
+        step: Int,
+        status: String,
+        gpuSummary: String? = null,
+    ) {
+        if (bootGeneration.get() != generation) return
+        SessionState.update { cur ->
+            if (cur.firstFrameReady) cur
+            else cur.copy(
+                bootStep = step.coerceAtLeast(cur.bootStep),
+                statusText = status,
+                activeGpuSummary = gpuSummary ?: cur.activeGpuSummary,
+            )
+        }
+        refreshNotification()
+    }
+
+    private fun failBoot(generation: Int, message: String, logDir: File) {
+        if (bootGeneration.get() != generation) return
+        Log.e(TAG, "Boot failed: $message")
+        val pid = guestPid
+        guestPid = -1
+        if (pid > 1) killProcessTree(pid)
+        suspendController = null
+        stopHelpersOnly()
+        CompositorHost.detachSurface()
+        releaseWakeLock()
+        val tail = collectDiagnosticLogTail(logDir, maxLines = 18)
+        SessionState.update { cur ->
+            cur.copy(
+                phase = SessionPhase.FAILED,
+                statusText = "Startup failed",
+                guestPid = -1,
+                errorMessage = message,
+                bootLogTail = tail,
+            )
+        }
+        stopForeground(STOP_FOREGROUND_REMOVE)
+        stopSelf()
+    }
+
+    private fun stopHelpersOnly() {
+        runCatching { clipboard?.stop() }
+        clipboard = null
+        runCatching { networkComponent?.stop() }
+        networkComponent = null
+        runCatching { batteryComponent?.stop() }
+        batteryComponent = null
+        runCatching { pulseAudio?.stop() }
+        pulseAudio = null
+        runCatching { virglServer?.stop() }
+        virglServer = null
+    }
+
+    private fun rotateFreshBootLog(file: File) {
+        try {
+            if (file.isFile && file.length() > 0L) {
+                val prev = File(file.parentFile, "${file.nameWithoutExtension}.prev.${file.extension}")
+                file.copyTo(prev, overwrite = true)
+            }
+            FileUtils.writeString(file, "")
+        } catch (_: Exception) {
+        }
     }
 
     private fun pauseWorkstation() {
@@ -244,13 +549,20 @@ class SessionService : Service() {
         ctrl.resume { ok ->
             if (ok) {
                 val user = SessionPrefs.username(this)
-                SessionState.update { it.copy(phase = SessionPhase.RUNNING, statusText = "Running ($user)") }
+                val firstFrame = SessionState.state.value.firstFrameReady
+                SessionState.update {
+                    it.copy(
+                        phase = if (firstFrame) SessionPhase.RUNNING else SessionPhase.STARTING,
+                        statusText = if (firstFrame) "Running ($user)" else "Resuming startup...",
+                    )
+                }
                 refreshNotification()
             }
         }
     }
 
     private fun shutdownWorkstation() {
+        bootGeneration.incrementAndGet()
         SessionState.update { it.copy(phase = SessionPhase.STOPPING, statusText = "Shutting down...") }
         val pid = guestPid
         guestPid = -1
@@ -259,16 +571,7 @@ class SessionService : Service() {
             if (pid > 1) {
                 killProcessTree(pid)
             }
-            clipboard?.stop()
-            clipboard = null
-            networkComponent?.stop()
-            networkComponent = null
-            batteryComponent?.stop()
-            batteryComponent = null
-            pulseAudio?.stop()
-            pulseAudio = null
-            virglServer?.stop()
-            virglServer = null
+            stopHelpersOnly()
             CompositorHost.detachSurface()
             releaseWakeLock()
             SessionState.reset()
@@ -327,8 +630,13 @@ class SessionService : Service() {
         val snap = SessionState.state.value
         val nm = getSystemService(NotificationManager::class.java) ?: return
         val subtitle = buildString {
+            if (snap.phase == SessionPhase.STARTING && snap.bootStep > 0) {
+                append("Step ${snap.bootStep}/${snap.bootTotalSteps}: ")
+            }
             append(snap.statusText)
-            if (snap.activeGpuSummary.isNotEmpty()) append(" • ").append(snap.activeGpuSummary)
+            if (snap.activeGpuSummary.isNotEmpty() && snap.phase == SessionPhase.RUNNING) {
+                append(" • ").append(snap.activeGpuSummary)
+            }
         }
         nm.notify(NOTIFICATION_ID, buildNotification(subtitle, snap.phase == SessionPhase.PAUSED))
     }
@@ -371,6 +679,7 @@ class SessionService : Service() {
     companion object {
         private const val TAG = "SessionService"
         private const val NOTIFICATION_ID = 1001
+        private const val DESKTOP_SHELL_READY_FALLBACK_MS = 14_000L
         const val ACTION_START = "com.linuxdroid.app.action.START_SESSION"
         const val ACTION_PAUSE = "com.linuxdroid.app.action.PAUSE_SESSION"
         const val ACTION_RESUME = "com.linuxdroid.app.action.RESUME_SESSION"
@@ -379,13 +688,21 @@ class SessionService : Service() {
         const val EXTRA_WIDTH = "width"
         const val EXTRA_HEIGHT = "height"
         const val EXTRA_REFRESH_HZ = "refresh_hz"
+        const val EXTRA_FORCE_COMPAT = "force_compat"
 
-        fun startOrResume(context: Context, width: Int, height: Int, refreshHz: Float) {
+        fun startOrResume(
+            context: Context,
+            width: Int,
+            height: Int,
+            refreshHz: Float,
+            forceCompat: Boolean = false,
+        ) {
             val intent = Intent(context, SessionService::class.java).apply {
                 action = ACTION_START
                 putExtra(EXTRA_WIDTH, width)
                 putExtra(EXTRA_HEIGHT, height)
                 putExtra(EXTRA_REFRESH_HZ, refreshHz)
+                putExtra(EXTRA_FORCE_COMPAT, forceCompat)
             }
             context.startForegroundService(intent)
         }
@@ -396,6 +713,41 @@ class SessionService : Service() {
 
         fun shutdown(context: Context) {
             context.startService(Intent(context, SessionService::class.java).setAction(ACTION_SHUTDOWN))
+        }
+
+        internal fun collectDiagnosticLogTail(logDir: File, maxLines: Int = 12): List<String> {
+            val combined = ArrayList<String>()
+            val prootLines = tailNonEmptyLines(File(logDir, "proot-host.log"), 6)
+            val sessionLines = tailNonEmptyLines(File(logDir, "session.log"), maxLines)
+            val waylandLines = if (sessionLines.isEmpty()) tailNonEmptyLines(File(logDir, "wayland.log"), 5) else emptyList()
+
+            for (l in prootLines) combined.add("[proot] $l")
+            for (l in sessionLines) combined.add(l)
+            for (l in waylandLines) combined.add("[wayland] $l")
+
+            return if (combined.size <= maxLines) combined else combined.takeLast(maxLines)
+        }
+
+        private fun tailNonEmptyLines(file: File, count: Int): List<String> {
+            if (!file.isFile) return emptyList()
+            return try {
+                val len = file.length()
+                val readBytes = minOf(len, 16_384L).toInt()
+                if (readBytes <= 0) return emptyList()
+                val buf = ByteArray(readBytes)
+                java.io.RandomAccessFile(file, "r").use { raf ->
+                    raf.seek(len - readBytes)
+                    raf.readFully(buf)
+                }
+                String(buf, Charsets.UTF_8)
+                    .lineSequence()
+                    .map { it.trim() }
+                    .filter { it.isNotEmpty() && !it.startsWith("Warning:          ") }
+                    .toList()
+                    .takeLast(count)
+            } catch (_: Exception) {
+                emptyList()
+            }
         }
     }
 }

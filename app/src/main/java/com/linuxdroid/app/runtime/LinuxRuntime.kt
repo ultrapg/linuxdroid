@@ -121,6 +121,18 @@ object LinuxRuntime {
 
         val etcLinuxDroid = File(root, "etc/linuxdroid").apply { mkdirs() }
         File(etcLinuxDroid, "empty").mkdirs()
+        File(root, GUEST_RUNTIME_DIR.removePrefix("/")).apply {
+            mkdirs()
+            FileUtils.chmod(this, 0b111_000_000)
+        }
+        File(root, "tmp").apply {
+            mkdirs()
+            FileUtils.chmod(this, 0b1_111_111_111)
+        }
+        File(root, "var/tmp").apply {
+            mkdirs()
+            FileUtils.chmod(this, 0b1_111_111_111)
+        }
         FileUtils.writeString(
             File(etcLinuxDroid, "root-socket"),
             "@${RootSpawner.socketName(context)}\n"
@@ -135,6 +147,12 @@ object LinuxRuntime {
         FileUtils.writeString(File(root, "etc/ld.so.preload"), preloadLines)
     }
 
+    /**
+     * Builds the base Android PRoot command vector.
+     * Note: `-q` must NEVER be passed on ARM64 Android — PRoot resolves `-q` on the Android host
+     * before chrooting and passes QEMU-user flags. Transparent x86/x86_64 execution via FEX-Emu is
+     * handled inside the guest by `libblsession.so` (`binfmt.c`) -> `linuxdroid-open` -> `linuxdroid-fex`.
+     */
     fun prootPrefix(
         context: Context,
         root: File,
@@ -145,11 +163,6 @@ object LinuxRuntime {
         cmd.add(prootBinary(context).absolutePath)
         cmd.add("--kill-on-exit")
         cmd.add("--kernel-release=${guestUtsname("linuxdroid")}")
-        val fexGuest = fexInterpreterGuestPath(root)
-        if (fexGuest != null) {
-            cmd.add("-q")
-            cmd.add(fexGuest)
-        }
         val uid = Process.myUid()
         if (fakeRoot) {
             cmd.add("-0")
@@ -189,6 +202,10 @@ object LinuxRuntime {
         specs.add(liveDir(context).absolutePath)
 
         val rtDir = runtimeDir(context)
+        File(root, GUEST_RUNTIME_DIR.removePrefix("/")).apply {
+            mkdirs()
+            FileUtils.chmod(this, 0b111_000_000)
+        }
         specs.add(rtDir.absolutePath)
         specs.add("${rtDir.absolutePath}:$GUEST_RUNTIME_DIR")
         specs.add(sessionDir(context).absolutePath)

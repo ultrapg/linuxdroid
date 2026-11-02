@@ -142,15 +142,39 @@ class FrontEndActivity : ComponentActivity() {
     }
 
     private fun shareSessionLogs() {
-        val logFile = File(LinuxRuntime.logDir(this), "session.log")
-        if (!logFile.isFile) return
-        val uri = FileProvider.getUriForFile(this, "$packageName.fileprovider", logFile)
+        val logDir = LinuxRuntime.logDir(this)
+        val combinedFile = File(logDir, "linuxdroid-diagnostics.log")
+        val report = buildString {
+            appendLine("=== LinuxDroid Diagnostics Report ===")
+            appendLine("Device: ${Build.MANUFACTURER} ${Build.MODEL} (SDK ${Build.VERSION.SDK_INT})")
+            appendLine("SoC / Hardware: ${Build.SOC_MODEL} / ${Build.HARDWARE}")
+            appendLine("GPU: ${GpuInfo.detect().shortSummary()}")
+            appendLine("Desktop: ${LinuxRuntime.detectInstalledDesktopLabel(this@FrontEndActivity)}")
+            appendLine()
+            val sources = listOf(
+                "proot-host.log",
+                "session.log",
+                "wayland.log",
+                "virgl.log",
+                "pulseaudio.log",
+            )
+            for (name in sources) {
+                val f = File(logDir, name)
+                if (f.isFile && f.length() > 0L) {
+                    appendLine("--- $name (${f.length()} bytes) ---")
+                    val text = runCatching { f.readText() }.getOrDefault("")
+                    appendLine(if (text.length <= 24_000) text else text.takeLast(24_000))
+                }
+            }
+        }
+        com.linuxdroid.app.core.FileUtils.writeString(combinedFile, report)
+        val uri = FileProvider.getUriForFile(this, "$packageName.fileprovider", combinedFile)
         val share = Intent(Intent.ACTION_SEND).apply {
             type = "text/plain"
             putExtra(Intent.EXTRA_STREAM, uri)
             addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
         }
-        startActivity(Intent.createChooser(share, "Share LinuxDroid Session Log"))
+        startActivity(Intent.createChooser(share, "Share LinuxDroid Diagnostic Logs"))
     }
 
     companion object {
@@ -187,6 +211,7 @@ private fun DashboardScreen(
     var touchMode by remember { mutableStateOf(SessionPrefs.touchInputMode(context)) }
     var micEnabled by remember { mutableStateOf(SessionPrefs.micEnabled(context)) }
     var fastPathEnabled by remember { mutableStateOf(SessionPrefs.prootFastPath(context)) }
+    var noSeccompEnabled by remember { mutableStateOf(SessionPrefs.prootNoSeccomp(context)) }
     var username by remember { mutableStateOf(SessionPrefs.username(context)) }
     var customMounts by remember { mutableStateOf(SessionPrefs.customMounts(context)) }
     var showAddMountDialog by remember { mutableStateOf(false) }
@@ -290,13 +315,26 @@ private fun DashboardScreen(
                             fontWeight = FontWeight.SemiBold,
                         )
                         Text(
-                            text = if (sessionSnap.phase == SessionPhase.STOPPED) {
-                                if (installedReady) "Ready to boot • User '$username'" else "Install or import an ARM64 Linux rootfs below"
-                            } else {
-                                "${sessionSnap.statusText} • ${sessionSnap.resolutionText}"
+                            text = when (sessionSnap.phase) {
+                                SessionPhase.STOPPED -> {
+                                    if (installedReady) "Ready to boot • User '$username'" else "Install or import an ARM64 Linux rootfs below"
+                                }
+                                SessionPhase.FAILED -> {
+                                    sessionSnap.errorMessage ?: "Last desktop startup failed — check logs or retry in Safe Mode"
+                                }
+                                SessionPhase.STARTING -> {
+                                    "Step ${sessionSnap.bootStep.coerceAtLeast(1)}/${sessionSnap.bootTotalSteps}: ${sessionSnap.statusText}"
+                                }
+                                else -> {
+                                    "${sessionSnap.statusText} • ${sessionSnap.resolutionText}"
+                                }
                             },
                             style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            color = if (sessionSnap.phase == SessionPhase.FAILED) {
+                                MaterialTheme.colorScheme.error
+                            } else {
+                                MaterialTheme.colorScheme.onSurfaceVariant
+                            },
                         )
                     }
                 }
@@ -316,8 +354,10 @@ private fun DashboardScreen(
                         Spacer(Modifier.width(6.dp))
                         Text(
                             when (sessionSnap.phase) {
+                                SessionPhase.STARTING -> "View Startup Progress"
                                 SessionPhase.RUNNING -> "Open Desktop"
                                 SessionPhase.PAUSED -> "Resume Desktop"
+                                SessionPhase.FAILED -> "Retry Desktop Launch"
                                 else -> "Launch Desktop"
                             }
                         )
@@ -648,6 +688,16 @@ private fun DashboardScreen(
                     onCheckedChange = {
                         fastPathEnabled = it
                         SessionPrefs.setProotFastPath(context, it)
+                    },
+                )
+
+                SettingToggleRow(
+                    title = "PRoot Seccomp Compatibility Mode",
+                    subtitle = "Disables PRoot seccomp filters (PROOT_NO_SECCOMP=1) for strict vendor kernels.",
+                    checked = noSeccompEnabled,
+                    onCheckedChange = {
+                        noSeccompEnabled = it
+                        SessionPrefs.setProotNoSeccomp(context, it)
                     },
                 )
             }

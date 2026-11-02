@@ -1,0 +1,20 @@
+#!/bin/bash
+if [ "${BL_DESKTOP:-}" = "1" ]; then
+  has_wl=0
+  for arg in "$@"; do
+    if [ "$arg" = "--wayland-display" ]; then
+      has_wl=1
+      break
+    fi
+  done
+  if [ "$has_wl" = "0" ]; then
+    set -- \
+      --wayland-display "${LINUXDROID_PARENT_WAYLAND:-wayland-0}" \
+      --socket wayland-1 \
+      --width "${BL_WIDTH:-1920}" \
+      --height "${BL_HEIGHT:-1080}" \
+      --no-lockscreen \
+      "$@"
+  fi
+fi
+exec /usr/bin/kwin_wayland_wrapper "$@"

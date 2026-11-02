@@ -20,51 +20,72 @@ import android.view.ViewGroup
 import android.view.WindowManager
 import android.widget.FrameLayout
 import androidx.activity.ComponentActivity
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.widthIn
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.Dashboard
+import androidx.compose.material.icons.outlined.ErrorOutline
 import androidx.compose.material.icons.outlined.Keyboard
 import androidx.compose.material.icons.outlined.Mouse
 import androidx.compose.material.icons.outlined.Pause
 import androidx.compose.material.icons.outlined.PowerSettingsNew
+import androidx.compose.material.icons.outlined.Refresh
 import androidx.compose.material.icons.outlined.ScreenRotation
 import androidx.compose.material.icons.outlined.Terminal
 import androidx.compose.material.icons.outlined.TouchApp
 import androidx.compose.material3.Button
+import androidx.compose.material3.Card
+import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
+import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.ComposeView
+import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
+import com.linuxdroid.app.gpu.GpuDriverMode
 import com.linuxdroid.app.input.ImeBridge
 import com.linuxdroid.app.input.ImeCaptureView
 import com.linuxdroid.app.input.TrackpadController
@@ -82,6 +103,7 @@ import com.linuxdroid.app.wayland.DisplayRoutingMode
 import com.linuxdroid.app.wayland.InputSpace
 import com.linuxdroid.app.wayland.KeyCodes
 import com.linuxdroid.app.wayland.WaylandCompositor
+import kotlinx.coroutines.delay
 import java.io.File
 
 class SessionActivity : ComponentActivity() {
@@ -121,6 +143,11 @@ class SessionActivity : ComponentActivity() {
             startActivity(Intent(this, FrontEndActivity::class.java).putExtra(FrontEndActivity.EXTRA_SKIP_AUTOBOOT, true))
             finish()
             return
+        }
+
+        // Clear any leftover FAILED snapshot from an earlier attempt when freshly opening SessionActivity
+        if (SessionState.state.value.phase == SessionPhase.FAILED) {
+            SessionState.reset()
         }
 
         touchModeState.value = SessionPrefs.touchInputMode(this)
@@ -211,15 +238,18 @@ class SessionActivity : ComponentActivity() {
                         },
                         onOpenDashboard = {
                             showQuickMenuState.value = false
-                            startActivity(
-                                Intent(this@SessionActivity, FrontEndActivity::class.java)
-                                    .putExtra(FrontEndActivity.EXTRA_SKIP_AUTOBOOT, true)
-                            )
+                            navigateBackToDashboard()
+                        },
+                        onRetryBoot = { safeMode ->
+                            retryBootSession(safeMode = safeMode)
+                        },
+                        onSessionStoppedAfterRun = {
+                            navigateBackToDashboard()
                         },
                         onShutdown = {
                             showQuickMenuState.value = false
                             SessionService.shutdown(this@SessionActivity)
-                            finish()
+                            navigateBackToDashboard()
                         },
                     )
                 }
@@ -391,6 +421,36 @@ class SessionActivity : ComponentActivity() {
         ensureSessionStarted(outW, outH, hz)
     }
 
+    private fun retryBootSession(safeMode: Boolean) {
+        if (safeMode) {
+            SessionPrefs.setGpuMode(this, GpuDriverMode.SOFTWARE)
+            SessionPrefs.setProotFastPath(this, false)
+            SessionPrefs.setProotNoSeccomp(this, true)
+        }
+        val holder = desktopSurfaceView.holder
+        val w = desktopSurfaceView.width.takeIf { it > 0 } ?: 1920
+        val h = desktopSurfaceView.height.takeIf { it > 0 } ?: 1080
+        val (outW, outH) = computeDesktopOutputSize(w, h)
+        val hz = selectBestRefreshRate()
+
+        if (SessionState.isRunningOrPaused) {
+            SessionService.shutdown(this)
+        }
+        SessionState.reset()
+        if (holder.surface != null && holder.surface.isValid) {
+            CompositorHost.attachSurface(holder.surface, outW, outH, hz)
+        }
+        SessionService.startOrResume(this, outW, outH, hz, forceCompat = safeMode)
+    }
+
+    private fun navigateBackToDashboard() {
+        startActivity(
+            Intent(this, FrontEndActivity::class.java)
+                .putExtra(FrontEndActivity.EXTRA_SKIP_AUTOBOOT, true)
+        )
+        finish()
+    }
+
     private fun refreshDisplayRouting() {
         val (mode, extDisplay) = DeXEnvironmentDetector.detectForActivity(this)
         if (mode == DisplayRoutingMode.EXTERNAL_MONITOR_HOTSWAP && extDisplay != null) {
@@ -458,6 +518,8 @@ class SessionActivity : ComponentActivity() {
     }
 
     private fun ensureSessionStarted(width: Int, height: Int, refreshHz: Float) {
+        val phase = SessionState.state.value.phase
+        if (phase == SessionPhase.FAILED || phase == SessionPhase.STOPPING) return
         if (!SessionState.isRunningOrPaused) {
             SessionService.startOrResume(this, width, height, refreshHz)
         } else if (SessionState.isPaused) {
@@ -527,7 +589,7 @@ class SessionActivity : ComponentActivity() {
     }
 }
 
-@OptIn(ExperimentalMaterial3Api::class)
+@OptIn(ExperimentalMaterial3Api::class, ExperimentalLayoutApi::class)
 @Composable
 private fun SessionOverlayUi(
     externalMonitorActive: Boolean,
@@ -541,12 +603,131 @@ private fun SessionOverlayUi(
     onOpenTerminal: () -> Unit,
     onTogglePause: () -> Unit,
     onOpenDashboard: () -> Unit,
+    onRetryBoot: (safeMode: Boolean) -> Unit,
+    onSessionStoppedAfterRun: () -> Unit,
     onShutdown: () -> Unit,
 ) {
     val snap by SessionState.state.collectAsState()
+    var sawActiveDesktop by remember { mutableStateOf(false) }
+    var elapsedSec by remember { mutableIntStateOf(0) }
 
-    // Trackpad UI shown ONLY on the phone screen while outputting desktop fullscreen to an external USB-C/HDMI monitor
-    if (externalMonitorActive) {
+    LaunchedEffect(snap.phase, snap.firstFrameReady) {
+        if (snap.firstFrameReady && (snap.phase == SessionPhase.RUNNING || snap.phase == SessionPhase.PAUSED)) {
+            sawActiveDesktop = true
+        } else if (sawActiveDesktop && snap.phase == SessionPhase.STOPPED) {
+            onSessionStoppedAfterRun()
+        }
+    }
+
+    LaunchedEffect(snap.phase, snap.firstFrameReady, snap.startedAtMs) {
+        if (!snap.firstFrameReady && snap.phase != SessionPhase.FAILED) {
+            val anchor = if (snap.startedAtMs > 0L) snap.startedAtMs else System.currentTimeMillis()
+            while (true) {
+                elapsedSec = ((System.currentTimeMillis() - anchor) / 1000L).toInt().coerceAtLeast(0)
+                delay(500L)
+            }
+        } else {
+            elapsedSec = 0
+        }
+    }
+
+    if (snap.phase == SessionPhase.FAILED) {
+        Box(
+            modifier = Modifier
+                .fillMaxSize()
+                .background(Color(0xFF0B1117))
+                .padding(20.dp),
+            contentAlignment = Alignment.Center,
+        ) {
+            Card(
+                shape = RoundedCornerShape(16.dp),
+                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+                border = BorderStroke(1.dp, MaterialTheme.colorScheme.error.copy(alpha = 0.6f)),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .widthIn(max = 620.dp),
+            ) {
+                Column(
+                    modifier = Modifier
+                        .padding(20.dp)
+                        .verticalScroll(rememberScrollState()),
+                    verticalArrangement = Arrangement.spacedBy(10.dp),
+                ) {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(10.dp),
+                    ) {
+                        Icon(
+                            imageVector = Icons.Outlined.ErrorOutline,
+                            contentDescription = null,
+                            tint = MaterialTheme.colorScheme.error,
+                            modifier = Modifier.size(28.dp),
+                        )
+                        Column {
+                            Text(
+                                text = "Linux Desktop Startup Failed",
+                                style = MaterialTheme.typography.titleMedium,
+                                fontWeight = FontWeight.Bold,
+                            )
+                            Text(
+                                text = snap.errorMessage ?: "The Linux session exited before presenting a desktop frame.",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                        }
+                    }
+
+                    if (snap.bootLogTail.isNotEmpty()) {
+                        Surface(
+                            shape = RoundedCornerShape(8.dp),
+                            color = Color(0xFF070B10),
+                            border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline),
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .heightIn(max = 180.dp),
+                        ) {
+                            Column(
+                                modifier = Modifier
+                                    .padding(10.dp)
+                                    .verticalScroll(rememberScrollState()),
+                            ) {
+                                Text(
+                                    text = snap.bootLogTail.joinToString("\n"),
+                                    fontFamily = FontFamily.Monospace,
+                                    fontSize = 11.sp,
+                                    lineHeight = 15.sp,
+                                    color = Color(0xFFD0D8E4),
+                                )
+                            }
+                        }
+                    }
+
+                    FlowRow(
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        verticalArrangement = Arrangement.spacedBy(8.dp),
+                    ) {
+                        Button(onClick = { onRetryBoot(true) }) {
+                            Icon(Icons.Outlined.Refresh, contentDescription = null)
+                            Spacer(Modifier.width(6.dp))
+                            Text("Retry in Safe Mode")
+                        }
+                        OutlinedButton(onClick = { onRetryBoot(false) }) {
+                            Text("Retry")
+                        }
+                        OutlinedButton(onClick = onOpenTerminal) {
+                            Icon(Icons.Outlined.Terminal, contentDescription = null)
+                            Spacer(Modifier.width(6.dp))
+                            Text("Diagnostic Terminal")
+                        }
+                        TextButton(onClick = onOpenDashboard) {
+                            Text("Back to Dashboard")
+                        }
+                    }
+                }
+            }
+        }
+    } else if (externalMonitorActive) {
+        // Trackpad UI shown ONLY on the phone screen while outputting desktop fullscreen to an external USB-C/HDMI monitor
         Box(
             modifier = Modifier
                 .fillMaxSize()
@@ -591,25 +772,139 @@ private fun SessionOverlayUi(
                 }
             }
         }
-    } else if (!snap.firstFrameReady && (snap.phase == SessionPhase.STARTING || snap.phase == SessionPhase.RUNNING)) {
-        // Minimal boot indicator before first Wayland frame arrives; disappears completely once desktop renders
+    } else if (!snap.firstFrameReady) {
+        // Live step-by-step boot progress indicator (always visible until first Wayland frame arrives; never black)
+        val curStep = snap.bootStep.coerceIn(1, snap.bootTotalSteps.coerceAtLeast(1))
+        val totalSteps = snap.bootTotalSteps.coerceAtLeast(1)
+        val stageTitle = if (snap.phase == SessionPhase.STOPPED || snap.phase == SessionPhase.STOPPING) {
+            "Preparing display surface & session service..."
+        } else {
+            snap.statusText
+        }
+
         Box(
             modifier = Modifier
                 .fillMaxSize()
-                .background(Color(0xFF0B1117)),
+                .background(Color(0xFF0B1117))
+                .padding(20.dp),
             contentAlignment = Alignment.Center,
         ) {
-            Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                CircularProgressIndicator(color = MaterialTheme.colorScheme.primary)
-                Spacer(Modifier.height(16.dp))
-                Text("Starting Linux Desktop...", style = MaterialTheme.typography.titleMedium)
-                if (snap.activeGpuSummary.isNotEmpty()) {
-                    Spacer(Modifier.height(4.dp))
-                    Text(
-                        text = snap.activeGpuSummary,
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+            Card(
+                shape = RoundedCornerShape(16.dp),
+                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+                border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .widthIn(max = 560.dp),
+            ) {
+                Column(
+                    modifier = Modifier.padding(20.dp),
+                    verticalArrangement = Arrangement.spacedBy(10.dp),
+                ) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                    ) {
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(12.dp),
+                        ) {
+                            CircularProgressIndicator(
+                                color = MaterialTheme.colorScheme.primary,
+                                strokeWidth = 2.5.dp,
+                                modifier = Modifier.size(22.dp),
+                            )
+                            Text(
+                                text = "Starting Linux Desktop",
+                                style = MaterialTheme.typography.titleMedium,
+                                fontWeight = FontWeight.SemiBold,
+                            )
+                        }
+                        Text(
+                            text = "Step $curStep/$totalSteps • ${elapsedSec}s",
+                            style = MaterialTheme.typography.labelMedium,
+                            color = MaterialTheme.colorScheme.primary,
+                        )
+                    }
+
+                    LinearProgressIndicator(
+                        progress = { curStep.toFloat() / totalSteps.toFloat() },
+                        modifier = Modifier.fillMaxWidth(),
+                        color = MaterialTheme.colorScheme.primary,
                     )
+
+                    Text(
+                        text = stageTitle,
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurface,
+                    )
+
+                    if (snap.activeGpuSummary.isNotEmpty() || snap.resolutionText.isNotEmpty()) {
+                        val meta = listOf(snap.activeGpuSummary, snap.resolutionText)
+                            .filter { it.isNotEmpty() }
+                            .joinToString(" • ")
+                        Text(
+                            text = meta,
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+
+                    if (snap.bootLogTail.isNotEmpty()) {
+                        Surface(
+                            shape = RoundedCornerShape(8.dp),
+                            color = Color(0xFF070B10),
+                            border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline),
+                            modifier = Modifier.fillMaxWidth(),
+                        ) {
+                            Text(
+                                text = snap.bootLogTail.takeLast(5).joinToString("\n"),
+                                fontFamily = FontFamily.Monospace,
+                                fontSize = 11.sp,
+                                lineHeight = 15.sp,
+                                color = Color(0xFFB8C4D4),
+                                modifier = Modifier.padding(10.dp),
+                            )
+                        }
+                    }
+
+                    if (elapsedSec >= 30) {
+                        Text(
+                            text = "Initializing desktop caches — first boot after installation can take 20–45 seconds.",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.End),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        if (snap.bootStep >= 5 && elapsedSec >= 8) {
+                            TextButton(
+                                onClick = {
+                                    SessionState.update {
+                                        it.copy(
+                                            firstFrameReady = true,
+                                            phase = SessionPhase.RUNNING,
+                                        )
+                                    }
+                                }
+                            ) {
+                                Text("Show Canvas")
+                            }
+                        }
+                        if (elapsedSec >= 15) {
+                            OutlinedButton(onClick = { onRetryBoot(true) }) {
+                                Text("Retry in Safe Mode")
+                            }
+                        }
+                        TextButton(onClick = onOpenDashboard) {
+                            Text("Dashboard")
+                        }
+                    }
                 }
             }
         }

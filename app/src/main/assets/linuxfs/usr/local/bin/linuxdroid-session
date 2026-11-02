@@ -1,11 +1,22 @@
 #!/bin/bash
 set -u
 
+export BL_DESKTOP=1
 export HOME="${HOME:-/home/linux}"
 export USER="${USER:-$(id -un 2>/dev/null || echo linux)}"
 export LOGNAME="$USER"
 export SHELL=/bin/bash
 export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+
+boot_step() {
+  local step_num="$1"
+  local msg="$2"
+  echo "== [BOOT ${step_num}/6] ${msg}"
+  if [ -n "${BL_BOOT_STATUS:-}" ]; then
+    printf '%s|%s\n' "$step_num" "$msg" > "${BL_BOOT_STATUS}.tmp" 2>/dev/null && \
+      mv -f "${BL_BOOT_STATUS}.tmp" "${BL_BOOT_STATUS}" 2>/dev/null || true
+  fi
+}
 
 if [ -n "${BL_LOG:-}" ]; then
   mkdir -p "$(dirname "$BL_LOG")" 2>/dev/null || true
@@ -15,6 +26,8 @@ if [ -n "${BL_LOG:-}" ]; then
   exec >>"$BL_LOG" 2>&1
   echo "== linuxdroid-session $(date -u '+%Y-%m-%d %H:%M:%S UTC') user=$USER uid=$(id -u) ${BL_WIDTH:-1920}x${BL_HEIGHT:-1080}@${BL_REFRESH:-60}"
 fi
+
+boot_step 4 "Preparing Ubuntu environment, locale & system D-Bus..."
 
 sync_timezone() {
   local zone="${TZ:-}"
@@ -48,10 +61,16 @@ fi
 mkdir -p /tmp/.X11-unix /tmp/.ICE-unix /dev/shm
 chmod 1777 /tmp/.X11-unix /tmp/.ICE-unix /dev/shm 2>/dev/null || true
 
-export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/tmp/runtime-$USER}"
-mkdir -p "$XDG_RUNTIME_DIR"
+export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/linuxdroid}"
+mkdir -p "$XDG_RUNTIME_DIR" 2>/dev/null || true
 chmod 700 "$XDG_RUNTIME_DIR" 2>/dev/null || true
-find "$XDG_RUNTIME_DIR" -mindepth 1 -maxdepth 1 ! -name 'wayland-0*' ! -name 'pulse*' ! -name 'gvfs*' ! -name 'virgl*' -exec rm -rf {} + 2>/dev/null || true
+find "$XDG_RUNTIME_DIR" -mindepth 1 -maxdepth 1 \
+  ! -name 'wayland-0*' \
+  ! -name 'keymap.xkb' \
+  ! -name 'pulse*' \
+  ! -name 'gvfs*' \
+  ! -name 'virgl*' \
+  -exec rm -rf {} + 2>/dev/null || true
 
 export XDG_DATA_HOME="${XDG_DATA_HOME:-$HOME/.local/share}"
 export XDG_CONFIG_HOME="${XDG_CONFIG_HOME:-$HOME/.config}"
@@ -131,9 +150,15 @@ BUSCONF
 }
 start_system_bus
 
+wl_sock="$XDG_RUNTIME_DIR/${WAYLAND_DISPLAY:-wayland-0}"
 for _ in $(seq 1 100); do
-  [ -S "$XDG_RUNTIME_DIR/${WAYLAND_DISPLAY:-wayland-0}" ] && break
+  [ -S "$wl_sock" ] && break
   sleep 0.05
 done
+
+if [ ! -S "$wl_sock" ]; then
+  echo "ERROR: Android Wayland compositor socket not found at $wl_sock"
+  exit 2
+fi
 
 exec /usr/local/bin/linuxdroid-desktop "$@"
