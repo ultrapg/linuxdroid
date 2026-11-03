@@ -1,5 +1,6 @@
 package com.linuxdroid.app.ui
 
+import android.app.Activity
 import android.os.Build
 import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.material3.MaterialTheme
@@ -8,6 +9,10 @@ import androidx.compose.material3.dynamicDarkColorScheme
 import androidx.compose.material3.dynamicLightColorScheme
 import androidx.compose.material3.lightColorScheme
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.SideEffect
+import androidx.compose.ui.graphics.luminance
+import androidx.compose.ui.platform.LocalView
+import androidx.core.view.WindowCompat
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 
@@ -61,6 +66,21 @@ fun LinuxDroidTheme(dynamic: Boolean = false, content: @Composable () -> Unit) {
             if (dark) dynamicDarkColorScheme(ctx) else dynamicLightColorScheme(ctx)
         } else {
             if (dark) DarkScheme else LightScheme
+        }
+    }
+    if (dynamic) {
+        // Keep status/navigation bar icons readable: dark icons on light backgrounds, light icons on dark.
+        val view = LocalView.current
+        val lightBackground = colorScheme.background.luminance() > 0.5f
+        if (!view.isInEditMode) {
+            SideEffect {
+                val window = (view.context as? Activity)?.window
+                if (window != null) {
+                    val controller = WindowCompat.getInsetsController(window, view)
+                    controller.isAppearanceLightStatusBars = lightBackground
+                    controller.isAppearanceLightNavigationBars = lightBackground
+                }
+            }
         }
     }
     MaterialTheme(
