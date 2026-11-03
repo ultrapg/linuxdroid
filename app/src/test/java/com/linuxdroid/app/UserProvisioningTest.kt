@@ -19,6 +19,9 @@ class UserProvisioningTest {
         assertEquals("linux", UserProvisioner.sanitizeUsername("root"))
         assertEquals("linux", UserProvisioner.sanitizeUsername("123bad"))
         assertEquals("dev_user", UserProvisioner.sanitizeUsername("Dev_User"))
+        assertEquals("john-doe", UserProvisioner.sanitizeUsername("John Doe"))
+        assertEquals("my-user-name", UserProvisioner.sanitizeUsername("  my   user name "))
+        assertEquals("linux", UserProvisioner.sanitizeUsername("   "))
     }
 
     @Test

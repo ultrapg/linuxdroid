@@ -1,0 +1,13 @@
+#!/bin/bash
+# LinuxDroid: Chromium-based browsers cannot create their namespace sandbox under PRoot, so launch the real
+# binary (found later in PATH) with the sandbox disabled.
+name="$(basename "$0")"
+IFS=: read -ra dirs <<< "$PATH"
+for d in "${dirs[@]}"; do
+  [ "$d" = "/usr/local/bin" ] && continue
+  if [ -x "$d/$name" ]; then
+    exec "$d/$name" --no-sandbox --disable-gpu-sandbox --disable-dev-shm-usage "$@"
+  fi
+done
+echo "$name: command not found" >&2
+exit 127

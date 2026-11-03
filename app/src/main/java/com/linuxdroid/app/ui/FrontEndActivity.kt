@@ -583,8 +583,10 @@ private fun DashboardScreen(
                             },
                             username = username,
                             onUsernameChange = {
-                                username = it
-                                SessionPrefs.setUsername(context, it)
+                                if (it.isNotBlank()) {
+                                    SessionPrefs.setUsername(context, it)
+                                    username = SessionPrefs.username(context)
+                                }
                             },
                             customMounts = customMounts,
                             onPickFolder = { folderPickerLauncher.launch(null) },
@@ -1609,10 +1611,19 @@ private fun SystemTabContent(
             onCheckedChange = onToggleAutoBoot,
         )
         Spacer(Modifier.height(10.dp))
+        var usernameInput by remember { mutableStateOf(username) }
         OutlinedTextField(
-            value = username,
-            onValueChange = onUsernameChange,
-            label = { Text("Linux Username (passwordless sudo)", maxLines = 1, overflow = TextOverflow.Ellipsis) },
+            value = usernameInput,
+            onValueChange = {
+                usernameInput = it
+                onUsernameChange(it)
+            },
+            label = { Text("Linux username", maxLines = 1, overflow = TextOverflow.Ellipsis) },
+            supportingText = {
+                Text(
+                    if (usernameInput.trim() != username) "Will be created as \"$username\"" else "Has passwordless sudo",
+                )
+            },
             singleLine = true,
             modifier = Modifier.fillMaxWidth(),
         )

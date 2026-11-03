@@ -100,12 +100,20 @@ start_x11_helpers() {
 # Remove task manager launchers whose .desktop file is not installed (Plasma's default pins Discover,
 # which would show up as a blank icon). Handles existing configs on disk and the live shell config.
 prune_missing_launchers() {
-  local rc="$HOME/.config/plasma-org.kde.plasma.desktop-appletsrc" app
-  if [ -f "$rc" ] && [ ! -e /usr/share/applications/org.kde.discover.desktop ]; then
-    sed -i -E '/^launchers=/ { s#,applications:org\.kde\.discover\.desktop##g; s#=applications:org\.kde\.discover\.desktop,?#=#; }' "$rc" 2>/dev/null || true
+  local rc="$HOME/.config/plasma-org.kde.plasma.desktop-appletsrc"
+  local stamp="$HOME/.local/share/linuxdroid/launchers-v2" first=1
+  [ -e "$stamp" ] && first=0
+  if [ -f "$rc" ]; then
+    if [ ! -e /usr/share/applications/org.kde.discover.desktop ]; then
+      sed -i -E '/^launchers=/ { s#,applications:org\.kde\.discover\.desktop##g; s#=applications:org\.kde\.discover\.desktop,?#=#; }' "$rc" 2>/dev/null || true
+    fi
+    # An empty launchers list hides every pinned icon; drop it so Plasma falls back to its defaults.
+    sed -i '/^launchers=$/d' "$rc" 2>/dev/null || true
   fi
-  [ -e /usr/share/applications/org.kde.discover.desktop ] && return 0
   local js='
+    var defaults = "applications:systemsettings.desktop,applications:org.kde.discover.desktop,preferred://filemanager,preferred://browser";
+    var dropDiscover = '"$([ -e /usr/share/applications/org.kde.discover.desktop ] && echo false || echo true)"';
+    var repairEmpty = '"$([ "$first" = 1 ] && echo true || echo false)"';
     var ps = panels();
     for (var i = 0; i < ps.length; i++) {
       var ws = ps[i].widgets();
@@ -113,9 +121,14 @@ prune_missing_launchers() {
         var w = ws[j];
         if (w.type == "org.kde.plasma.icontasks" || w.type == "org.kde.plasma.taskmanager") {
           w.currentConfigGroup = ["General"];
-          var cur = String(w.readConfig("launchers", "applications:systemsettings.desktop,applications:org.kde.discover.desktop,preferred://filemanager,preferred://browser"));
-          var keep = cur.split(",").filter(function (l) { return l.indexOf("org.kde.discover.desktop") < 0 && l.length > 0; });
-          w.writeConfig("launchers", keep.join(","));
+          var cur = String(w.readConfig("launchers", defaults));
+          if (cur.length == 0 && repairEmpty) { cur = defaults; }
+          if (cur.length == 0) { continue; }
+          var keep = cur.split(",").filter(function (l) {
+            return l.length > 0 && !(dropDiscover && l.indexOf("org.kde.discover.desktop") >= 0);
+          });
+          if (keep.length > 0 && keep.join(",") != cur) { w.writeConfig("launchers", keep.join(",")); }
+          else if (keep.length > 0 && String(w.readConfig("launchers", "")).length == 0) { w.writeConfig("launchers", keep.join(",")); }
         }
       }
     }'
@@ -226,6 +239,7 @@ ENTRY
           dbus-send --session --dest=org.kde.KWin --type=method_call /VirtualKeyboard org.freedesktop.DBus.Properties.Set string:"org.kde.kwin.VirtualKeyboard" string:"enabled" variant:boolean:true >/dev/null 2>&1 || true
           sleep 0.2
           prune_missing_launchers
+          mkdir -p "$HOME/.local/share/linuxdroid" && : > "$HOME/.local/share/linuxdroid/launchers-v2"
           write_status "READY|KDE Plasma desktop ready" "== [BOOT READY] KDE Plasma desktop ready"
           break
         fi

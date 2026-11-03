@@ -416,6 +416,7 @@ try:
     assert "Warehouse (Flatpak Store)" in r_apps.stdout
     for expected_id in (
         "warehouse",
+        "chromium",
         "fex-rootfs",
         "vscode",
         "vscodium",

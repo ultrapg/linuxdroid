@@ -96,11 +96,15 @@ object UserProvisioner {
     }
 
     fun sanitizeUsername(raw: String?): String {
-        val trimmed = raw?.trim()?.lowercase().orEmpty()
-        if (trimmed.isEmpty() || trimmed == "root" || !USERNAME_REGEX.matches(trimmed)) {
+        // Linux usernames cannot contain spaces, so "John Doe" becomes "john-doe"; other invalid characters are dropped.
+        val cleaned = raw?.trim()?.lowercase().orEmpty()
+            .replace(Regex("\\s+"), "-")
+            .replace(Regex("[^a-z0-9_-]"), "")
+            .take(31)
+        if (cleaned.isEmpty() || cleaned == "root" || !USERNAME_REGEX.matches(cleaned)) {
             return "linux"
         }
-        return trimmed
+        return cleaned
     }
 
     fun sanitizeMountName(raw: String?): String {

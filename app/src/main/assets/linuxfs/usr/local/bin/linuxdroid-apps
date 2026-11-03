@@ -6,6 +6,7 @@ export FLATPAK_BWRAP="/usr/local/bin/bwrap"
 ALL_ITEMS=(
   "warehouse|Warehouse (Flatpak Store) — Flatpak + Flathub + Warehouse GUI"
   "fex-rootfs|FEX-Emu Ubuntu 24.04 x86_64 RootFS (Run x86_64 Linux Apps)"
+  "chromium|Chromium (Web Browser, ARM64)"
   "vscode|Visual Studio Code (Official ARM64)"
   "vscodium|VSCodium (Open-Source ARM64)"
   "blender|Blender (3D Creation Suite)"
@@ -34,6 +35,9 @@ is_installed() {
     fex-rootfs)
       compgen -G "${HOME:-/home/linux}/.fex-emu/RootFS/*Ubuntu*" >/dev/null 2>&1 || \
       [ -f "${HOME:-/home/linux}/.fex-emu/Config.json" ]
+      ;;
+    chromium)
+      command -v chromium >/dev/null 2>&1
       ;;
     vscode)
       command -v code >/dev/null 2>&1
@@ -132,6 +136,27 @@ chmod 644 /usr/share/applications/io.github.flattool.Warehouse.desktop'
 install_fex_rootfs() {
   echo "==> Fetching FEX-Emu Ubuntu 24.04 x86_64 RootFS..."
   /usr/local/bin/linuxdroid-fex fetch-rootfs
+}
+
+install_chromium() {
+  echo "==> Installing Chromium (ARM64, non-Snap build from the xtradeb PPA)..."
+  sudo sh -c '
+    apt-get update
+    apt-get install -y software-properties-common ca-certificates
+    add-apt-repository -y ppa:xtradeb/apps
+    # Ubuntu ships chromium-browser as a Snap stub that cannot run here; prefer the PPA package.
+    printf "%s\n" "Package: chromium*" "Pin: release o=LP-PPA-xtradeb-apps" "Pin-Priority: 1001" "" \
+      "Package: chromium-browser" "Pin: release *" "Pin-Priority: -1" > /etc/apt/preferences.d/linuxdroid-chromium
+    apt-get update
+    apt-get install -y chromium
+    mkdir -p /etc/chromium.d
+    printf "%s\n" "export CHROMIUM_FLAGS=\"\$CHROMIUM_FLAGS --no-sandbox --disable-gpu-sandbox --disable-dev-shm-usage --ozone-platform-hint=auto\"" \
+      > /etc/chromium.d/linuxdroid
+    f=/usr/share/applications/chromium.desktop
+    if [ -f "$f" ] && ! grep -q -- "--no-sandbox" "$f"; then
+      sed -i "s#^Exec=\([^ ]*chromium[^ ]*\)#Exec=\1 --no-sandbox --disable-gpu-sandbox --disable-dev-shm-usage --ozone-platform-hint=auto#" "$f"
+    fi
+  '
 }
 
 install_vscodium() {
@@ -235,6 +260,7 @@ run_action() {
   case "${1:-}" in
     warehouse|flatpak|flathub) install_warehouse ;;
     fex-rootfs) install_fex_rootfs ;;
+    chromium|chrome) install_chromium ;;
     vscode) install_vscode ;;
     vscodium) install_vscodium ;;
     blender) install_blender ;;
@@ -258,7 +284,7 @@ run_action() {
       return 0
       ;;
     *)
-      echo "Usage: linuxdroid-apps [warehouse | fex-rootfs | vscode | vscodium | blender | krita | obs-studio | kdenlive | libreoffice | gimp | devtools | rust | golang | openjdk | docker-cli | podman | --list]"
+      echo "Usage: linuxdroid-apps [warehouse | fex-rootfs | chromium | vscode | vscodium | blender | krita | obs-studio | kdenlive | libreoffice | gimp | devtools | rust | golang | openjdk | docker-cli | podman | --list]"
       return 1
       ;;
   esac

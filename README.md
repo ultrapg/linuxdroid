@@ -51,6 +51,7 @@ Inside the Linux desktop, launch **LinuxDroid Workstation Setup** from the appli
 
 ```bash
 linuxdroid-apps warehouse    # Install Flatpak + Flathub + Warehouse (Flatpak Store)
+linuxdroid-apps chromium      # Install Chromium (ARM64, non-Snap)
 linuxdroid-apps fex-rootfs   # Download Ubuntu 24.04 x86_64 RootFS for FEX-Emu
 linuxdroid-apps vscode       # Install official ARM64 Visual Studio Code
 linuxdroid-apps vscodium     # Install open-source ARM64 VSCodium
