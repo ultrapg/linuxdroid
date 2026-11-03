@@ -369,12 +369,14 @@ int execv(const char *path, char *const argv_in[]) {
 }
 
 int posix_spawn(pid_t *pid, const char *path, const posix_spawn_file_actions_t *fa,
-                const posix_spawnattr_t *attr, char *const argv[], char *const envp[]) {
+                const posix_spawnattr_t *attr, char *const argv_in[], char *const envp_in[]) {
   const char *base = strrchr(path, '/');
   base = base ? base + 1 : path;
   if (strcmp(base, "lsof") == 0 && !fa) {
-    return answer_lsof_via_spawn(path, argv, pid);
+    return answer_lsof_via_spawn(path, argv_in, pid);
   }
+  char *const *argv = bl_webhelper_argv(path, argv_in);
+  char *const *envp = bl_webhelper_envp(path, argv, envp_in);
   static spawn_fn real;
   if (!real) real = (spawn_fn)dlsym(RTLD_NEXT, "posix_spawn");
   return bl_binfmt_spawn(pid, path, fa, attr, argv, envp, real);

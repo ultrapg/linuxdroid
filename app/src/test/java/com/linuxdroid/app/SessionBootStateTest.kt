@@ -120,14 +120,25 @@ class SessionBootStateTest {
 
         assertTrue(paths.contains("usr/local/bin/kwin_wayland_wrapper"))
         assertTrue(paths.contains("usr/local/bin/linuxdroid-gpu"))
+        assertTrue(paths.contains("usr/lib/firefox/defaults/pref/linuxdroid.js"))
+        assertTrue(paths.contains("usr/lib/firefox/linuxdroid.cfg"))
         assertTrue(paths.contains("etc/xdg/startkderc"))
         assertTrue(paths.contains("etc/xdg/ksplashrc"))
         assertTrue(paths.contains("etc/xdg/kwinrc"))
         assertTrue(paths.contains("etc/xdg/autostart/powerdevil.desktop"))
 
+        val firefoxPrefs = File(assetsRoot, "usr/lib/firefox/defaults/pref/linuxdroid.js").readText()
+        assertTrue("Firefox prefs must load linuxdroid.cfg AutoConfig", firefoxPrefs.contains("general.config.filename"))
+        assertTrue("Firefox prefs must disable e10s content process crash path under PRoot", firefoxPrefs.contains("browser.tabs.remote.autostart\", false"))
+
+        val firefoxCfg = File(assetsRoot, "usr/lib/firefox/linuxdroid.cfg").readText()
+        assertTrue("Firefox AutoConfig must suppress SandboxUtils warning banner", firefoxCfg.contains("maybeWarnAboutDisabledContentSandbox"))
+
         val desktopScript = File(assetsRoot, "usr/local/bin/linuxdroid-desktop").readText()
         assertTrue("linuxdroid-desktop must emit READY| status when desktop shell maps", desktopScript.contains("READY|"))
         assertTrue("linuxdroid-desktop must disable KWin PRoot permission mismatch checks", desktopScript.contains("KWIN_WAYLAND_NO_PERMISSION_CHECKS=1"))
+        assertTrue("linuxdroid-desktop must export MOZ_FORCE_DISABLE_E10S=1", desktopScript.contains("MOZ_FORCE_DISABLE_E10S=1"))
+        assertTrue("linuxdroid-desktop must export ELECTRON_DISABLE_SANDBOX=1", desktopScript.contains("ELECTRON_DISABLE_SANDBOX=1"))
 
         val sessionScript = File(assetsRoot, "usr/local/bin/linuxdroid-session").readText()
         assertTrue("linuxdroid-session must preserve keymap.xkb in XDG_RUNTIME_DIR", sessionScript.contains("keymap.xkb"))

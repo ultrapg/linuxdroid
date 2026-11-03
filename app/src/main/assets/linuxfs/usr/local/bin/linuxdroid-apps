@@ -14,6 +14,9 @@ install_vscodium() {
     echo "deb [ signed-by=/usr/share/keyrings/vscodium-archive-keyring.gpg ] https://download.vscodium.com/debs vscodium main" \
       > /etc/apt/sources.list.d/vscodium.list
     apt-get update && apt-get install -y codium
+    if [ -f /usr/share/applications/codium.desktop ]; then
+      sed -i "s|/usr/share/codium/codium |/usr/share/codium/codium --no-sandbox --disable-gpu-sandbox |g" /usr/share/applications/codium.desktop
+    fi
   '
 }
 
@@ -25,6 +28,9 @@ install_vscode() {
     echo "deb [arch=arm64 signed-by=/usr/share/keyrings/packages.microsoft.gpg] https://packages.microsoft.com/repos/code stable main" \
       > /etc/apt/sources.list.d/vscode.list
     apt-get update && apt-get install -y code
+    if [ -f /usr/share/applications/code.desktop ]; then
+      sed -i "s|/usr/share/code/code |/usr/share/code/code --no-sandbox --disable-gpu-sandbox |g" /usr/share/applications/code.desktop
+    fi
   '
 }
 

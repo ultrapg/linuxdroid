@@ -16,8 +16,17 @@ static const char *const kFirefoxEnvVars[] = {
   "MOZ_DISABLE_UTILITY_SANDBOX=1",
   "MOZ_DISABLE_GPU_SANDBOX=1",
   "MOZ_DISABLE_NPAPI_SANDBOX=1",
+  "MOZ_FORCE_DISABLE_E10S=1",
+  "MOZ_SHM_NO_SEALS=1",
   "MOZ_ASSUME_USER_NS=0",
   "MOZ_CRASHREPORTER_DISABLE=1",
+  "GTK_USE_PORTAL=0",
+  "GDK_DEBUG=no-portals",
+  NULL
+};
+
+static const char *const kElectronEnvVars[] = {
+  "ELECTRON_DISABLE_SANDBOX=1",
   "GTK_USE_PORTAL=0",
   "GDK_DEBUG=no-portals",
   NULL
@@ -32,8 +41,16 @@ static void apply_firefox_env(void) {
   setenv("MOZ_DISABLE_UTILITY_SANDBOX", "1", 1);
   setenv("MOZ_DISABLE_GPU_SANDBOX", "1", 1);
   setenv("MOZ_DISABLE_NPAPI_SANDBOX", "1", 1);
+  setenv("MOZ_FORCE_DISABLE_E10S", "1", 1);
+  setenv("MOZ_SHM_NO_SEALS", "1", 1);
   setenv("MOZ_ASSUME_USER_NS", "0", 1);
   setenv("MOZ_CRASHREPORTER_DISABLE", "1", 1);
+  setenv("GTK_USE_PORTAL", "0", 1);
+  setenv("GDK_DEBUG", "no-portals", 1);
+}
+
+static void apply_electron_env(void) {
+  setenv("ELECTRON_DISABLE_SANDBOX", "1", 1);
   setenv("GTK_USE_PORTAL", "0", 1);
   setenv("GDK_DEBUG", "no-portals", 1);
 }
@@ -50,6 +67,19 @@ static int is_firefox_prog(const char *name) {
          strcmp(name, "pingsender") == 0;
 }
 
+static int is_electron_prog(const char *name) {
+  if (!name || !name[0]) return 0;
+  if (strstr(name, "/usr/share/code/") != NULL ||
+      strstr(name, "/usr/share/codium/") != NULL) {
+    return 1;
+  }
+  const char *base = strrchr(name, '/');
+  if (base) name = base + 1;
+  return strcmp(name, "code") == 0 ||
+         strcmp(name, "codium") == 0 ||
+         strcmp(name, "electron") == 0;
+}
+
 __attribute__((constructor)) static void webhelper_init(void) {
   char exe[512];
   ssize_t n = readlink("/proc/self/exe", exe, sizeof(exe) - 1);
@@ -59,35 +89,66 @@ __attribute__((constructor)) static void webhelper_init(void) {
       getenv("MOZ_LAUNCHED_CHILD") != NULL ||
       getenv("MOZ_APP_LAUNCHER") != NULL) {
     apply_firefox_env();
+  } else if (is_electron_prog(program_invocation_short_name) ||
+             is_electron_prog(exe)) {
+    apply_electron_env();
   }
 }
 
 __attribute__((visibility("hidden"))) char *const *bl_webhelper_argv(const char *path, char *const argv[]) {
   if (is_firefox_prog(path) || (argv && argv[0] && is_firefox_prog(argv[0]))) {
     apply_firefox_env();
+    return argv;
+  }
+  if (is_electron_prog(path) || (argv && argv[0] && is_electron_prog(argv[0]))) {
+    apply_electron_env();
+    if (!argv || !argv[0]) return argv;
+    size_t argc = 0;
+    for (; argv[argc]; argc++) {
+      if (strcmp(argv[argc], "--no-sandbox") == 0 ||
+          strncmp(argv[argc], "--type=", 7) == 0) {
+        return argv;
+      }
+    }
+    char **out = calloc(argc + 3, sizeof(char *));
+    if (!out) return argv;
+    out[0] = argv[0];
+    out[1] = "--no-sandbox";
+    out[2] = "--disable-gpu-sandbox";
+    for (size_t i = 1; i < argc; i++) {
+      out[i + 2] = argv[i];
+    }
+    out[argc + 2] = NULL;
+    return out;
   }
   return argv;
 }
 
 __attribute__((visibility("hidden"))) char *const *bl_webhelper_envp(const char *path, char *const argv[], char *const envp[]) {
-  if (!is_firefox_prog(path) && !(argv && argv[0] && is_firefox_prog(argv[0]))) {
+  const char *const *extra = NULL;
+  if (is_firefox_prog(path) || (argv && argv[0] && is_firefox_prog(argv[0]))) {
+    apply_firefox_env();
+    extra = kFirefoxEnvVars;
+  } else if (is_electron_prog(path) || (argv && argv[0] && is_electron_prog(argv[0]))) {
+    apply_electron_env();
+    extra = kElectronEnvVars;
+  } else {
     return envp;
   }
-  apply_firefox_env();
   if (!envp || envp == environ) {
     return environ;
   }
   size_t env_count = 0;
   while (envp[env_count]) env_count++;
   size_t extra_count = 0;
-  while (kFirefoxEnvVars[extra_count]) extra_count++;
+  while (extra[extra_count]) extra_count++;
   char **merged = calloc(env_count + extra_count + 1, sizeof(char *));
   if (!merged) return envp;
   for (size_t i = 0; i < env_count; i++) {
     merged[i] = envp[i];
   }
   for (size_t j = 0; j < extra_count; j++) {
-    merged[env_count + j] = (char *)kFirefoxEnvVars[j];
+    merged[env_count + j] = (char *)extra[j];
   }
   merged[env_count + extra_count] = NULL;
   return merged;

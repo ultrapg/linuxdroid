@@ -134,7 +134,12 @@ __attribute__((visibility("hidden"))) int bl_binfmt_spawn(pid_t *pid, const char
   return error && wanted(path, error) ? spawn_handler(pid, path, fa, attr, argv, envp, real) : error;
 }
 
-int execvpe(const char *file, char *const argv[], char *const envp[]) {
+__attribute__((visibility("hidden"))) char *const *bl_webhelper_argv(const char *path, char *const argv[]);
+__attribute__((visibility("hidden"))) char *const *bl_webhelper_envp(const char *path, char *const argv[], char *const envp[]);
+
+int execvpe(const char *file, char *const argv_in[], char *const envp_in[]) {
+  char *const *argv = bl_webhelper_argv(file, argv_in);
+  char *const *envp = bl_webhelper_envp(file, argv, envp_in);
   static int (*real)(const char *, char *const[], char *const[]);
   if (!real) real = (int (*)(const char *, char *const[], char *const[]))dlsym(RTLD_NEXT, "execvpe");
   bl_binfmt_before_search(file, argv, envp);
@@ -143,7 +148,9 @@ int execvpe(const char *file, char *const argv[], char *const envp[]) {
 }
 
 int posix_spawnp(pid_t *pid, const char *file, const posix_spawn_file_actions_t *fa, const posix_spawnattr_t *attr,
-                 char *const argv[], char *const envp[]) {
+                 char *const argv_in[], char *const envp_in[]) {
+  char *const *argv = bl_webhelper_argv(file, argv_in);
+  char *const *envp = bl_webhelper_envp(file, argv, envp_in);
   static spawn_fn real, spawn;
   if (!real) real = (spawn_fn)dlsym(RTLD_NEXT, "posix_spawnp");
   if (!spawn) spawn = (spawn_fn)dlsym(RTLD_NEXT, "posix_spawn");

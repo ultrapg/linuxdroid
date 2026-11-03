@@ -1,11 +1,17 @@
 // LinuxDroid Firefox runtime defaults for Android PRoot (X11/Xwayland + Wayland)
+pref("general.config.filename", "linuxdroid.cfg");
+pref("general.config.obscure_value", 0);
+pref("general.config.sandbox_enabled", false);
 pref("security.sandbox.content.level", 0);
 pref("security.sandbox.gmp.level", 0);
 pref("security.sandbox.rdd.level", 0);
 pref("security.sandbox.socket.process.level", 0);
 pref("security.sandbox.utility.level", 0);
 pref("security.sandbox.gpu.level", 0);
+pref("security.sandbox.warn_unprivileged_namespaces", false);
 pref("dom.ipc.forkserver.enable", false);
+pref("browser.tabs.remote.autostart", false);
+pref("fission.autostart", false);
 pref("gfx.webrender.software", true);
 pref("gfx.webrender.all", false);
 pref("layers.acceleration.disabled", true);
@@ -23,5 +29,4 @@ pref("widget.use-xdg-desktop-portal.open-uri", 0);
 pref("browser.shell.checkDefaultBrowser", false);
 pref("datareporting.healthreport.uploadEnabled", false);
 pref("toolkit.telemetry.unified", false);
-pref("browser.tabs.remote.autostart", true);
-pref("dom.ipc.processCount", 2);
+pref("dom.ipc.processCount", 1);

@@ -243,7 +243,14 @@ object LinuxRuntime {
             specs.add("${sdcard.absolutePath}:/sdcard")
         }
 
-        val shm = File(liveDir(context), "shm").apply { mkdirs() }
+        val shm = File(liveDir(context), "shm").apply {
+            mkdirs()
+            FileUtils.chmod(this, 0b1_111_111_111)
+        }
+        File(root, "dev/shm").apply {
+            mkdirs()
+            FileUtils.chmod(this, 0b1_111_111_111)
+        }
         specs.add("${shm.absolutePath}:/dev/shm")
 
         if (batterySysfsDir != null) {

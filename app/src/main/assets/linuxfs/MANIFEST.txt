@@ -18,6 +18,7 @@
 0644 etc/xdg/powerdevilrc
 0644 etc/xdg/startkderc
 0644 usr/lib/firefox/defaults/pref/linuxdroid.js
+0644 usr/lib/firefox/linuxdroid.cfg
 0755 usr/local/bin/kwin_wayland_wrapper
 0755 usr/local/bin/linuxdroid-apps
 0755 usr/local/bin/linuxdroid-bookmarks

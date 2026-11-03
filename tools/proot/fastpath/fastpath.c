@@ -544,6 +544,8 @@ static long proc_readlink(const struct res *r, char *text, size_t size, int *cha
 }
 
 static int fd_link(const char *g) {
+  if (strncmp(g, "/proc/self/fd/", 14) == 0 && g[14] >= '0' && g[14] <= '9') return 1;
+  if (strncmp(g, "/proc/thread-self/fd/", 21) == 0 && g[21] >= '0' && g[21] <= '9') return 1;
   const char *p = g + 6;
   if (strncmp(g, "/proc/", 6) != 0 || *p < '1' || *p > '9') return 0;
   while (*p >= '0' && *p <= '9') p++;
@@ -1717,16 +1719,7 @@ int isatty(int fd) {
   return r == 0;
 }
 
-int memfd_create(const char *name, unsigned flags) {
-  REAL(memfd_create, int (*)(const char *, unsigned));
-  if (!name || !strncmp(name, "JITCode:", 8) || !strcmp(name, "opcache_lock") || !strncmp(name, "lib/apk/exec/", 13)
-      || !fp_ready()) return real_memfd_create(name, flags);
-  long r = sc(SYS_memfd_create, (long)name, flags, 0, 0, 0);
-  if (r == -ENOSYS) return real_memfd_create(name, flags);
-  hits++;
-  return ret(r);
-}
-
+static long fp_open(int dirfd, const char *path, int flags, mode_t mode);
 
 static long read_small(const char *path, char *buf, size_t size) {
   long fd = fp_open(AT_FDCWD, path, O_RDONLY | O_CLOEXEC, 0);
