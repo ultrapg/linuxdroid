@@ -37,7 +37,8 @@ is_installed() {
       [ -f "${HOME:-/home/linux}/.fex-emu/Config.json" ]
       ;;
     chromium)
-      command -v chromium >/dev/null 2>&1
+      # /usr/local/bin/chromium is only a sandbox-disabling shim, so check for the real binary.
+      [ -x /usr/bin/chromium ] || [ -x /usr/lib/chromium/chromium ] || [ -x /usr/lib/chromium-browser/chromium-browser ] && ! grep -qs "snap" /usr/bin/chromium
       ;;
     vscode)
       command -v code >/dev/null 2>&1
