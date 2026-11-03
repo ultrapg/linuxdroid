@@ -185,6 +185,15 @@ ENTRY
     # KWin Wayland applies native --scale $SCALE directly to Wayland outputs, so forceFontDPI must stay 0
     # to avoid double-multiplying font sizes.
     "$KWRITECONFIG" --file kcmfonts --group General --key forceFontDPI 0 2>/dev/null || true
+    # One-time desktop-style defaults (applied once so later user changes are kept): double-click to open
+    # files, and a snappy hardware keyboard repeat rate for external keyboards.
+    tuned_stamp="$HOME/.local/share/linuxdroid/desktop-tuned-v1"
+    if [ ! -e "$tuned_stamp" ]; then
+      "$KWRITECONFIG" --file kdeglobals --group KDE --key SingleClick false 2>/dev/null || true
+      "$KWRITECONFIG" --file kcminputrc --group Keyboard --key RepeatDelay 300 2>/dev/null || true
+      "$KWRITECONFIG" --file kcminputrc --group Keyboard --key RepeatRate 30 2>/dev/null || true
+      mkdir -p "${tuned_stamp%/*}" && : > "$tuned_stamp"
+    fi
   fi
 
   echo "== linuxdroid-desktop: starting KDE Plasma Wayland (logical=${WIDTH}x${HEIGHT}, pixel=${PIXEL_WIDTH}x${PIXEL_HEIGHT}, scale=${SCALE}, KWIN_COMPOSE=${KWIN_COMPOSE})"

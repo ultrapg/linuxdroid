@@ -1,6 +1,10 @@
 package com.linuxdroid.app.ui
 
 import android.app.Presentation
+import android.view.PointerIcon
+import androidx.compose.material3.FilledTonalButton
+import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.snapshotFlow
 import android.content.Context
 import android.content.Intent
 import android.content.pm.ActivityInfo
@@ -143,6 +147,8 @@ class SessionActivity : ComponentActivity() {
     private val externalMonitorLabelState = mutableStateOf<String?>(null)
     private val temporaryPhoneFallbackState = mutableStateOf(false)
     private val phoneScreenDimmedState = mutableStateOf(false)
+    private val blackoutTouchTick = mutableIntStateOf(0)
+    private var pointerCaptured = false
     private val touchModeState = mutableStateOf(TouchInputMode.TOUCHSCREEN)
     private val showFloatingControlsState = mutableStateOf(false)
 
@@ -253,6 +259,7 @@ class SessionActivity : ComponentActivity() {
                         routingMode = routingModeState.value,
                         externalMonitorLabel = externalMonitorLabelState.value,
                         phoneDimmed = phoneScreenDimmedState.value,
+                        blackoutTouchTick = blackoutTouchTick.intValue,
                         showQuickMenu = showQuickMenuState.value,
                         showFloatingControls = showFloatingControlsState.value,
                         imeVisible = imeVisible,
@@ -362,10 +369,21 @@ class SessionActivity : ComponentActivity() {
             overlayCompose,
             FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT)
         )
+        // Linux draws its own cursor, so hide Android's pointer to avoid a second cursor on the phone/tablet screen.
+        val hiddenPointer = PointerIcon.getSystemIcon(this, PointerIcon.TYPE_NULL)
+        rootFrame.pointerIcon = hiddenPointer
+        desktopSurfaceView.pointerIcon = hiddenPointer
+        overlayCompose.pointerIcon = hiddenPointer
+        imeCaptureView.pointerIcon = hiddenPointer
+        imeCaptureView.setOnCapturedPointerListener { _, ev -> handleCapturedPointer(ev) }
         setContentView(rootFrame)
 
         displayManager = getSystemService(DisplayManager::class.java)
         displayManager?.registerDisplayListener(displayListener, null)
+
+        lifecycleScope.launch {
+            snapshotFlow { routingModeState.value to showQuickMenuState.value }.collect { updatePointerCapture() }
+        }
 
         lifecycleScope.launch {
             SessionState.state.collect { snap ->
@@ -420,8 +438,56 @@ class SessionActivity : ComponentActivity() {
     private fun setPhoneDimmed(dimmed: Boolean) {
         phoneScreenDimmedState.value = dimmed
         val attrs = window.attributes
-        attrs.screenBrightness = if (dimmed) 0.01f else WindowManager.LayoutParams.BRIGHTNESS_OVERRIDE_NONE
+        attrs.screenBrightness = if (dimmed) 0f else WindowManager.LayoutParams.BRIGHTNESS_OVERRIDE_NONE
         window.attributes = attrs
+    }
+
+    /**
+     * With an external screen, a physical mouse is captured so it moves the Linux cursor with relative motion
+     * instead of an invisible absolute pointer on the phone screen.
+     */
+    private fun updatePointerCapture() {
+        if (!::imeCaptureView.isInitialized) return
+        val want = routingModeState.value == DisplayRoutingMode.EXTERNAL_MONITOR_HOTSWAP &&
+            !showQuickMenuState.value && window.decorView.hasWindowFocus()
+        if (want && !pointerCaptured) {
+            imeCaptureView.requestFocus()
+            imeCaptureView.requestPointerCapture()
+            pointerCaptured = true
+        } else if (!want && pointerCaptured) {
+            imeCaptureView.releasePointerCapture()
+            pointerCaptured = false
+        }
+    }
+
+    override fun onWindowFocusChanged(hasFocus: Boolean) {
+        super.onWindowFocusChanged(hasFocus)
+        pointerCaptured = false
+        if (hasFocus) updatePointerCapture()
+    }
+
+    private fun handleCapturedPointer(ev: MotionEvent): Boolean {
+        if (ev.actionMasked == MotionEvent.ACTION_SCROLL) {
+            sendScroll(ev)
+            return true
+        }
+        if (ev.isFromSource(InputDevice.SOURCE_MOUSE_RELATIVE) &&
+            (ev.actionMasked == MotionEvent.ACTION_MOVE || ev.actionMasked == MotionEvent.ACTION_HOVER_MOVE)
+        ) {
+            WaylandCompositor.sendPointerDelta(ev.x, ev.y)
+        }
+        syncMouseButtons(ev.buttonState)
+        return true
+    }
+
+    private fun sendScroll(event: MotionEvent) {
+        val vScroll = event.getAxisValue(MotionEvent.AXIS_VSCROLL)
+        val hScroll = event.getAxisValue(MotionEvent.AXIS_HSCROLL)
+        val vert120 = (-vScroll * 120f).toInt()
+        val horiz120 = (hScroll * 120f).toInt()
+        if (vert120 != 0 || horiz120 != 0) {
+            WaylandCompositor.sendWheelScroll(vert120, horiz120)
+        }
     }
 
     override fun dispatchKeyEvent(event: KeyEvent): Boolean {
@@ -482,6 +548,9 @@ class SessionActivity : ComponentActivity() {
     }
 
     private fun handleMotionInput(view: View, event: MotionEvent): Boolean {
+        if (phoneScreenDimmedState.value && event.actionMasked == MotionEvent.ACTION_DOWN) {
+            blackoutTouchTick.intValue++
+        }
         if (showQuickMenuState.value) {
             return false
         }
@@ -532,13 +601,7 @@ class SessionActivity : ComponentActivity() {
                 return true
             }
             MotionEvent.ACTION_SCROLL -> {
-                val vScroll = event.getAxisValue(MotionEvent.AXIS_VSCROLL)
-                val hScroll = event.getAxisValue(MotionEvent.AXIS_HSCROLL)
-                val vert120 = (-vScroll * 120f).toInt()
-                val horiz120 = (hScroll * 120f).toInt()
-                if (vert120 != 0 || horiz120 != 0) {
-                    WaylandCompositor.sendWheelScroll(vert120, horiz120)
-                }
+                sendScroll(event)
                 return true
             }
         }
@@ -898,6 +961,7 @@ private fun SessionOverlayUi(
     routingMode: DisplayRoutingMode,
     externalMonitorLabel: String?,
     phoneDimmed: Boolean,
+    blackoutTouchTick: Int,
     showQuickMenu: Boolean,
     showFloatingControls: Boolean,
     imeVisible: Boolean,
@@ -979,6 +1043,7 @@ private fun SessionOverlayUi(
             ExternalMonitorTrackpadOverlay(
                 externalMonitorLabel = externalMonitorLabel ?: "External Display",
                 phoneDimmed = phoneDimmed,
+                blackoutTouchTick = blackoutTouchTick,
                 onTogglePhoneDimmed = onTogglePhoneDimmed,
                 onToggleKeyboard = onToggleKeyboard,
                 onOpenTerminal = onOpenTerminal,
@@ -1722,28 +1787,39 @@ private fun WaitingForExternalMonitorOverlay(
 private fun ExternalMonitorTrackpadOverlay(
     externalMonitorLabel: String,
     phoneDimmed: Boolean,
+    blackoutTouchTick: Int,
     onTogglePhoneDimmed: () -> Unit,
     onToggleKeyboard: () -> Unit,
     onOpenTerminal: () -> Unit,
     onOpenQuickMenu: () -> Unit,
 ) {
     if (phoneDimmed) {
-        // Pure OLED black power-save trackpad surface (all touch gestures continue working underneath!)
+        // Fully black screen (brightness 0). Touches still reach the trackpad underneath; any touch briefly
+        // reveals a "Show display" button so the phone screen can be turned back on.
+        var hintVisible by remember { mutableStateOf(false) }
+        LaunchedEffect(blackoutTouchTick) {
+            if (blackoutTouchTick > 0) {
+                hintVisible = true
+                delay(3000)
+                hintVisible = false
+            }
+        }
         Box(
             modifier = Modifier
                 .fillMaxSize()
-                .background(Color.Black)
-                .padding(16.dp),
+                .background(Color.Black),
         ) {
-            TextButton(
-                onClick = onTogglePhoneDimmed,
-                modifier = Modifier.align(Alignment.BottomEnd),
-            ) {
-                Text(
-                    text = "Wake Controls",
-                    style = MaterialTheme.typography.labelSmall,
-                    color = Color(0xFF475569),
-                )
+            if (hintVisible) {
+                FilledTonalButton(
+                    onClick = onTogglePhoneDimmed,
+                    modifier = Modifier
+                        .align(Alignment.BottomCenter)
+                        .padding(bottom = 48.dp),
+                ) {
+                    Icon(Icons.Outlined.Monitor, contentDescription = null, modifier = Modifier.size(18.dp))
+                    Spacer(Modifier.width(8.dp))
+                    Text("Show display")
+                }
             }
         }
         return
@@ -1794,13 +1870,13 @@ private fun ExternalMonitorTrackpadOverlay(
             )
             Spacer(Modifier.height(8.dp))
             Text(
-                text = "External Screen Trackpad",
+                text = "Trackpad",
                 style = MaterialTheme.typography.titleMedium,
                 fontWeight = FontWeight.SemiBold,
                 color = MaterialTheme.colorScheme.onBackground,
             )
             Text(
-                text = "1-finger move & tap • 2-finger scroll & right-click • 3-finger middle-click",
+                text = "Move, tap, two-finger scroll and right-click. A connected mouse works directly.",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
@@ -1827,7 +1903,7 @@ private fun ExternalMonitorTrackpadOverlay(
             ) {
                 Icon(Icons.Outlined.BrightnessLow, contentDescription = null, modifier = Modifier.size(18.dp))
                 Spacer(Modifier.width(6.dp))
-                Text("Dim Screen")
+                Text("Black out screen")
             }
             OutlinedButton(
                 onClick = onOpenTerminal,
