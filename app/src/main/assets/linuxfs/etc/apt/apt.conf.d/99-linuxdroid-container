@@ -1,0 +1,6 @@
+APT::Sandbox::User "root";
+Acquire::Languages "none";
+Dpkg::Options {
+   "--force-confdef";
+   "--force-confold";
+};

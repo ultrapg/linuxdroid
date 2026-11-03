@@ -1,0 +1,172 @@
+#!/usr/bin/env python3
+import os
+import sys
+
+USAGE = """Usage:
+ su [options] [-] [<user> [<argument>...]]
+
+Change the effective user ID and group ID to that of <user>.
+A mere - implies -l.   If <user> is not given, root is assumed.
+
+Options:
+ -m, -p, --preserve-environment      do not reset environment variables
+ -g, --group <group>                 specify the primary group
+ -G, --supp-group <group>            specify a supplemental group
+ -, -l, --login                      make the shell a login shell
+ -c, --command <command>             pass a single command to the shell with -c
+ --session-command <command>         pass a single command to the shell with -c
+ -s, --shell <shell>                 run <shell> if /etc/shells allows it
+ -h, --help                          display this help
+ -V, --version                       display version"""
+
+
+def resolve_user_info(user):
+    if user == "root":
+        return "/root", "/bin/bash"
+    try:
+        import pwd
+        pw = pwd.getpwnam(user)
+        return pw.pw_dir or f"/home/{user}", pw.pw_shell or "/bin/bash"
+    except (ImportError, KeyError):
+        return f"/home/{user}", "/bin/bash"
+
+
+def main(argv):
+    args = argv[1:]
+    login_mode = False
+    preserve_env = False
+    command = None
+    shell = None
+    target_user = None
+    target_group = None
+    extra_args = []
+
+    i = 0
+    while i < len(args):
+        a = args[i]
+        if a == "--":
+            extra_args.extend(args[i + 1:])
+            break
+        if a in ("-h", "--help"):
+            print(USAGE)
+            return 0
+        if a in ("-V", "--version"):
+            print("su from util-linux 2.39.3 (LinuxDroid root bridge)")
+            return 0
+        if a in ("-", "-l", "--login"):
+            login_mode = True
+            i += 1
+        elif a in ("-m", "-p", "--preserve-environment"):
+            preserve_env = True
+            i += 1
+        elif a in ("-c", "--command", "--session-command"):
+            if i + 1 >= len(args):
+                print("su: option requires an argument -- 'c'", file=sys.stderr)
+                return 1
+            command = args[i + 1]
+            i += 2
+        elif a.startswith(("--command=", "--session-command=")):
+            command = a.split("=", 1)[1]
+            i += 1
+        elif a in ("-s", "--shell"):
+            if i + 1 >= len(args):
+                print("su: option requires an argument -- 's'", file=sys.stderr)
+                return 1
+            shell = args[i + 1]
+            i += 2
+        elif a.startswith("--shell="):
+            shell = a.split("=", 1)[1]
+            i += 1
+        elif a in ("-g", "--group", "-G", "--supp-group", "-w", "--whitelist-environment"):
+            if i + 1 >= len(args):
+                print(f"su: option requires an argument -- '{a}'", file=sys.stderr)
+                return 1
+            if a in ("-g", "--group"):
+                target_group = args[i + 1]
+            i += 2
+        elif a.startswith(("--group=", "--supp-group=", "--whitelist-environment=")):
+            if a.startswith("--group="):
+                target_group = a.split("=", 1)[1]
+            i += 1
+        elif a.startswith("-") and not a.startswith("--") and len(a) > 1:
+            flags = a[1:]
+            i += 1
+            idx = 0
+            while idx < len(flags):
+                ch = flags[idx]
+                if ch == "h":
+                    print(USAGE)
+                    return 0
+                if ch == "V":
+                    print("su from util-linux 2.39.3 (LinuxDroid root bridge)")
+                    return 0
+                if ch == "l":
+                    login_mode = True
+                elif ch in ("m", "p"):
+                    preserve_env = True
+                elif ch in ("c", "s", "g", "G", "w"):
+                    rest = flags[idx + 1:]
+                    if rest:
+                        val = rest
+                    elif i < len(args):
+                        val = args[i]
+                        i += 1
+                    else:
+                        print(f"su: option requires an argument -- '{ch}'", file=sys.stderr)
+                        return 1
+                    if ch == "c":
+                        command = val
+                    elif ch == "s":
+                        shell = val
+                    elif ch == "g":
+                        target_group = val
+                    break
+                idx += 1
+        else:
+            if target_user is None:
+                target_user = a
+            else:
+                extra_args.append(a)
+            i += 1
+
+    user = target_user or "root"
+    home_dir, default_shell = resolve_user_info(user)
+    chosen_shell = shell or (os.environ.get("SHELL") if preserve_env else None) or default_shell or "/bin/bash"
+
+    if not preserve_env:
+        os.environ["HOME"] = home_dir
+        os.environ["USER"] = user
+        os.environ["LOGNAME"] = user
+        os.environ["SHELL"] = chosen_shell
+    os.environ["PATH"] = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+
+    if login_mode and os.path.isdir(home_dir):
+        try:
+            os.chdir(home_dir)
+        except OSError:
+            pass
+
+    cmd = [chosen_shell]
+    if login_mode:
+        cmd.append("-l")
+    if command is not None:
+        cmd.extend(["-c", command])
+    cmd.extend(extra_args)
+
+    if (user != "root" or target_group) and os.path.exists("/usr/sbin/runuser"):
+        runuser_cmd = ["/usr/sbin/runuser", "-u", user]
+        if target_group:
+            runuser_cmd += ["-g", target_group]
+        cmd = runuser_cmd + ["--"] + cmd
+
+    self_dir = os.path.dirname(os.path.abspath(__file__))
+    root_helper = (
+        os.path.join(self_dir, "linuxdroid-root")
+        if os.path.exists(os.path.join(self_dir, "linuxdroid-root"))
+        else "/usr/local/bin/linuxdroid-root"
+    )
+    os.execv(root_helper, [root_helper] + cmd)
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv))

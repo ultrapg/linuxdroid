@@ -93,6 +93,17 @@ Outputs `linuxdroid-ubuntu-kde-arm64.tar.zst`, `linuxdroid-ubuntu-xfce-arm64.tar
 
 ---
 
+## Credits & Acknowledgments
+
+LinuxDroid builds upon the work of several open-source projects:
+
+- **[DroidDeck](https://github.com/Droid-Deck)**: Core inspiration and foundational runtime components adapted from DroidDeck, including the native Android Vulkan / `AHardwareBuffer` Wayland compositor (`libwayland_compositor.so`), in-process PRoot syscall fastpath (`libblfastpath.so`) & guest session preload shims (`libblsession.so`), `RootSpawner` UNIX socket privilege bridge, and Qualcomm Adreno KGSL Mesa Turnip driver packaging (`Drivers-CI`).
+- **Mesa 3D (`Turnip`, `Venus`, `VirGL`, `PanVK`, `Panfrost`, `Zink`, `Lavapipe`) & `virglrenderer`**: Hardware-accelerated Vulkan and OpenGL drivers across Qualcomm Adreno, Arm Mali/Immortalis, and Samsung Xclipse GPUs.
+- **PRoot & FEX-Emu**: Unprivileged rootfs containerization and transparent `x86`/`x86_64` binary translation on ARM64.
+- **Wayland, PulseAudio (`AAudio`), and Termux `terminal-view`**: Display protocol, low-latency audio streaming, and built-in Android terminal emulation.
+
+---
+
 ## License
 
-Licensed under the [GNU General Public License v3.0](LICENSE). Built upon open-source foundations including Wayland, Mesa 3D (`Turnip`, `Venus`, `VirGL`, `PanVK`, `Zink`), virglrenderer, PRoot, PulseAudio, FEX-Emu, Termux `terminal-view`, and DroidDeck's native Wayland compositor & guest session plumbing.
+Licensed under the [GNU General Public License v3.0](LICENSE).

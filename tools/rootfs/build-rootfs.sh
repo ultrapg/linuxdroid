@@ -14,7 +14,7 @@ OUT_DIR="${OUT_DIR:-$REPO_ROOT/dist}"
 WORK_DIR="${WORK_DIR:-/tmp/linuxdroid-rootfs-build}"
 CACHE_DIR="${CACHE_DIR:-$WORK_DIR/cache}"
 GITHUB_REPO="${GITHUB_REPO:-ultrapg/linuxdroid}"
-RELEASE_TAG="${RELEASE_TAG:-v1.0.8}"
+RELEASE_TAG="${RELEASE_TAG:-v1.0.11}"
 
 UBUNTU_BASE_URL="https://cdimage.ubuntu.com/ubuntu-base/releases/24.04/release/ubuntu-base-24.04.5-base-arm64.tar.gz"
 UBUNTU_BASE_SHA256="a91d5a93010193712d346d761372b7c9db6dfcf093893161c64ca107f05914f2"
@@ -200,6 +200,17 @@ stage_linuxfs_overlay() {
     fi
   done
 
+  printf 'com.linuxdroid.app.root\n' | sudo tee "$root/etc/linuxdroid/root-socket" >/dev/null
+  sudo chmod 0644 "$root/etc/linuxdroid/root-socket"
+
+  for tool in sudo pkexec su; do
+    if [ -f "$root/usr/bin/$tool" ] && [ ! -f "$root/usr/bin/$tool.distrib" ]; then
+      sudo cp -a "$root/usr/bin/$tool" "$root/usr/bin/$tool.distrib"
+    fi
+    sudo cp -f "$root/usr/local/bin/$tool" "$root/usr/bin/$tool"
+    sudo chmod 0755 "$root/usr/bin/$tool"
+  done
+
   printf '/usr/local/lib/libblsession.so\n/usr/local/lib/libblfastpath.so\n' \
     | sudo tee "$root/etc/ld.so.preload" >/dev/null
   sudo chmod 0644 "$root/etc/ld.so.preload"
@@ -213,7 +224,7 @@ clean_and_pack_rootfs() {
     apt-get clean
     rm -rf /var/lib/apt/lists/* /var/cache/apt/archives/*.deb /var/cache/apt/archives/partial/*
     rm -rf /tmp/* /var/tmp/* /var/log/*.log /var/log/apt/* /var/log/dpkg.log
-    rm -f /usr/sbin/policy-rc.d /usr/share/dbus-1/services/org.freedesktop.systemd1.service
+    rm -f /usr/share/dbus-1/services/org.freedesktop.systemd1.service
     rm -rf /dev/shm/.linuxdroid-procstat* /tmp/.linuxdroid-procstat*
   '
 
@@ -255,6 +266,12 @@ smoke_test_rootfs() {
     test -x /usr/bin/Xwayland
     test -x /usr/bin/vulkaninfo
     test -x /usr/bin/glxinfo
+    test -x /usr/sbin/policy-rc.d
+    test -f /etc/apt/apt.conf.d/99-linuxdroid-container
+    sudo --version >/dev/null
+    sudo true
+    su -c true
+    pkexec --version >/dev/null
     test -f /usr/share/vulkan/icd.d/virtio_icd.aarch64.json
     test -f /usr/share/vulkan/icd.d/freedreno_icd.aarch64.json
     test -f /usr/share/vulkan/icd.d/lvp_icd.aarch64.json

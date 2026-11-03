@@ -355,6 +355,7 @@ class SessionService : Service() {
             put("BL_LOG", sessionLogFile.absolutePath)
             put("BL_BOOT_STATUS", bootStatusFile.absolutePath)
             put("LINUXDROID_DESKTOP", SessionPrefs.desktopEnvironment(this@SessionService))
+            put("LINUXDROID_ROOT_SOCKET", RootSpawner.socketName(this@SessionService))
             putAll(gpuConfig.envVars)
             if (fastPathKey != null) {
                 putAll(ProotFastPath.guestEnv(root, binds, fastPathKey))

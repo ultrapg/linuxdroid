@@ -3,6 +3,8 @@ import os
 import sys
 
 args = sys.argv[1:]
+target_user = "root"
+keep_cwd = False
 i = 0
 while i < len(args):
     a = args[i]
@@ -10,14 +12,39 @@ while i < len(args):
         i += 1
         break
     if a in ("--user", "-u") and i + 1 < len(args):
+        target_user = args[i + 1]
         i += 2
-    elif a in ("--disable-internal-agent", "--keep-cwd"):
+    elif a.startswith("--user="):
+        target_user = a.split("=", 1)[1]
         i += 1
-    elif a in ("--version", "--help"):
-        print("pkexec (LinuxDroid root bridge) 1.0")
+    elif a == "--keep-cwd":
+        keep_cwd = True
+        i += 1
+    elif a == "--disable-internal-agent":
+        i += 1
+    elif a in ("--version", "-v"):
+        print("pkexec version 124")
+        sys.exit(0)
+    elif a in ("--help", "-h"):
+        print("Usage: pkexec [--version] [--disable-internal-agent] [--help] [--user username] PROGRAM [ARGUMENTS...]")
         sys.exit(0)
     else:
         break
 
+os.environ["PKEXEC_UID"] = str(os.getuid())
+os.environ["USER"] = target_user
+os.environ["LOGNAME"] = target_user
+os.environ["HOME"] = "/root" if target_user == "root" else f"/home/{target_user}"
+os.environ.setdefault("PATH", "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin")
+
 cmd = args[i:] or [os.environ.get("SHELL") or "/bin/bash"]
-os.execv("/usr/local/bin/linuxdroid-root", ["/usr/local/bin/linuxdroid-root"] + cmd)
+if target_user != "root" and os.path.exists("/usr/sbin/runuser"):
+    cmd = ["/usr/sbin/runuser", "-u", target_user, "--"] + cmd
+
+self_dir = os.path.dirname(os.path.abspath(__file__))
+root_helper = (
+    os.path.join(self_dir, "linuxdroid-root")
+    if os.path.exists(os.path.join(self_dir, "linuxdroid-root"))
+    else "/usr/local/bin/linuxdroid-root"
+)
+os.execv(root_helper, [root_helper] + cmd)

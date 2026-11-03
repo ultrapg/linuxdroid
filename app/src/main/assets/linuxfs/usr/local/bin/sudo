@@ -1,75 +1,277 @@
 #!/usr/bin/env python3
 import os
+import shutil
+import subprocess
 import sys
 
-if os.geteuid() == 0 and os.path.exists("/usr/bin/sudo"):
-    os.execv("/usr/bin/sudo", ["/usr/bin/sudo"] + sys.argv[1:])
+_SELF_DIR = os.path.dirname(os.path.abspath(__file__))
+LINUXDROID_ROOT = (
+    os.path.join(_SELF_DIR, "linuxdroid-root")
+    if os.path.exists(os.path.join(_SELF_DIR, "linuxdroid-root"))
+    else "/usr/local/bin/linuxdroid-root"
+)
 
-args = sys.argv[1:]
-shell_mode = False
-login_mode = False
-target_user = "root"
-env_overrides = []
+USAGE = """usage: sudo -h | -K | -k | -V
+usage: sudo -v [-ABkNnS] [-g group] [-h host] [-p prompt] [-u user]
+usage: sudo -l [-ABkNnS] [-g group] [-h host] [-p prompt] [-U user] [-u user] [command [arg ...]]
+usage: sudo [-ABbEHkNnPS] [-C num] [-D directory] [-g group] [-h host] [-p prompt] [-R directory] [-T timeout] [-u user] [VAR=value] [-i | -s] [command [arg ...]]"""
 
-i = 0
-while i < len(args):
-    a = args[i]
-    if a == "--":
-        i += 1
-        break
-    if a in ("-v", "-K", "-k"):
-        if len(args) == 1:
-            sys.exit(0)
-        i += 1
-    elif a in ("-E", "-n", "-S", "-H", "-P", "-A", "-b"):
-        i += 1
-    elif a == "-s":
-        shell_mode = True
-        i += 1
-    elif a == "-i":
-        login_mode = True
-        i += 1
-    elif a in ("-u", "--user") and i + 1 < len(args):
-        target_user = args[i + 1]
-        i += 2
-    elif a in ("-p", "-g", "-C", "-D", "-R", "-T") and i + 1 < len(args):
-        if a == "-D":
-            try:
-                os.chdir(args[i + 1])
-            except OSError as e:
-                sys.exit(f"sudo: {e}")
-        i += 2
-    elif a.startswith("-") and len(a) > 1 and "=" not in a:
-        # Combined short flags such as -Es or -Su
-        flags = a[1:]
-        i += 1
-        for ch in flags:
-            if ch == "s":
-                shell_mode = True
-            elif ch == "i":
-                login_mode = True
-            elif ch == "u" and i < len(args):
-                target_user = args[i]
-                i += 1
-    elif "=" in a and not a.startswith("/"):
-        env_overrides.append(a)
-        i += 1
-    else:
-        break
 
-cmd = args[i:]
-for kv in env_overrides:
-    k, v = kv.split("=", 1)
-    os.environ[k] = v
+def ensure_sbin_path(current_path):
+    required = ["/usr/local/sbin", "/usr/local/bin", "/usr/sbin", "/usr/bin", "/sbin", "/bin"]
+    parts = [p for p in (current_path or "").split(":") if p]
+    for req in reversed(required):
+        if req not in parts:
+            parts.insert(0, req)
+    return ":".join(parts)
 
-if login_mode:
-    os.environ["HOME"] = "/root" if target_user == "root" else f"/home/{target_user}"
-    cmd = ["/bin/bash", "-l"] + (["-c", " ".join(cmd)] if cmd else [])
-elif shell_mode or not cmd:
-    shell = os.environ.get("SHELL") or "/bin/bash"
-    cmd = [shell] + (["-c", " ".join(cmd)] if cmd else [])
 
-if target_user != "root" and os.path.exists("/usr/sbin/runuser"):
-    cmd = ["/usr/sbin/runuser", "-u", target_user, "--"] + cmd
+def resolve_home(user):
+    if user == "root":
+        return "/root"
+    try:
+        import pwd
+        return pwd.getpwnam(user).pw_dir
+    except (ImportError, KeyError):
+        return f"/home/{user}"
 
-os.execv("/usr/local/bin/linuxdroid-root", ["/usr/local/bin/linuxdroid-root"] + cmd)
+
+def main(argv):
+    args = argv[1:]
+    if not args:
+        print(USAGE, file=sys.stderr)
+        return 1
+
+    shell_mode = False
+    login_mode = False
+    background_mode = False
+    list_mode = False
+    validate_mode = False
+    reset_ts_mode = False
+    preserve_env = False
+    set_home = False
+    target_user = "root"
+    target_group = None
+    chdir_path = None
+    env_overrides = []
+    preserved_keys = set()
+
+    i = 0
+    while i < len(args):
+        a = args[i]
+        if a == "--":
+            i += 1
+            break
+        if a in ("-V", "--version"):
+            print("Sudo version 1.9.15p5 (LinuxDroid root bridge)")
+            return 0
+        if a in ("-h", "--help"):
+            print(USAGE)
+            return 0
+        if a in ("-v", "--validate"):
+            validate_mode = True
+            i += 1
+        elif a in ("-k", "--reset-timestamp", "-K", "--remove-timestamp"):
+            reset_ts_mode = True
+            i += 1
+        elif a in ("-l", "--list"):
+            list_mode = True
+            i += 1
+        elif a in ("-b", "--background"):
+            background_mode = True
+            i += 1
+        elif a in ("-E", "--preserve-env"):
+            preserve_env = True
+            i += 1
+        elif a.startswith("--preserve-env="):
+            preserve_env = True
+            for k in a.split("=", 1)[1].split(","):
+                if k.strip():
+                    preserved_keys.add(k.strip())
+            i += 1
+        elif a in ("-H", "--set-home"):
+            set_home = True
+            i += 1
+        elif a in ("-n", "--non-interactive", "-S", "--stdin", "-P", "--preserve-groups", "-A", "--askpass"):
+            i += 1
+        elif a in ("-s", "--shell"):
+            shell_mode = True
+            i += 1
+        elif a in ("-i", "--login"):
+            login_mode = True
+            i += 1
+        elif a in ("-u", "--user"):
+            if i + 1 >= len(args):
+                print("sudo: option requires an argument -- 'u'", file=sys.stderr)
+                return 1
+            target_user = args[i + 1]
+            i += 2
+        elif a.startswith("--user="):
+            target_user = a.split("=", 1)[1]
+            i += 1
+        elif a in ("-g", "--group"):
+            if i + 1 >= len(args):
+                print("sudo: option requires an argument -- 'g'", file=sys.stderr)
+                return 1
+            target_group = args[i + 1]
+            i += 2
+        elif a.startswith("--group="):
+            target_group = a.split("=", 1)[1]
+            i += 1
+        elif a in ("-D", "--chdir"):
+            if i + 1 >= len(args):
+                print("sudo: option requires an argument -- 'D'", file=sys.stderr)
+                return 1
+            chdir_path = args[i + 1]
+            i += 2
+        elif a.startswith("--chdir="):
+            chdir_path = a.split("=", 1)[1]
+            i += 1
+        elif a in ("-p", "--prompt", "-C", "--close-from", "-R", "--chroot", "-T", "--command-timeout", "-U", "--other-user", "-h", "--host"):
+            if i + 1 >= len(args):
+                print(f"sudo: option requires an argument -- '{a}'", file=sys.stderr)
+                return 1
+            i += 2
+        elif a.startswith(("--prompt=", "--close-from=", "--chroot=", "--command-timeout=", "--other-user=", "--host=")):
+            i += 1
+        elif a.startswith("-") and not a.startswith("--") and len(a) > 1 and "=" not in a:
+            flags = a[1:]
+            i += 1
+            idx = 0
+            while idx < len(flags):
+                ch = flags[idx]
+                if ch == "V":
+                    print("Sudo version 1.9.15p5 (LinuxDroid root bridge)")
+                    return 0
+                if ch == "h":
+                    print(USAGE)
+                    return 0
+                if ch == "v":
+                    validate_mode = True
+                elif ch in ("k", "K"):
+                    reset_ts_mode = True
+                elif ch == "l":
+                    list_mode = True
+                elif ch == "b":
+                    background_mode = True
+                elif ch == "E":
+                    preserve_env = True
+                elif ch == "H":
+                    set_home = True
+                elif ch == "s":
+                    shell_mode = True
+                elif ch == "i":
+                    login_mode = True
+                elif ch in ("n", "S", "P", "A"):
+                    pass
+                elif ch in ("u", "g", "D", "p", "C", "R", "T", "U"):
+                    rest = flags[idx + 1:]
+                    if rest:
+                        val = rest
+                    elif i < len(args):
+                        val = args[i]
+                        i += 1
+                    else:
+                        print(f"sudo: option requires an argument -- '{ch}'", file=sys.stderr)
+                        return 1
+                    if ch == "u":
+                        target_user = val
+                    elif ch == "g":
+                        target_group = val
+                    elif ch == "D":
+                        chdir_path = val
+                    break
+                idx += 1
+        elif "=" in a and not a.startswith("/") and not a.startswith("."):
+            env_overrides.append(a)
+            i += 1
+        else:
+            break
+
+    cmd = args[i:]
+
+    if list_mode:
+        orig_user = os.environ.get("USER") or os.environ.get("LOGNAME") or "droid"
+        if not cmd:
+            print(f"User {orig_user} may run the following commands on linuxdroid:")
+            print("    (ALL : ALL) NOPASSWD: ALL")
+            return 0
+        resolved = shutil.which(cmd[0], path=ensure_sbin_path(os.environ.get("PATH", "")))
+        if not resolved:
+            print(f"sudo: {cmd[0]}: command not found", file=sys.stderr)
+            return 1
+        if len(cmd) > 1:
+            print(f"{resolved} {' '.join(cmd[1:])}")
+        else:
+            print(resolved)
+        return 0
+
+    if not cmd and not shell_mode and not login_mode:
+        if reset_ts_mode:
+            return 0
+        if validate_mode:
+            return subprocess.call([LINUXDROID_ROOT, "--check"])
+        print(USAGE, file=sys.stderr)
+        return 1
+
+    if chdir_path:
+        try:
+            os.chdir(chdir_path)
+        except OSError as e:
+            print(f"sudo: unable to change directory to {chdir_path}: {e.strerror or e}", file=sys.stderr)
+            return 1
+
+    orig_user = os.environ.get("USER") or os.environ.get("LOGNAME") or "droid"
+    orig_uid = str(os.getuid())
+    orig_gid = str(os.getgid())
+    orig_home = os.environ.get("HOME", "")
+
+    for kv in env_overrides:
+        k, v = kv.split("=", 1)
+        os.environ[k] = v
+
+    os.environ["PATH"] = ensure_sbin_path(os.environ.get("PATH", ""))
+    os.environ["SUDO_USER"] = orig_user
+    os.environ["SUDO_UID"] = orig_uid
+    os.environ["SUDO_GID"] = orig_gid
+    os.environ["USER"] = target_user
+    os.environ["LOGNAME"] = target_user
+
+    target_home = resolve_home(target_user)
+    if login_mode or set_home or not preserve_env or ("HOME" not in preserved_keys and orig_home != target_home):
+        if not (preserve_env and "HOME" in preserved_keys):
+            os.environ["HOME"] = target_home
+
+    if login_mode:
+        try:
+            if not chdir_path and os.path.isdir(target_home):
+                os.chdir(target_home)
+        except OSError:
+            pass
+        cmd = ["/bin/bash", "-l"] + (["-c", " ".join(cmd)] if cmd else [])
+    elif shell_mode or not cmd:
+        shell = os.environ.get("SHELL") or "/bin/bash"
+        cmd = [shell] + (["-c", " ".join(cmd)] if cmd else [])
+
+    os.environ["SUDO_COMMAND"] = " ".join(cmd)
+
+    if (target_user != "root" or target_group) and os.path.exists("/usr/sbin/runuser"):
+        runuser_cmd = ["/usr/sbin/runuser", "-u", target_user]
+        if target_group:
+            runuser_cmd += ["-g", target_group]
+        cmd = runuser_cmd + ["--"] + cmd
+
+    full_cmd = [LINUXDROID_ROOT] + cmd
+    if background_mode:
+        subprocess.Popen(
+            full_cmd,
+            stdin=subprocess.DEVNULL,
+            start_new_session=True,
+        )
+        return 0
+
+    os.execv(full_cmd[0], full_cmd)
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv))

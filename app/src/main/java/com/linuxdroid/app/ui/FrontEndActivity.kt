@@ -1800,6 +1800,23 @@ private fun SystemTabContent(
             }
         }
     }
+
+    // 4. About & Open-Source Credits
+    SectionCard {
+        SectionHeader("About & Credits")
+        Text(
+            text = "LinuxDroid v${com.linuxdroid.app.BuildConfig.VERSION_NAME} (GPL-3.0)",
+            style = MaterialTheme.typography.bodyMedium,
+            fontWeight = FontWeight.SemiBold,
+            color = MaterialTheme.colorScheme.onSurface,
+        )
+        Spacer(Modifier.height(4.dp))
+        Text(
+            text = "Special thanks to DroidDeck for foundational runtime components adapted in LinuxDroid — including the native Vulkan/AHardwareBuffer Wayland compositor, PRoot syscall fastpath & preload session shims, RootSpawner privilege bridge, and Adreno KGSL Turnip driver packaging — alongside Mesa 3D, virglrenderer, PRoot, FEX-Emu, PulseAudio, and Termux.",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+    }
 }
 
 @Composable

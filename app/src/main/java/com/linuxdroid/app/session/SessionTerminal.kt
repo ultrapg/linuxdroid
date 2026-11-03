@@ -1,9 +1,11 @@
 package com.linuxdroid.app.session
 
 import android.content.Context
+import android.os.Process
 import com.linuxdroid.app.runtime.CpuInfo
 import com.linuxdroid.app.runtime.LinuxRuntime
 import com.linuxdroid.app.runtime.ProotFastPath
+import com.linuxdroid.app.runtime.RootSpawner
 import com.linuxdroid.app.runtime.UserProvisioner
 import com.termux.terminal.TerminalSession
 import com.termux.terminal.TerminalSessionClient
@@ -16,9 +18,22 @@ object SessionTerminal {
         client: TerminalSessionClient,
     ): TerminalSession? {
         if (!LinuxRuntime.isReady(context)) return null
+        RootSpawner.start(context)
         val root = LinuxRuntime.rootDir(context)
-        val user = if (asRoot) "root" else SessionPrefs.username(context)
-        val home = if (asRoot) "/root" else "/home/${UserProvisioner.sanitizeUsername(user)}"
+
+        val useNoSeccomp = SessionPrefs.prootNoSeccomp(context) ||
+            SessionState.state.value.compatibilityRetryUsed
+        val enableFastPath = !useNoSeccomp && SessionPrefs.prootFastPath(context)
+        if (!SessionState.isRunningOrPaused) {
+            LinuxRuntime.stageBundledOverlay(context, enableFastPath = enableFastPath)
+        }
+        val provisionedUser = UserProvisioner.provisionRootfs(
+            root,
+            SessionPrefs.username(context),
+            Process.myUid(),
+        )
+        val user = if (asRoot) "root" else provisionedUser
+        val home = if (asRoot) "/root" else "/home/$provisionedUser"
         File(root, home.removePrefix("/")).mkdirs()
 
         val cpuTopology = CpuInfo.detect()
@@ -26,8 +41,7 @@ object SessionTerminal {
         val effectiveCores = if (affinityCores.isNotEmpty()) affinityCores.size else cpuTopology.totalCores
 
         val binds = LinuxRuntime.lastBinds(context).filter { !it.startsWith("/proc/self/fd/") }
-        val useNoSeccomp = SessionPrefs.prootNoSeccomp(context)
-        val fastPathKey = if (!asRoot && SessionPrefs.prootFastPath(context) && !useNoSeccomp) {
+        val fastPathKey = if (!asRoot && enableFastPath) {
             ProotFastPath.key(root, binds)
         } else {
             null
@@ -44,12 +58,14 @@ object SessionTerminal {
         cmd.add("HOME=$home")
         cmd.add("USER=$user")
         cmd.add("LOGNAME=$user")
+        cmd.add("SHELL=/bin/bash")
         cmd.add("TERM=xterm-256color")
         cmd.add("COLORTERM=truecolor")
         cmd.add("LANG=C.UTF-8")
         cmd.add("PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin")
         cmd.add("GLIBC_TUNABLES=${SessionPrefs.GLIBC_TUNABLES}")
         cmd.add("XDG_RUNTIME_DIR=${LinuxRuntime.GUEST_RUNTIME_DIR}")
+        cmd.add("LINUXDROID_ROOT_SOCKET=${RootSpawner.socketName(context)}")
         cmd.add("WAYLAND_DISPLAY=wayland-0")
         cmd.add("DISPLAY=:0")
         cmd.add("PULSE_SERVER=unix:${File(context.filesDir, "pulseaudio/PS0").absolutePath}")

@@ -147,6 +147,7 @@ find "$XDG_RUNTIME_DIR" -mindepth 1 -maxdepth 1 \
   ! -name 'pulse*' \
   ! -name 'gvfs*' \
   ! -name 'virgl*' \
+  ! -name 'root*' \
   -exec rm -rf {} + 2>/dev/null || true
 
 export XDG_DATA_HOME="${XDG_DATA_HOME:-$HOME/.local/share}"

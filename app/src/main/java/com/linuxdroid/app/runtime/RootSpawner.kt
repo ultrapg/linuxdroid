@@ -10,6 +10,7 @@ import android.system.OsConstants
 import android.util.Log
 import com.linuxdroid.app.core.HostProcess
 import com.linuxdroid.app.session.SessionPrefs
+import com.linuxdroid.app.session.SessionState
 import org.json.JSONObject
 import java.io.DataInputStream
 import java.io.DataOutputStream
@@ -20,6 +21,7 @@ import java.io.FileOutputStream
 import java.io.IOException
 import java.io.InputStream
 import java.io.OutputStream
+import java.util.Collections
 import java.util.concurrent.atomic.AtomicInteger
 
 object RootSpawner {
@@ -29,41 +31,78 @@ object RootSpawner {
     @Volatile
     private var server: LocalServerSocket? = null
 
+    @Volatile
+    private var legacyAtServer: LocalServerSocket? = null
+
     fun socketName(context: Context): String = "${context.packageName}.root"
+
+    fun normalizeSocketName(raw: String?, defaultName: String = "com.linuxdroid.app.root"): String {
+        val cleaned = raw?.trim()?.trimStart('@', '\u0000')?.trim().orEmpty()
+        return cleaned.ifEmpty { defaultName }
+    }
 
     @Synchronized
     fun start(context: Context) {
-        if (server != null) return
         val app = context.applicationContext
         val name = socketName(app)
-        val sock = try {
-            LocalServerSocket(name)
-        } catch (e: IOException) {
-            Log.e(TAG, "Cannot listen on @$name", e)
-            return
+        if (server == null) {
+            server = bindAndAccept(app, name)
         }
-        server = sock
+        if (legacyAtServer == null) {
+            legacyAtServer = bindAndAccept(app, "@$name")
+        }
+    }
+
+    private fun bindAndAccept(app: Context, listenName: String): LocalServerSocket? {
+        val sock = try {
+            LocalServerSocket(listenName)
+        } catch (e: IOException) {
+            Log.e(TAG, "Cannot listen on abstract socket $listenName", e)
+            return null
+        }
         Thread({
+            var consecutiveErrors = 0
             while (true) {
                 val client = try {
-                    sock.accept()
+                    sock.accept().also { consecutiveErrors = 0 }
                 } catch (e: IOException) {
-                    Log.e(TAG, "accept stopped", e)
-                    break
+                    consecutiveErrors++
+                    if (consecutiveErrors > 10) {
+                        Log.e(TAG, "accept loop on $listenName stopping after repeated errors", e)
+                        synchronized(this@RootSpawner) {
+                            if (server === sock) server = null
+                            if (legacyAtServer === sock) legacyAtServer = null
+                        }
+                        runCatching { sock.close() }
+                        break
+                    }
+                    try {
+                        Thread.sleep(50L * consecutiveErrors)
+                    } catch (_: InterruptedException) {
+                        break
+                    }
+                    continue
                 }
                 Thread({ serve(app, client) }, "root-${seq.incrementAndGet()}").apply {
                     isDaemon = true
                     start()
                 }
             }
-        }, "root-spawner").apply {
+        }, "root-spawner-$listenName").apply {
             isDaemon = true
             start()
         }
+        return sock
     }
 
     private fun serve(context: Context, client: LocalSocket) {
         val received = ArrayList<FileDescriptor>()
+        val closedFds = Collections.synchronizedSet(HashSet<FileDescriptor>())
+        fun closeOnce(fd: FileDescriptor?) {
+            if (fd != null && fd.valid() && closedFds.add(fd)) {
+                runCatching { Os.close(fd) }
+            }
+        }
         client.use {
             val out = DataOutputStream(client.outputStream)
             try {
@@ -77,14 +116,24 @@ object RootSpawner {
                 val body = ByteArray(input.readInt()).also { input.readFully(it) }
                 client.ancillaryFileDescriptors?.let { received.addAll(it) }
                 if (kind != 'R'.code) return
-                runRootProcess(context, JSONObject(String(body, Charsets.UTF_8)), received, input, out)
+                runRootProcess(
+                    context = context,
+                    request = JSONObject(String(body, Charsets.UTF_8)),
+                    fds = received,
+                    closeFdOnce = ::closeOnce,
+                    markFdOwnedByStream = { fd -> if (fd != null) closedFds.add(fd) },
+                    input = input,
+                    out = out,
+                )
             } catch (e: Exception) {
                 runCatching {
-                    frame(out, 'E', (e.message ?: e.toString()).toByteArray())
-                    frame(out, 'X', "1".toByteArray())
+                    synchronized(out) {
+                        frame(out, 'E', (e.message ?: e.toString()).toByteArray())
+                        frame(out, 'X', "1".toByteArray())
+                    }
                 }
             } finally {
-                received.forEach { fd -> runCatching { Os.close(fd) } }
+                received.forEach { fd -> closeOnce(fd) }
             }
         }
     }
@@ -109,9 +158,27 @@ object RootSpawner {
         } catch (_: IOException) {
             false
         }
-        if (!canOpen) return Stdio(null, fd, dup)
+        if (!canOpen) {
+            runCatching { dup.close() }
+            return Stdio(null, fd, null)
+        }
         val redirect = if (write) ProcessBuilder.Redirect.appendTo(procPath) else ProcessBuilder.Redirect.from(procPath)
         return Stdio(redirect, fd, dup)
+    }
+
+    private fun detectControllingPts(request: JSONObject, streams: List<Stdio>): String? {
+        for (s in streams) {
+            val dupFd = s.dup?.fd ?: continue
+            val target = runCatching { Os.readlink("/proc/self/fd/$dupFd") }.getOrNull() ?: continue
+            if (target.startsWith("/dev/pts/") && File(target).exists()) {
+                return target
+            }
+        }
+        val reqTty = request.optString("tty", "").trim()
+        if (reqTty.startsWith("/dev/pts/") && File(reqTty).exists()) {
+            return reqTty
+        }
+        return null
     }
 
     private fun pump(from: InputStream, to: OutputStream, name: String): Thread =
@@ -127,6 +194,7 @@ object RootSpawner {
             } catch (_: IOException) {
             } finally {
                 runCatching { to.close() }
+                runCatching { from.close() }
             }
         }, name).apply {
             isDaemon = true
@@ -137,6 +205,8 @@ object RootSpawner {
         context: Context,
         request: JSONObject,
         fds: List<FileDescriptor>,
+        closeFdOnce: (FileDescriptor?) -> Unit,
+        markFdOwnedByStream: (FileDescriptor?) -> Unit,
         input: DataInputStream,
         out: DataOutputStream,
     ) {
@@ -144,57 +214,93 @@ object RootSpawner {
         val argvJson = request.getJSONArray("argv")
         val argv = (0 until argvJson.length()).map { argvJson.getString(it) }
         if (argv.isEmpty()) throw IOException("Empty argv")
-        val cwd = request.optString("cwd", "/root").ifEmpty { "/root" }
-
-        val cmd = LinuxRuntime.prootPrefix(context, root, cwd, fakeRoot = true)
-        cmd.add(1, "--link2symlink")
-        for (spec in LinuxRuntime.lastBinds(context)) {
-            if (!spec.startsWith("/proc/self/fd/")) {
-                cmd.add("-b")
-                cmd.add(spec)
-            }
-        }
-        cmd.add("/usr/bin/env")
-        cmd.add("-i")
-        request.optJSONObject("env")?.let { envObj ->
-            for (k in envObj.keys()) {
-                cmd.add("$k=${envObj.getString(k)}")
-            }
-        }
-        cmd.addAll(argv)
-
-        val builder = ProcessBuilder(cmd).directory(root)
-        builder.environment().apply {
-            clear()
-            put("PROOT_LOADER", LinuxRuntime.prootLoader(context).absolutePath)
-            put("PROOT_TMP_DIR", LinuxRuntime.prootTempDir(context).absolutePath)
-            if (SessionPrefs.prootNoSeccomp(context)) put("PROOT_NO_SECCOMP", "1")
-        }
+        val requestedCwd = request.optString("cwd", "/root").ifEmpty { "/root" }
+        val cwd = if (File(root, requestedCwd.removePrefix("/")).isDirectory) requestedCwd else "/"
 
         val streams = listOf(
             wrapStdio(fds.getOrNull(0), false),
             wrapStdio(fds.getOrNull(1), true),
             wrapStdio(fds.getOrNull(2), true),
         )
+
         try {
+            val cmd = LinuxRuntime.prootPrefix(context, root, cwd, fakeRoot = true)
+            cmd.add(1, "--link2symlink")
+            for (spec in LinuxRuntime.lastBinds(context)) {
+                if (!spec.startsWith("/proc/self/fd/")) {
+                    cmd.add("-b")
+                    cmd.add(spec)
+                }
+            }
+            val ptsPath = detectControllingPts(request, streams)
+            if (ptsPath != null) {
+                cmd.add("-b")
+                cmd.add("$ptsPath:/dev/tty")
+            }
+            cmd.add("/usr/bin/env")
+            cmd.add("-i")
+            request.optJSONObject("env")?.let { envObj ->
+                for (k in envObj.keys()) {
+                    cmd.add("$k=${envObj.getString(k)}")
+                }
+            }
+            cmd.addAll(argv)
+
+            val useNoSeccomp = SessionPrefs.prootNoSeccomp(context) ||
+                SessionState.state.value.compatibilityRetryUsed
+            val builder = ProcessBuilder(cmd).directory(root)
+            builder.environment().apply {
+                clear()
+                put("PROOT_LOADER", LinuxRuntime.prootLoader(context).absolutePath)
+                put("PROOT_TMP_DIR", LinuxRuntime.prootTempDir(context).absolutePath)
+                if (useNoSeccomp) put("PROOT_NO_SECCOMP", "1")
+            }
+
             builder.redirectInput(streams[0].redirect ?: ProcessBuilder.Redirect.PIPE)
             builder.redirectOutput(streams[1].redirect ?: ProcessBuilder.Redirect.PIPE)
             builder.redirectError(streams[2].redirect ?: ProcessBuilder.Redirect.PIPE)
             val proc = builder.start()
+
+            // Close parent-side duplicate descriptors now that child has inherited them
+            for (s in streams) {
+                runCatching { s.dup?.close() }
+                if (s.redirect != null) {
+                    closeFdOnce(s.fd)
+                }
+            }
+
             val pid = HostProcess.pidOf(proc)
             synchronized(out) { frame(out, 'P', pid.toString().toByteArray()) }
 
             val pumps = ArrayList<Thread>()
             if (streams[0].redirect == null) {
                 val fd = streams[0].fd
-                if (fd != null) pumps.add(pump(FileInputStream(fd), proc.outputStream, "root-in-$pid"))
-                else runCatching { proc.outputStream.close() }
+                if (fd != null) {
+                    markFdOwnedByStream(fd)
+                    pumps.add(pump(FileInputStream(fd), proc.outputStream, "root-in-$pid"))
+                } else {
+                    runCatching { proc.outputStream.close() }
+                }
             }
             if (streams[1].redirect == null) {
-                pumps.add(pump(proc.inputStream, streams[1].fd?.let { FileOutputStream(it) } ?: OutputStream.nullOutputStream(), "root-out-$pid"))
+                val fd = streams[1].fd
+                val outStream = if (fd != null) {
+                    markFdOwnedByStream(fd)
+                    FileOutputStream(fd)
+                } else {
+                    OutputStream.nullOutputStream()
+                }
+                pumps.add(pump(proc.inputStream, outStream, "root-out-$pid"))
             }
             if (streams[2].redirect == null) {
-                pumps.add(pump(proc.errorStream, streams[2].fd?.let { FileOutputStream(it) } ?: OutputStream.nullOutputStream(), "root-err-$pid"))
+                val fd = streams[2].fd
+                val errStream = if (fd != null) {
+                    markFdOwnedByStream(fd)
+                    FileOutputStream(fd)
+                } else {
+                    OutputStream.nullOutputStream()
+                }
+                pumps.add(pump(proc.errorStream, errStream, "root-err-$pid"))
             }
 
             Thread({
@@ -241,7 +347,11 @@ object RootSpawner {
                 }
             }
         }
-        tree.forEach { runCatching { Process.sendSignal(it, sig) } }
+        if (tree.isEmpty() && topPid > 1) {
+            runCatching { Process.sendSignal(topPid, sig) }
+        } else {
+            tree.forEach { runCatching { Process.sendSignal(it, sig) } }
+        }
     }
 
     private fun frame(out: DataOutputStream, kind: Char, payload: ByteArray) {

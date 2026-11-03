@@ -1,24 +1,88 @@
 #!/usr/bin/env python3
 import array
+import errno
 import json
 import os
 import signal
 import socket
 import struct
 import sys
+import time
 
 SOCKET_FILE = "/etc/linuxdroid/root-socket"
+FALLBACK_FS_SOCKET = "/run/linuxdroid/root.sock"
+DEFAULT_SOCKET_NAME = "com.linuxdroid.app.root"
+
+
+def normalize_socket_name(raw):
+    if not raw:
+        return DEFAULT_SOCKET_NAME
+    cleaned = raw.strip().lstrip("@\0").strip()
+    return cleaned or DEFAULT_SOCKET_NAME
+
+
+def candidate_socket_addresses():
+    raw = os.environ.get("LINUXDROID_ROOT_SOCKET", "")
+    if not raw:
+        try:
+            with open(SOCKET_FILE, encoding="utf-8") as f:
+                raw = f.read().strip()
+        except OSError:
+            raw = ""
+    clean = normalize_socket_name(raw)
+    addrs = ["\0" + clean]
+    if "\0@" + clean not in addrs:
+        addrs.append("\0@" + clean)
+    if clean != DEFAULT_SOCKET_NAME:
+        addrs.append("\0" + DEFAULT_SOCKET_NAME)
+    if os.path.exists(FALLBACK_FS_SOCKET):
+        addrs.append(FALLBACK_FS_SOCKET)
+    return addrs
 
 
 def socket_name():
-    name = os.environ.get("LINUXDROID_ROOT_SOCKET", "")
-    if not name:
+    return candidate_socket_addresses()[0]
+
+
+def connect_root_spawner():
+    last_err = None
+    addrs = candidate_socket_addresses()
+    for attempt in range(4):
+        for addr in addrs:
+            s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            try:
+                s.connect(addr)
+                return s
+            except OSError as e:
+                last_err = e
+                s.close()
+        if last_err is not None and last_err.errno in (errno.ECONNREFUSED, errno.EAGAIN, errno.ENOENT):
+            time.sleep(0.05 * (attempt + 1))
+        else:
+            break
+    raise last_err or OSError(errno.ECONNREFUSED, "Connection refused")
+
+
+def ensure_standard_fds():
+    for fd in (0, 1, 2):
         try:
-            with open(SOCKET_FILE, encoding="utf-8") as f:
-                name = f.read().strip()
+            os.fstat(fd)
         except OSError:
-            pass
-    return "\0" + (name or "com.linuxdroid.app.root")
+            mode = os.O_RDONLY if fd == 0 else os.O_WRONLY
+            null_fd = os.open("/dev/null", mode)
+            if null_fd != fd:
+                os.dup2(null_fd, fd)
+                os.close(null_fd)
+
+
+def detect_tty():
+    for fd in (0, 1, 2):
+        try:
+            if os.isatty(fd):
+                return os.ttyname(fd)
+        except OSError:
+            continue
+    return ""
 
 
 def frame(sock, kind, payload):
@@ -35,6 +99,20 @@ def read_exact(sock, n):
     return data
 
 
+def exec_already_root(cmd):
+    try:
+        os.execvp(cmd[0], cmd)
+    except FileNotFoundError:
+        print(f"linuxdroid-root: {cmd[0]}: command not found", file=sys.stderr)
+        return 127
+    except PermissionError as e:
+        print(f"linuxdroid-root: {cmd[0]}: {e.strerror or 'Permission denied'}", file=sys.stderr)
+        return 126
+    except OSError as e:
+        print(f"linuxdroid-root: {cmd[0]}: {e}", file=sys.stderr)
+        return 126
+
+
 def main(argv):
     if len(argv) < 2 or argv[1] in ("-h", "--help"):
         print("usage: linuxdroid-root [--check] command [arg ...]", file=sys.stderr)
@@ -42,28 +120,41 @@ def main(argv):
     if os.geteuid() == 0:
         if argv[1] == "--check":
             return 0
-        os.execvp(argv[1], argv[1:])
+        return exec_already_root(argv[1:])
     try:
-        sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-        sock.connect(socket_name())
+        sock = connect_root_spawner()
     except OSError as e:
         print(f"linuxdroid-root: root spawner unavailable: {e}", file=sys.stderr)
         return 126
     if argv[1] == "--check":
+        sock.close()
         return 0
+
+    ensure_standard_fds()
+
     env = dict(os.environ)
     for name in ("LD_PRELOAD", "PROOT_FASTPATH", "LINUXDROID_ROOT_SOCKET"):
         env.pop(name, None)
     for name in [k for k in env if k.startswith("PROOT_")]:
         env.pop(name, None)
+    env.setdefault("PATH", "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin")
     try:
         cwd = os.getcwd()
     except OSError:
         cwd = "/"
-    body = json.dumps({"argv": argv[1:], "env": env, "cwd": cwd}).encode()
+    req = {"argv": argv[1:], "env": env, "cwd": cwd}
+    tty_path = detect_tty()
+    if tty_path:
+        req["tty"] = tty_path
+    body = json.dumps(req).encode()
     fds = array.array("i", [0, 1, 2])
-    sock.sendmsg([b"R" + struct.pack(">i", len(body))], [(socket.SOL_SOCKET, socket.SCM_RIGHTS, fds)])
-    sock.sendall(body)
+    try:
+        sock.sendmsg([b"R" + struct.pack(">i", len(body))], [(socket.SOL_SOCKET, socket.SCM_RIGHTS, fds)])
+        sock.sendall(body)
+    except OSError as e:
+        print(f"linuxdroid-root: failed sending root request: {e}", file=sys.stderr)
+        sock.close()
+        return 126
 
     def forward(signum, _frame):
         try:
@@ -71,9 +162,26 @@ def main(argv):
         except OSError:
             pass
 
-    for signum in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP, signal.SIGQUIT, signal.SIGUSR1, signal.SIGUSR2):
-        signal.signal(signum, forward)
-    signal.signal(signal.SIGTSTP, signal.SIG_IGN)
+    forwarded_signals = [
+        signal.SIGINT,
+        signal.SIGTERM,
+        signal.SIGHUP,
+        signal.SIGQUIT,
+        signal.SIGUSR1,
+        signal.SIGUSR2,
+    ]
+    if hasattr(signal, "SIGWINCH"):
+        forwarded_signals.append(signal.SIGWINCH)
+    for signum in forwarded_signals:
+        try:
+            signal.signal(signum, forward)
+        except (OSError, ValueError):
+            pass
+    try:
+        signal.signal(signal.SIGTSTP, signal.SIG_IGN)
+    except (OSError, ValueError):
+        pass
+
     status = 1
     while True:
         try:
@@ -85,12 +193,24 @@ def main(argv):
         if head is None:
             break
         kind = chr(head[0])
-        payload = read_exact(sock, struct.unpack(">i", head[1:])[0]) or b""
+        length = struct.unpack(">i", head[1:])[0]
+        try:
+            payload = read_exact(sock, length) if length > 0 else b""
+        except InterruptedError:
+            continue
+        except OSError:
+            break
+        if payload is None:
+            break
         if kind == "E":
             print("linuxdroid-root: " + payload.decode(errors="replace"), file=sys.stderr)
         elif kind == "X":
-            status = int(payload.decode() or "1")
+            try:
+                status = int(payload.decode().strip() or "1")
+            except ValueError:
+                status = 1
             break
+    sock.close()
     return status
 
 

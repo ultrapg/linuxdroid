@@ -162,8 +162,35 @@ object LinuxRuntime {
         }
         FileUtils.writeString(
             File(etcLinuxDroid, "root-socket"),
-            "@${RootSpawner.socketName(context)}\n"
+            "${RootSpawner.socketName(context)}\n"
         )
+
+        // Ensure hardcoded /usr/bin/{sudo,pkexec,su} invocations also use the LinuxDroid root bridge
+        for (tool in listOf("sudo", "pkexec", "su")) {
+            val localWrapper = File(root, "usr/local/bin/$tool")
+            val usrBinTarget = File(root, "usr/bin/$tool")
+            if (localWrapper.isFile) {
+                runCatching {
+                    usrBinTarget.parentFile?.mkdirs()
+                    if (usrBinTarget.isFile) {
+                        val backup = File(root, "usr/bin/$tool.distrib")
+                        val head = ByteArray(4)
+                        val read = usrBinTarget.inputStream().use { it.read(head) }
+                        val isElf = read == 4 && head[0] == 0x7f.toByte() &&
+                            head[1] == 'E'.code.toByte() &&
+                            head[2] == 'L'.code.toByte() &&
+                            head[3] == 'F'.code.toByte()
+                        if (isElf && !backup.exists()) {
+                            usrBinTarget.renameTo(backup)
+                        }
+                    }
+                    localWrapper.copyTo(usrBinTarget, overwrite = true)
+                    FileUtils.chmod(usrBinTarget, 0b111_101_101)
+                }
+            }
+        }
+        File(root, "etc/sudoers").takeIf { it.isFile }?.let { FileUtils.chmod(it, 0b100_100_000) }
+        File(root, "etc/sudoers.d/90-linuxdroid").takeIf { it.isFile }?.let { FileUtils.chmod(it, 0b100_100_000) }
 
         val preloadLines = buildString {
             append("/usr/local/lib/libblsession.so\n")
