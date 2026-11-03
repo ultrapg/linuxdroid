@@ -1,0 +1,14 @@
+#!/bin/bash
+# LinuxDroid has no systemd. During package installs (dpkg maintainer scripts) pretend service management
+# succeeds so postinst scripts do not fail; otherwise use the real systemctl.
+if [ -n "${DPKG_MAINTSCRIPT_NAME:-}" ] || [ -n "${DPKG_MAINTSCRIPT_PACKAGE:-}" ]; then
+  for a in "$@"; do
+    case "$a" in
+      is-active) echo inactive; exit 3 ;;
+      is-enabled) echo disabled; exit 1 ;;
+      is-system-running) echo offline; exit 1 ;;
+    esac
+  done
+  exit 0
+fi
+exec /usr/bin/systemctl "$@"

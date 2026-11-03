@@ -45,6 +45,7 @@
 0755 usr/local/bin/pkexec
 0755 usr/local/bin/su
 0755 usr/local/bin/sudo
+0755 usr/local/bin/systemctl
 0755 usr/local/lib/libblaudit.so
 0755 usr/local/lib/libblfastpath.so
 0755 usr/local/lib/libblsession.so

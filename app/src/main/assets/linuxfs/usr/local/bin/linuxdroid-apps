@@ -2,6 +2,18 @@
 set -euo pipefail
 
 export FLATPAK_BWRAP="/usr/local/bin/bwrap"
+export DEBIAN_FRONTEND=noninteractive
+
+# Installs packages non-interactively; if dpkg reports an error (for example a package script that expects
+# systemd), finish configuring the packages and retry once.
+apt_install() {
+  sudo env DEBIAN_FRONTEND=noninteractive apt-get update || true
+  if ! sudo env DEBIAN_FRONTEND=noninteractive apt-get install -y "$@"; then
+    echo "==> Install reported errors; repairing package state and retrying..."
+    sudo env DEBIAN_FRONTEND=noninteractive dpkg --configure -a || true
+    sudo env DEBIAN_FRONTEND=noninteractive apt-get install -y -f "$@"
+  fi
+}
 
 ALL_ITEMS=(
   "warehouse|Warehouse (Flatpak Store) — Flatpak + Flathub + Warehouse GUI"
@@ -98,8 +110,7 @@ status_tag() {
 
 install_warehouse() {
   echo "==> Installing Flatpak, Flathub repository, and Warehouse (Flatpak Store)..."
-  sudo apt-get update
-  sudo apt-get install -y \
+  apt_install \
     flatpak \
     xdg-dbus-proxy \
     ca-certificates \
@@ -141,15 +152,20 @@ install_fex_rootfs() {
 
 install_chromium() {
   echo "==> Installing Chromium (ARM64, non-Snap build from the xtradeb PPA)..."
+  apt_install ca-certificates curl gnupg
   sudo sh -c '
-    apt-get update
-    apt-get install -y software-properties-common ca-certificates
-    add-apt-repository -y ppa:xtradeb/apps
-    # Ubuntu ships chromium-browser as a Snap stub that cannot run here; prefer the PPA package.
+    set -e
+    # Ubuntu ships chromium as a Snap stub that cannot run here, so add the xtradeb PPA by hand
+    # (without software-properties-common, which needs systemd/dbus).
+    curl -fsSL "https://keyserver.ubuntu.com/pks/lookup?op=get&search=0x5301FA4FD93244FBC6F6149982BB6851C64F6880" \
+      | gpg --dearmor > /usr/share/keyrings/xtradeb-apps.gpg
+    echo "deb [arch=arm64 signed-by=/usr/share/keyrings/xtradeb-apps.gpg] https://ppa.launchpadcontent.net/xtradeb/apps/ubuntu noble main" \
+      > /etc/apt/sources.list.d/xtradeb-apps.list
     printf "%s\n" "Package: chromium*" "Pin: release o=LP-PPA-xtradeb-apps" "Pin-Priority: 1001" "" \
       "Package: chromium-browser" "Pin: release *" "Pin-Priority: -1" > /etc/apt/preferences.d/linuxdroid-chromium
-    apt-get update
-    apt-get install -y chromium
+  '
+  apt_install chromium
+  sudo sh -c '
     mkdir -p /etc/chromium.d
     printf "%s\n" "export CHROMIUM_FLAGS=\"\$CHROMIUM_FLAGS --no-sandbox --disable-gpu-sandbox --disable-dev-shm-usage --ozone-platform-hint=auto\"" \
       > /etc/chromium.d/linuxdroid
@@ -158,11 +174,14 @@ install_chromium() {
       sed -i "s#^Exec=\([^ ]*chromium[^ ]*\)#Exec=\1 --no-sandbox --disable-gpu-sandbox --disable-dev-shm-usage --ozone-platform-hint=auto#" "$f"
     fi
   '
+  echo "==> Chromium installed."
 }
 
 install_vscodium() {
   echo "==> Installing VSCodium (ARM64)..."
   sudo sh -c '
+    set -e
+    export DEBIAN_FRONTEND=noninteractive
     curl -fsSL https://gitlab.com/paulcarroty/vscodium-deb-rpm-repo/raw/master/pub.gpg \
       | gpg --dearmor > /usr/share/keyrings/vscodium-archive-keyring.gpg
     echo "deb [ signed-by=/usr/share/keyrings/vscodium-archive-keyring.gpg ] https://download.vscodium.com/debs vscodium main" \
@@ -177,6 +196,8 @@ install_vscodium() {
 install_vscode() {
   echo "==> Installing Visual Studio Code (ARM64)..."
   sudo sh -c '
+    set -e
+    export DEBIAN_FRONTEND=noninteractive
     curl -fsSL https://packages.microsoft.com/keys/microsoft.asc \
       | gpg --dearmor > /usr/share/keyrings/packages.microsoft.gpg
     echo "deb [arch=arm64 signed-by=/usr/share/keyrings/packages.microsoft.gpg] https://packages.microsoft.com/repos/code stable main" \
@@ -190,62 +211,62 @@ install_vscode() {
 
 install_blender() {
   echo "==> Installing Blender (3D Creation Suite)..."
-  sudo apt-get update && sudo apt-get install -y blender
+  apt_install blender
 }
 
 install_krita() {
   echo "==> Installing Krita (Digital Painting Studio)..."
-  sudo apt-get update && sudo apt-get install -y krita
+  apt_install krita
 }
 
 install_obs_studio() {
   echo "==> Installing OBS Studio (Screen Recording & Streaming)..."
-  sudo apt-get update && sudo apt-get install -y obs-studio
+  apt_install obs-studio
 }
 
 install_kdenlive() {
   echo "==> Installing Kdenlive (Non-Linear Video Editor)..."
-  sudo apt-get update && sudo apt-get install -y kdenlive
+  apt_install kdenlive
 }
 
 install_libreoffice() {
   echo "==> Installing LibreOffice Workstation Suite..."
-  sudo apt-get update && sudo apt-get install -y libreoffice
+  apt_install libreoffice
 }
 
 install_gimp() {
   echo "==> Installing GIMP Image Editor..."
-  sudo apt-get update && sudo apt-get install -y gimp
+  apt_install gimp
 }
 
 install_dev_tools() {
   echo "==> Installing C/C++, CMake, Python & Node.js Build Toolchain..."
-  sudo apt-get update && sudo apt-get install -y build-essential cmake ninja-build pkg-config gdb python3-pip python3-venv nodejs npm
+  apt_install build-essential cmake ninja-build pkg-config gdb python3-pip python3-venv nodejs npm
 }
 
 install_rust() {
   echo "==> Installing Rust Toolchain (rustc, cargo)..."
-  sudo apt-get update && sudo apt-get install -y rustc cargo
+  apt_install rustc cargo
 }
 
 install_golang() {
   echo "==> Installing Go Toolchain (golang-go)..."
-  sudo apt-get update && sudo apt-get install -y golang-go
+  apt_install golang-go
 }
 
 install_openjdk() {
   echo "==> Installing OpenJDK 21 SDK (Java Development Kit)..."
-  sudo apt-get update && sudo apt-get install -y openjdk-21-jdk
+  apt_install openjdk-21-jdk
 }
 
 install_docker_cli() {
   echo "==> Installing Docker CLI (docker.io, docker-buildx, docker-compose-v2)..."
-  sudo apt-get update && sudo apt-get install -y docker.io docker-buildx docker-compose-v2
+  apt_install docker.io docker-buildx docker-compose-v2
 }
 
 install_podman() {
   echo "==> Installing Podman (Rootless Container Engine)..."
-  sudo apt-get update && sudo apt-get install -y podman
+  apt_install podman
 }
 
 print_list() {
