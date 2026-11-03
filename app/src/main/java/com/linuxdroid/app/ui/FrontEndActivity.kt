@@ -71,8 +71,12 @@ import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Slider
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Switch
-import androidx.compose.material3.Tab
-import androidx.compose.material3.TabRow
+import androidx.compose.material3.NavigationBar
+import androidx.compose.material3.NavigationBarItem
+import androidx.compose.material3.FilledTonalButton
+import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.TopAppBar
+import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -134,7 +138,7 @@ class FrontEndActivity : ComponentActivity() {
         }
 
         setContent {
-            LinuxDroidTheme {
+            LinuxDroidTheme(dynamic = true) {
                 DashboardScreen(
                     onLaunchDesktop = { openDesktopSession() },
                     onOpenTerminal = { root ->
@@ -180,7 +184,7 @@ private enum class DashboardTab(val label: String, val icon: ImageVector) {
     SYSTEM("System", Icons.Outlined.Settings),
 }
 
-@OptIn(ExperimentalLayoutApi::class)
+@OptIn(ExperimentalLayoutApi::class, ExperimentalMaterial3Api::class)
 @Composable
 private fun DashboardScreen(
     onLaunchDesktop: () -> Unit,
@@ -348,6 +352,63 @@ private fun DashboardScreen(
 
     Scaffold(
         containerColor = MaterialTheme.colorScheme.background,
+        topBar = {
+            TopAppBar(
+                title = {
+                    Column {
+                        Text(
+                            text = "LinuxDroid",
+                            style = MaterialTheme.typography.titleLarge,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                        )
+                        Text(
+                            text = "${cpuTopology.totalCores} cores • ${gpuInfo.shortSummary()}",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                        )
+                    }
+                },
+                actions = {
+                    if (installedReady && !installSnap.active && selectedTab != DashboardTab.WORKSTATION.ordinal) {
+                        FilledTonalButton(
+                            onClick = onLaunchDesktop,
+                            contentPadding = PaddingValues(horizontal = 16.dp, vertical = 6.dp),
+                        ) {
+                            Icon(Icons.Outlined.PlayArrow, contentDescription = null, modifier = Modifier.size(18.dp))
+                            Spacer(Modifier.width(6.dp))
+                            Text(
+                                text = when {
+                                    hasPendingRestartChanges -> "Apply"
+                                    sessionSnap.phase == SessionPhase.RUNNING -> "Open"
+                                    else -> "Launch"
+                                },
+                                softWrap = false,
+                                maxLines = 1,
+                            )
+                        }
+                        Spacer(Modifier.width(8.dp))
+                    }
+                },
+                colors = TopAppBarDefaults.topAppBarColors(
+                    containerColor = MaterialTheme.colorScheme.background,
+                ),
+            )
+        },
+        bottomBar = {
+            NavigationBar {
+                DashboardTab.entries.forEachIndexed { index, tab ->
+                    NavigationBarItem(
+                        selected = selectedTab == index,
+                        onClick = { selectedTab = index },
+                        icon = { Icon(tab.icon, contentDescription = null) },
+                        label = { Text(tab.label, maxLines = 1, softWrap = false) },
+                    )
+                }
+            }
+        },
     ) { innerPadding ->
         Box(
             modifier = Modifier
@@ -360,91 +421,6 @@ private fun DashboardScreen(
                     .fillMaxSize()
                     .widthIn(max = 880.dp),
             ) {
-                // Fixed Top Header Bar (never changes height)
-                Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .height(64.dp)
-                        .padding(horizontal = 18.dp),
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.CenterVertically,
-                ) {
-                    Column(modifier = Modifier.weight(1f)) {
-                        Text(
-                            text = "LinuxDroid",
-                            style = MaterialTheme.typography.titleLarge,
-                            fontWeight = FontWeight.Bold,
-                            color = MaterialTheme.colorScheme.onBackground,
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis,
-                        )
-                        Text(
-                            text = "${cpuTopology.totalCores} ARM64 Cores • ${gpuInfo.shortSummary()}",
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis,
-                        )
-                    }
-
-                    Row(
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(6.dp),
-                    ) {
-                        if (installedReady && !installSnap.active && selectedTab != DashboardTab.WORKSTATION.ordinal) {
-                            Button(
-                                onClick = onLaunchDesktop,
-                                contentPadding = PaddingValues(horizontal = 14.dp, vertical = 6.dp),
-                                modifier = Modifier.height(36.dp),
-                            ) {
-                                Icon(Icons.Outlined.PlayArrow, contentDescription = null, modifier = Modifier.size(18.dp))
-                                Spacer(Modifier.width(4.dp))
-                                Text(
-                                    text = when {
-                                        hasPendingRestartChanges -> "Apply"
-                                        sessionSnap.phase == SessionPhase.RUNNING -> "Open"
-                                        else -> "Launch"
-                                    },
-                                    style = MaterialTheme.typography.labelLarge,
-                                    softWrap = false,
-                                    maxLines = 1,
-                                )
-                            }
-                        }
-                    }
-                }
-
-                // Fixed Navigation Tab Row (stacked icon + concise label so zero tabs truncate on narrow phones)
-                TabRow(
-                    selectedTabIndex = selectedTab,
-                    containerColor = MaterialTheme.colorScheme.surface,
-                    contentColor = MaterialTheme.colorScheme.primary,
-                    modifier = Modifier.fillMaxWidth(),
-                ) {
-                    DashboardTab.entries.forEachIndexed { index, tab ->
-                        Tab(
-                            selected = selectedTab == index,
-                            onClick = { selectedTab = index },
-                            modifier = Modifier.height(54.dp),
-                        ) {
-                            Column(
-                                horizontalAlignment = Alignment.CenterHorizontally,
-                                verticalArrangement = Arrangement.spacedBy(2.dp),
-                                modifier = Modifier.padding(horizontal = 4.dp, vertical = 4.dp),
-                            ) {
-                                Icon(tab.icon, contentDescription = null, modifier = Modifier.size(18.dp))
-                                Text(
-                                    text = tab.label,
-                                    style = MaterialTheme.typography.labelMedium,
-                                    softWrap = false,
-                                    maxLines = 1,
-                                    overflow = TextOverflow.Ellipsis,
-                                )
-                            }
-                        }
-                    }
-                }
-
                 // Tab Viewport (Independent scrollable container per tab)
                 val tabScrollState = rememberScrollState()
                 LaunchedEffect(selectedTab) {
@@ -462,8 +438,7 @@ private fun DashboardScreen(
                     if (hasPendingRestartChanges) {
                         Surface(
                             shape = RoundedCornerShape(12.dp),
-                            color = MaterialTheme.colorScheme.primary.copy(alpha = 0.14f),
-                            border = BorderStroke(1.dp, MaterialTheme.colorScheme.primary.copy(alpha = 0.6f)),
+                            color = MaterialTheme.colorScheme.primaryContainer,
                             modifier = Modifier.fillMaxWidth(),
                         ) {
                             Row(
@@ -475,13 +450,13 @@ private fun DashboardScreen(
                             ) {
                                 Column(modifier = Modifier.weight(1f)) {
                                     Text(
-                                        text = "Settings updated for active session",
+                                        text = "Restart to apply changes",
                                         style = MaterialTheme.typography.bodyMedium,
                                         fontWeight = FontWeight.SemiBold,
                                         color = MaterialTheme.colorScheme.onSurface,
                                     )
                                     Text(
-                                        text = "Restart & open the desktop to apply your new HiDPI scaling, display, or hardware settings.",
+                                        text = "Your display or hardware settings changed.",
                                         style = MaterialTheme.typography.bodySmall,
                                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                                     )
@@ -639,7 +614,7 @@ private fun DashboardScreen(
     if (showDeleteConfirmDialog) {
         AlertDialog(
             onDismissRequest = { showDeleteConfirmDialog = false },
-            title = { Text("Delete Linux Edition?") },
+            title = { Text("Delete edition?") },
             text = {
                 Text(
                     "Are you sure you want to delete \"$installedLabel\"?\n\n" +
@@ -656,12 +631,12 @@ private fun DashboardScreen(
                     },
                     colors = ButtonDefaults.buttonColors(
                         containerColor = MaterialTheme.colorScheme.error,
-                        contentColor = Color(0xFF1A0404),
+                        contentColor = MaterialTheme.colorScheme.onError,
                     ),
                 ) {
                     Icon(Icons.Outlined.DeleteOutline, contentDescription = null, modifier = Modifier.size(18.dp))
                     Spacer(Modifier.width(6.dp))
-                    Text("Yes, Delete")
+                    Text("Delete")
                 }
             },
             dismissButton = {
@@ -740,7 +715,7 @@ private fun WorkstationTabContent(
     SectionCard {
         val statusColor = when (sessionSnap.phase) {
             SessionPhase.RUNNING -> MaterialTheme.colorScheme.secondary
-            SessionPhase.STARTING, SessionPhase.PAUSED -> Color(0xFFFBBF24)
+            SessionPhase.STARTING, SessionPhase.PAUSED -> MaterialTheme.colorScheme.tertiary
             SessionPhase.FAILED -> MaterialTheme.colorScheme.error
             else -> if (installedReady) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.outline
         }
@@ -767,11 +742,11 @@ private fun WorkstationTabContent(
                 Text(
                     text = when (sessionSnap.phase) {
                         SessionPhase.STOPPED -> {
-                            if (installedReady) "Ready to launch • Non-root user '$username'"
-                            else "No Linux edition installed — download an edition below"
+                            if (installedReady) "Ready • User: $username"
+                            else "No edition installed yet"
                         }
                         SessionPhase.FAILED -> {
-                            sessionSnap.errorMessage ?: "Last desktop startup failed — check System logs or retry"
+                            sessionSnap.errorMessage ?: "Startup failed. Check logs in System."
                         }
                         SessionPhase.STARTING -> {
                             "Step ${sessionSnap.bootStep.coerceAtLeast(1)}/${sessionSnap.bootTotalSteps}: ${sessionSnap.statusText}"
@@ -916,9 +891,9 @@ private fun WorkstationTabContent(
         SectionHeader("Linux Desktop Editions")
         Text(
             text = if (installedEditionId != null) {
-                "One edition is active. To keep the system stable, delete the installed edition first before installing another."
+                "Only one edition can be installed. Delete it to install another."
             } else {
-                "Install one Ubuntu 24.04 LTS ARM64 desktop edition (includes Firefox, MPV, FEX-Emu x86_64, and SoC GPU drivers)."
+                "Choose an Ubuntu 24.04 desktop to install."
             },
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
@@ -934,7 +909,7 @@ private fun WorkstationTabContent(
             )
             val installLogScroll = rememberScrollState()
             val logContent = remember(installSnap.recentEntries) {
-                if (installSnap.recentEntries.isEmpty()) "Preparing operation..."
+                if (installSnap.recentEntries.isEmpty()) "Preparing..."
                 else installSnap.recentEntries.joinToString("\n")
             }
             LaunchedEffect(logContent) {
@@ -984,8 +959,7 @@ private fun WorkstationTabContent(
                 // Fixed-height scrollable console box
                 Surface(
                     shape = RoundedCornerShape(8.dp),
-                    color = Color(0xFF070B10),
-                    border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline),
+                    color = MaterialTheme.colorScheme.surfaceContainerLowest,
                     modifier = Modifier
                         .fillMaxWidth()
                         .weight(1f),
@@ -1001,7 +975,7 @@ private fun WorkstationTabContent(
                             fontFamily = FontFamily.Monospace,
                             fontSize = 11.sp,
                             lineHeight = 15.sp,
-                            color = Color(0xFFB8C4D4),
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
                         )
                     }
                 }
@@ -1023,7 +997,7 @@ private fun WorkstationTabContent(
                         }
                     } else {
                         Text(
-                            text = "Cleaning up root filesystem...",
+                            text = "Cleaning up...",
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                         )
@@ -1034,8 +1008,7 @@ private fun WorkstationTabContent(
             if (installSnap.error != null) {
                 Surface(
                     shape = RoundedCornerShape(8.dp),
-                    color = MaterialTheme.colorScheme.error.copy(alpha = 0.12f),
-                    border = BorderStroke(1.dp, MaterialTheme.colorScheme.error.copy(alpha = 0.5f)),
+                    color = MaterialTheme.colorScheme.errorContainer,
                     modifier = Modifier
                         .fillMaxWidth()
                         .padding(bottom = 10.dp),
@@ -1055,8 +1028,7 @@ private fun WorkstationTabContent(
             val editionsScroll = rememberScrollState()
             Surface(
                 shape = RoundedCornerShape(10.dp),
-                color = Color(0xFF0E151D),
-                border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline),
+                color = MaterialTheme.colorScheme.surfaceContainerLow,
                 modifier = Modifier
                     .fillMaxWidth()
                     .height(284.dp),
@@ -1110,9 +1082,9 @@ private fun WorkstationTabContent(
                 Spacer(Modifier.width(8.dp))
                 Text(
                     text = if (installedEditionId == null) {
-                        "Import Custom Rootfs (.tar.zst / .xz)"
+                        "Import custom rootfs"
                     } else {
-                        "Delete Active Edition to Import Custom"
+                        "Delete the edition to import"
                     },
                     softWrap = false,
                     maxLines = 1,
@@ -1257,8 +1229,7 @@ private fun HardwareTabContent(
                     val coresScroll = rememberScrollState()
                     Surface(
                         shape = RoundedCornerShape(8.dp),
-                        color = Color(0xFF0E151D),
-                        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline),
+                        color = MaterialTheme.colorScheme.surfaceContainerLow,
                         modifier = Modifier
                             .fillMaxWidth()
                             .height(188.dp),
@@ -1280,14 +1251,10 @@ private fun HardwareTabContent(
                                 Surface(
                                     shape = RoundedCornerShape(8.dp),
                                     color = if (isChecked) {
-                                        MaterialTheme.colorScheme.surfaceVariant
+                                        MaterialTheme.colorScheme.secondaryContainer
                                     } else {
-                                        MaterialTheme.colorScheme.surface
+                                        MaterialTheme.colorScheme.surfaceContainerHigh
                                     },
-                                    border = BorderStroke(
-                                        1.dp,
-                                        if (isChecked) MaterialTheme.colorScheme.primary.copy(alpha = 0.7f) else MaterialTheme.colorScheme.outline,
-                                    ),
                                     modifier = Modifier
                                         .fillMaxWidth()
                                         .clickable {
@@ -1402,8 +1369,7 @@ private fun HardwareTabContent(
         val gpuListScroll = rememberScrollState()
         Surface(
             shape = RoundedCornerShape(10.dp),
-            color = Color(0xFF0E151D),
-            border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline),
+            color = MaterialTheme.colorScheme.surfaceContainerLow,
             modifier = Modifier
                 .fillMaxWidth()
                 .height(268.dp),
@@ -1519,8 +1485,7 @@ private fun DisplayTabContent(
         val extScroll = rememberScrollState()
         Surface(
             shape = RoundedCornerShape(10.dp),
-            color = Color(0xFF0E151D),
-            border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline),
+            color = MaterialTheme.colorScheme.surfaceContainerLow,
             modifier = Modifier
                 .fillMaxWidth()
                 .height(228.dp),
@@ -1666,8 +1631,7 @@ private fun SystemTabContent(
         val mountsScroll = rememberScrollState()
         Surface(
             shape = RoundedCornerShape(10.dp),
-            color = Color(0xFF0E151D),
-            border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline),
+            color = MaterialTheme.colorScheme.surfaceContainerLow,
             modifier = Modifier
                 .fillMaxWidth()
                 .height(104.dp),
@@ -1778,8 +1742,7 @@ private fun SystemTabContent(
         val diagScroll = rememberScrollState()
         Surface(
             shape = RoundedCornerShape(8.dp),
-            color = Color(0xFF070B10),
-            border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline),
+            color = MaterialTheme.colorScheme.surfaceContainerLowest,
             modifier = Modifier
                 .fillMaxWidth()
                 .height(160.dp),
@@ -1795,7 +1758,7 @@ private fun SystemTabContent(
                     fontFamily = FontFamily.Monospace,
                     fontSize = 11.sp,
                     lineHeight = 15.sp,
-                    color = Color(0xFFB8C4D4),
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
             }
         }
@@ -1822,9 +1785,8 @@ private fun SystemTabContent(
 @Composable
 private fun SectionCard(content: @Composable () -> Unit) {
     Card(
-        shape = RoundedCornerShape(14.dp),
-        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
-        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline),
+        shape = RoundedCornerShape(24.dp),
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainer),
         modifier = Modifier.fillMaxWidth(),
     ) {
         Column(modifier = Modifier.padding(16.dp)) {
@@ -1838,7 +1800,6 @@ private fun SectionHeader(title: String) {
     Text(
         text = title,
         style = MaterialTheme.typography.titleMedium,
-        fontWeight = FontWeight.SemiBold,
         modifier = Modifier.padding(bottom = 6.dp),
     )
 }
@@ -1848,19 +1809,15 @@ private fun InfoPill(text: String, accent: Boolean = false) {
     Surface(
         shape = RoundedCornerShape(20.dp),
         color = if (accent) {
-            MaterialTheme.colorScheme.secondary.copy(alpha = 0.16f)
+            MaterialTheme.colorScheme.secondaryContainer
         } else {
-            MaterialTheme.colorScheme.surfaceVariant
+            MaterialTheme.colorScheme.surfaceContainerHighest
         },
-        border = BorderStroke(
-            1.dp,
-            if (accent) MaterialTheme.colorScheme.secondary.copy(alpha = 0.6f) else MaterialTheme.colorScheme.outline,
-        ),
     ) {
         Text(
             text = text,
-            style = MaterialTheme.typography.labelSmall,
-            color = if (accent) MaterialTheme.colorScheme.secondary else MaterialTheme.colorScheme.onSurface,
+            style = MaterialTheme.typography.labelMedium,
+            color = if (accent) MaterialTheme.colorScheme.onSecondaryContainer else MaterialTheme.colorScheme.onSurface,
             maxLines = 2,
             overflow = TextOverflow.Ellipsis,
             modifier = Modifier.padding(horizontal = 10.dp, vertical = 5.dp),
@@ -1876,12 +1833,8 @@ private fun SelectableOptionCard(
     onClick: () -> Unit,
 ) {
     Surface(
-        shape = RoundedCornerShape(10.dp),
-        color = if (selected) MaterialTheme.colorScheme.surfaceVariant else MaterialTheme.colorScheme.surface,
-        border = BorderStroke(
-            1.dp,
-            if (selected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.outline,
-        ),
+        shape = RoundedCornerShape(12.dp),
+        color = if (selected) MaterialTheme.colorScheme.secondaryContainer else MaterialTheme.colorScheme.surfaceContainerHigh,
         modifier = Modifier
             .fillMaxWidth()
             .clickable(onClick = onClick),
@@ -1923,16 +1876,12 @@ private fun EditionRow(
     onDelete: () -> Unit,
 ) {
     Surface(
-        shape = RoundedCornerShape(10.dp),
+        shape = RoundedCornerShape(12.dp),
         color = if (isInstalled) {
-            MaterialTheme.colorScheme.surfaceVariant
+            MaterialTheme.colorScheme.secondaryContainer
         } else {
-            MaterialTheme.colorScheme.surface
+            MaterialTheme.colorScheme.surfaceContainerHigh
         },
-        border = BorderStroke(
-            1.dp,
-            if (isInstalled) MaterialTheme.colorScheme.secondary else MaterialTheme.colorScheme.outline,
-        ),
         modifier = Modifier.fillMaxWidth(),
     ) {
         Column(
@@ -1955,7 +1904,7 @@ private fun EditionRow(
                 if (isInstalled) {
                     Surface(
                         shape = RoundedCornerShape(12.dp),
-                        color = MaterialTheme.colorScheme.secondary.copy(alpha = 0.18f),
+                        color = MaterialTheme.colorScheme.primary,
                     ) {
                         Row(
                             modifier = Modifier.padding(horizontal = 8.dp, vertical = 3.dp),
@@ -1965,13 +1914,13 @@ private fun EditionRow(
                             Icon(
                                 imageVector = Icons.Outlined.CheckCircle,
                                 contentDescription = null,
-                                tint = MaterialTheme.colorScheme.secondary,
+                                tint = MaterialTheme.colorScheme.onPrimary,
                                 modifier = Modifier.size(13.dp),
                             )
                             Text(
                                 text = "Installed",
                                 style = MaterialTheme.typography.labelSmall,
-                                color = MaterialTheme.colorScheme.secondary,
+                                color = MaterialTheme.colorScheme.onPrimary,
                                 softWrap = false,
                                 maxLines = 1,
                             )
@@ -2008,7 +1957,6 @@ private fun EditionRow(
                     OutlinedButton(
                         onClick = onDelete,
                         colors = ButtonDefaults.outlinedButtonColors(contentColor = MaterialTheme.colorScheme.error),
-                        border = BorderStroke(1.dp, MaterialTheme.colorScheme.error.copy(alpha = 0.7f)),
                         contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp),
                         modifier = Modifier.height(36.dp),
                     ) {
