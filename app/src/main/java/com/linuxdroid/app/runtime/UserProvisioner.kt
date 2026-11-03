@@ -8,11 +8,11 @@ object UserProvisioner {
     private val MOUNT_NAME_REGEX = Regex("[^A-Za-z0-9._-]+")
 
     private val SUPPLEMENTAL_GROUPS = listOf(
-        Triple("sudo", 27, true),
-        Triple("video", 44, true),
-        Triple("audio", 29, true),
-        Triple("render", 109, true),
-        Triple("plugdev", 46, true),
+        Triple("sudo", 27, false),
+        Triple("video", 44, false),
+        Triple("audio", 29, false),
+        Triple("render", 109, false),
+        Triple("plugdev", 46, false),
         Triple("sdcard_rw", 1015, true),
         Triple("media_rw", 1023, true),
         Triple("sdcard_r", 1028, true),
@@ -68,7 +68,9 @@ object UserProvisioner {
     private fun dynamicAndroidGroups(hostUid: Int, extraGids: IntArray): List<Triple<String, Int, Boolean>> {
         val result = ArrayList<Triple<String, Int, Boolean>>()
         val seen = HashSet<Int>()
-        for ((_, gid, _) in SUPPLEMENTAL_GROUPS) seen.add(gid)
+        for ((_, gid, requireExactGid) in SUPPLEMENTAL_GROUPS) {
+            if (requireExactGid) seen.add(gid)
+        }
         if (hostUid > 0) seen.add(hostUid)
 
         fun addGid(gid: Int) {
@@ -138,8 +140,8 @@ object UserProvisioner {
         val safeUser = sanitizeUsername(username)
         val uidStr = hostUid.toString()
         val allSupplemental = SUPPLEMENTAL_GROUPS + dynamicAndroidGroups(hostUid, extraGids)
-        val seenNames = HashSet<String>()
-        val seenGids = HashSet<String>()
+        val seenNames = HashSet<String>( listOf("root", safeUser) )
+        val seenGids = HashSet<String>( listOf("0", uidStr) )
         val extraLines = ArrayList<String>()
 
         existing?.lineSequence()?.forEach { rawLine ->
@@ -156,8 +158,6 @@ object UserProvisioner {
                 members.add(safeUser)
                 members.add("root")
                 fields[3] = members.joinToString(",")
-                seenNames.add(supMatch.first)
-                seenGids.add(supMatch.second.toString())
             }
             seenNames.add(gname)
             seenGids.add(gid)
@@ -168,11 +168,15 @@ object UserProvisioner {
             append("root:x:0:root\n")
             append("$safeUser:x:$hostUid:$safeUser\n")
             for (line in extraLines) append(line).append('\n')
-            for ((gname, gid, _) in allSupplemental) {
-                if (gname !in seenNames && gid.toString() !in seenGids) {
-                    append("$gname:x:$gid:$safeUser,root\n")
-                    seenNames.add(gname)
-                    seenGids.add(gid.toString())
+            for ((gname, gid, requireExactGid) in allSupplemental) {
+                val gidStr = gid.toString()
+                if (gidStr in seenGids) continue
+                if (!requireExactGid && gname in seenNames) continue
+                val finalName = if (gname in seenNames) "aid_$gid" else gname
+                if (finalName !in seenNames) {
+                    append("$finalName:x:$gid:$safeUser,root\n")
+                    seenNames.add(finalName)
+                    seenGids.add(gidStr)
                 }
             }
         }

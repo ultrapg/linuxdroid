@@ -42,6 +42,8 @@ struct bl_pid_ticks {
   int32_t pid;
   uint64_t utime;
   uint64_t stime;
+  uint64_t cutime;
+  uint64_t cstime;
 };
 
 struct bl_procstat_state {
@@ -192,7 +194,8 @@ struct proc_scan_summary {
 };
 
 static int parse_pid_stat_line(const char *buf, char *state_out, uint64_t *utime_out,
-                               uint64_t *stime_out, int *cpu_out) {
+                               uint64_t *stime_out, uint64_t *cutime_out, uint64_t *cstime_out,
+                               int *cpu_out) {
   const char *rparen = strrchr(buf, ')');
   if (!rparen || rparen[1] != ' ' || rparen[2] == '\0') return -1;
   *state_out = rparen[2];
@@ -202,9 +205,11 @@ static int parse_pid_stat_line(const char *buf, char *state_out, uint64_t *utime
   /* Fields after state (field 3) start at field 4 (ppid).
    * Field 14 = utime (index 10 after field 4)
    * Field 15 = stime (index 11 after field 4)
+   * Field 16 = cutime (index 12 after field 4)
+   * Field 17 = cstime (index 13 after field 4)
    * Field 39 = processor (index 35 after field 4)
    */
-  uint64_t utime = 0, stime = 0;
+  uint64_t utime = 0, stime = 0, cutime = 0, cstime = 0;
   int cpu = 0;
   for (int idx = 0; idx <= 35 && *p; idx++) {
     char *end = NULL;
@@ -212,11 +217,17 @@ static int parse_pid_stat_line(const char *buf, char *state_out, uint64_t *utime
       utime = strtoull(p, &end, 10);
     } else if (idx == 11) {
       stime = strtoull(p, &end, 10);
+    } else if (idx == 12) {
+      long long v = strtoll(p, &end, 10);
+      cutime = v > 0 ? (uint64_t)v : 0ULL;
+    } else if (idx == 13) {
+      long long v = strtoll(p, &end, 10);
+      cstime = v > 0 ? (uint64_t)v : 0ULL;
     } else if (idx == 35) {
       cpu = (int)strtol(p, &end, 10);
     } else {
-      while (*p && *p != ' ' && *p != '\n') p++;
       end = (char *)p;
+      while (*end && *end != ' ' && *end != '\n') end++;
     }
     if (end == p) break;
     p = end;
@@ -224,6 +235,8 @@ static int parse_pid_stat_line(const char *buf, char *state_out, uint64_t *utime
   }
   *utime_out = utime;
   *stime_out = stime;
+  *cutime_out = cutime;
+  *cstime_out = cstime;
   *cpu_out = cpu >= 0 ? cpu : 0;
   return 0;
 }
@@ -254,8 +267,8 @@ static void scan_proc_tasks(struct proc_scan_summary *sum, int ncpu) {
     if (!end || *end != '\0' || pid <= 0) continue;
 
     char rel[64];
-    snprintf(rel, sizeof(rel), "%ld/stat", pid);
-    int sfd = raw_openat(pfd, rel, O_RDONLY | O_CLOEXEC, 0);
+    snprintf(rel, sizeof(rel), "/proc/%ld/stat", pid);
+    int sfd = raw_openat(AT_FDCWD, rel, O_RDONLY | O_CLOEXEC, 0);
     if (sfd < 0) continue;
     char sbuf[1024];
     ssize_t n = raw_read(sfd, sbuf, sizeof(sbuf) - 1);
@@ -264,9 +277,9 @@ static void scan_proc_tasks(struct proc_scan_summary *sum, int ncpu) {
     sbuf[n] = '\0';
 
     char state = 'S';
-    uint64_t utime = 0, stime = 0;
+    uint64_t utime = 0, stime = 0, cutime = 0, cstime = 0;
     int cpu = 0;
-    if (parse_pid_stat_line(sbuf, &state, &utime, &stime, &cpu) != 0) continue;
+    if (parse_pid_stat_line(sbuf, &state, &utime, &stime, &cutime, &cstime, &cpu) != 0) continue;
 
     sum->total_tasks++;
     if ((int)pid > sum->max_pid) sum->max_pid = (int)pid;
@@ -283,6 +296,8 @@ static void scan_proc_tasks(struct proc_scan_summary *sum, int ncpu) {
       sum->pids[i].pid = (int32_t)pid;
       sum->pids[i].utime = utime;
       sum->pids[i].stime = stime;
+      sum->pids[i].cutime = cutime;
+      sum->pids[i].cstime = cstime;
       sum->pid_cpu[i] = (uint32_t)core;
     }
   }
@@ -313,7 +328,8 @@ static size_t generate_proc_stat(char *buf, size_t cap) {
   lock_state(st);
 
   if (st->magic != SHM_MAGIC || st->version != SHM_VERSION ||
-      st->last_boottime_ticks == 0 || now_ticks < st->last_boottime_ticks) {
+      st->ncpu != (uint32_t)ncpu ||
+      st->last_boottime_ticks == 0 || now_ticks + 100ULL < st->last_boottime_ticks) {
     st->magic = SHM_MAGIC;
     st->version = SHM_VERSION;
     st->ncpu = (uint32_t)ncpu;
@@ -333,16 +349,36 @@ static size_t generate_proc_stat(char *buf, size_t cap) {
     st->ctxt_total = now_ticks * (uint64_t)ncpu * 12ULL;
     st->processes_total = (scan.max_pid > 256) ? (uint64_t)scan.max_pid : 256ULL;
   } else {
-    uint64_t dt = now_ticks - st->last_boottime_ticks;
+    uint64_t dt = (now_ticks > st->last_boottime_ticks) ? (now_ticks - st->last_boottime_ticks) : 1ULL;
     uint64_t du_core[MAX_CPUS];
     uint64_t ds_core[MAX_CPUS];
     memset(du_core, 0, sizeof(du_core));
     memset(ds_core, 0, sizeof(ds_core));
 
+    uint64_t exited_u = 0, exited_s = 0;
+    for (uint32_t j = 0; j < st->npids; j++) {
+      int32_t old_pid = st->pids[j].pid;
+      int still_alive = 0;
+      for (uint32_t i = 0; i < scan.npids; i++) {
+        if (scan.pids[i].pid == old_pid) {
+          still_alive = 1;
+          break;
+        }
+      }
+      if (!still_alive) {
+        exited_u += st->pids[j].utime;
+        exited_s += st->pids[j].stime;
+      }
+    }
+
+    uint64_t dc_u_total = 0, dc_s_total = 0;
+    uint32_t active_pids = 0;
     for (uint32_t i = 0; i < scan.npids; i++) {
       int32_t pid = scan.pids[i].pid;
       uint64_t u = scan.pids[i].utime;
       uint64_t s = scan.pids[i].stime;
+      uint64_t cu = scan.pids[i].cutime;
+      uint64_t cs = scan.pids[i].cstime;
       uint32_t core = scan.pid_cpu[i] % (uint32_t)ncpu;
       int found = 0;
       for (uint32_t j = 0; j < st->npids; j++) {
@@ -350,16 +386,74 @@ static size_t generate_proc_stat(char *buf, size_t cap) {
           found = 1;
           uint64_t du = (u >= st->pids[j].utime) ? (u - st->pids[j].utime) : u;
           uint64_t ds = (s >= st->pids[j].stime) ? (s - st->pids[j].stime) : s;
+          if (du + ds > 0) {
+            core = (scan.pid_cpu[i] + active_pids++) % (uint32_t)ncpu;
+          }
           du_core[core] += du;
           ds_core[core] += ds;
+          if (cu > st->pids[j].cutime) dc_u_total += (cu - st->pids[j].cutime);
+          if (cs > st->pids[j].cstime) dc_s_total += (cs - st->pids[j].cstime);
           break;
         }
       }
       if (!found) {
-        du_core[core] += u;
-        ds_core[core] += s;
+        uint64_t cap_ticks = dt * (uint64_t)ncpu;
+        uint64_t du = (u <= cap_ticks) ? u : cap_ticks;
+        uint64_t ds = (s <= cap_ticks) ? s : cap_ticks;
+        if (du + ds > 0) {
+          core = (scan.pid_cpu[i] + active_pids++) % (uint32_t)ncpu;
+        }
+        du_core[core] += du;
+        ds_core[core] += ds;
         st->processes_total++;
       }
+    }
+
+    if (dc_u_total > exited_u) {
+      uint64_t short_u = dc_u_total - exited_u;
+      if (short_u > dt * (uint64_t)ncpu) short_u = dt * (uint64_t)ncpu;
+      for (int c = 0; c < ncpu; c++) {
+        du_core[c] += short_u / (uint64_t)ncpu + ((c < (int)(short_u % (uint64_t)ncpu)) ? 1ULL : 0ULL);
+      }
+    }
+    if (dc_s_total > exited_s) {
+      uint64_t short_s = dc_s_total - exited_s;
+      if (short_s > dt * (uint64_t)ncpu) short_s = dt * (uint64_t)ncpu;
+      for (int c = 0; c < ncpu; c++) {
+        ds_core[c] += short_s / (uint64_t)ncpu + ((c < (int)(short_s % (uint64_t)ncpu)) ? 1ULL : 0ULL);
+      }
+    }
+
+    /* Redistribute multi-threaded overflow ticks (> dt on a single core) across cores with spare capacity */
+    uint64_t excess_u = 0, excess_s = 0;
+    for (int c = 0; c < ncpu; c++) {
+      uint64_t busy = du_core[c] + ds_core[c];
+      if (busy > dt) {
+        uint64_t over = busy - dt;
+        uint64_t take_u = (over * du_core[c]) / busy;
+        if (take_u > du_core[c]) take_u = du_core[c];
+        uint64_t take_s = over - take_u;
+        if (take_s > ds_core[c]) {
+          take_s = ds_core[c];
+          take_u = over - take_s;
+        }
+        du_core[c] -= take_u;
+        ds_core[c] -= take_s;
+        excess_u += take_u;
+        excess_s += take_s;
+      }
+    }
+    for (int c = 0; c < ncpu && (excess_u > 0 || excess_s > 0); c++) {
+      uint64_t busy = du_core[c] + ds_core[c];
+      if (busy >= dt) continue;
+      uint64_t room = dt - busy;
+      uint64_t add_u = (excess_u <= room) ? excess_u : room;
+      du_core[c] += add_u;
+      excess_u -= add_u;
+      room -= add_u;
+      uint64_t add_s = (excess_s <= room) ? excess_s : room;
+      ds_core[c] += add_s;
+      excess_s -= add_s;
     }
 
     for (int c = 0; c < ncpu; c++) {
@@ -376,7 +470,7 @@ static size_t generate_proc_stat(char *buf, size_t cap) {
     if ((uint64_t)scan.max_pid > st->processes_total) {
       st->processes_total = (uint64_t)scan.max_pid;
     }
-    st->last_boottime_ticks = now_ticks;
+    st->last_boottime_ticks = (now_ticks > st->last_boottime_ticks) ? now_ticks : (st->last_boottime_ticks + 1ULL);
   }
 
   st->npids = scan.npids;
@@ -775,7 +869,7 @@ static int normalize_proc_target(int dirfd, const char *path, char *out, size_t 
     return strncmp(out, "/proc/", 6) == 0;
   }
 
-  if (dirfd >= 0 &&
+  if ((dirfd >= 0 || dirfd == AT_FDCWD) &&
       (strcmp(path, "stat") == 0 || strcmp(path, "uptime") == 0 ||
        strcmp(path, "loadavg") == 0 || strcmp(path, "vmstat") == 0 ||
        strcmp(path, "diskstats") == 0 || strcmp(path, "swaps") == 0 ||
@@ -783,7 +877,11 @@ static int normalize_proc_target(int dirfd, const char *path, char *out, size_t 
        strcmp(path, "tty/drivers") == 0 || strncmp(path, "1/", 2) == 0)) {
     char fdlink[64];
     char resolved[128];
-    snprintf(fdlink, sizeof(fdlink), "/proc/self/fd/%d", dirfd);
+    if (dirfd == AT_FDCWD) {
+      snprintf(fdlink, sizeof(fdlink), "/proc/self/cwd");
+    } else {
+      snprintf(fdlink, sizeof(fdlink), "/proc/self/fd/%d", dirfd);
+    }
     ssize_t n = (ssize_t)syscall(SYS_readlinkat, AT_FDCWD, fdlink, resolved, sizeof(resolved) - 1);
     if (n > 0) {
       resolved[n] = '\0';
@@ -818,11 +916,17 @@ static int should_synthesize_dynamic_proc(const char *norm_path, int kind) {
     return 1;
   }
 
-  char probe[4096];
-  ssize_t n = raw_read(fd, probe, sizeof(probe) - 1);
+  char probe[32768];
+  size_t total = 0;
+  while (total < sizeof(probe) - 1) {
+    ssize_t n = raw_read(fd, probe + total, sizeof(probe) - 1 - total);
+    if (n < 0 && errno == EINTR) continue;
+    if (n <= 0) break;
+    total += (size_t)n;
+  }
   raw_close(fd);
-  if (n <= 0) return 1;
-  probe[n] = '\0';
+  if (total == 0) return 1;
+  probe[total] = '\0';
   if (kind == PROC_KIND_STAT && strstr(probe, "\nbtime ") == NULL) {
     return 1;
   }

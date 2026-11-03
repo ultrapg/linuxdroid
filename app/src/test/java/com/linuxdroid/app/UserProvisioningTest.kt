@@ -88,5 +88,18 @@ class UserProvisioningTest {
             "Name:\tapp_process64\nUid:\t10948\t10948\t10948\t10948\nGroups:\t3003 9997 20948 50948 \n"
         )
         org.junit.Assert.assertArrayEquals(intArrayOf(3003, 9997, 20948, 50948), parsedGids)
+
+        // If existing /etc/group has render:x:994: (Ubuntu 24.04) or a colliding group name with a different GID,
+        // Android supplementary GIDs must still be emitted under aid_<gid> rather than dropped.
+        val collided = UserProvisioner.buildGroup(
+            existing = "render:x:994:\ninet:x:999:\n",
+            username = "linux",
+            hostUid = 10948,
+            extraGids = intArrayOf(109, 3003, 20948),
+        )
+        assertTrue(collided.contains("render:x:994:linux,root"))
+        assertTrue(collided.contains("aid_109:x:109:linux,root"))
+        assertTrue(collided.contains("aid_3003:x:3003:linux,root"))
+        assertTrue(collided.contains("u0_a948_cache:x:20948:linux,root"))
     }
 }
