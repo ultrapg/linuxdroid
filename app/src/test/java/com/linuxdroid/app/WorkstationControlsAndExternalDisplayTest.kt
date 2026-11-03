@@ -76,7 +76,14 @@ class WorkstationControlsAndExternalDisplayTest {
 
     @Test
     fun externalOnlyModeRoutesToMonitorOrWaitsCleanlyWithoutDex() {
-        // VLC-style External Screen Only when monitor IS connected (even if dock set UI_MODE_TYPE_DESK!)
+        // Verify ExternalDisplayMode titles and descriptions have no VLC references and mention USB-C display output
+        for (mode in ExternalDisplayMode.entries) {
+            assertFalse("ExternalDisplayMode title must not mention VLC: ${mode.title}", mode.title.contains("VLC", ignoreCase = true))
+            assertFalse("ExternalDisplayMode subtitle must not mention VLC: ${mode.subtitle}", mode.subtitle.contains("VLC", ignoreCase = true))
+        }
+        assertTrue(ExternalDisplayMode.EXTERNAL_ONLY.subtitle.contains("USB-C"))
+
+        // External Screen Only when monitor IS connected (even if dock set UI_MODE_TYPE_DESK!)
         val connected = DeXEnvironmentDetector.evaluate(
             semDesktopModeEnabled = 0,
             uiModeType = Configuration.UI_MODE_TYPE_DESK,
@@ -87,7 +94,7 @@ class WorkstationControlsAndExternalDisplayTest {
         )
         assertEquals(DisplayRoutingMode.EXTERNAL_MONITOR_HOTSWAP, connected)
 
-        // VLC-style External Screen Only when NO monitor is connected yet -> waits for cable/cast
+        // External Screen Only when NO monitor is connected yet -> waits for cable/cast
         val waiting = DeXEnvironmentDetector.evaluate(
             semDesktopModeEnabled = 0,
             uiModeType = Configuration.UI_MODE_TYPE_NORMAL,

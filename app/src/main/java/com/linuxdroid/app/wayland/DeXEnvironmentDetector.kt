@@ -30,7 +30,7 @@ object DeXEnvironmentDetector {
             return DisplayRoutingMode.DEX_OR_FREEFORM_WINDOW
         }
 
-        // VLC-style External Screen Only mode: always route via Presentation to the external screen,
+        // External Screen Only mode: always route via Presentation to the external screen,
         // or wait cleanly if no external screen is connected yet (ignoring dock UI_MODE_TYPE_DESK).
         if (externalMode == ExternalDisplayMode.EXTERNAL_ONLY) {
             return if (hasExternalPresentationDisplay) {

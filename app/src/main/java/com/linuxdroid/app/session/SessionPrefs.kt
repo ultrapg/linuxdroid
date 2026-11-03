@@ -27,12 +27,12 @@ enum class ExternalDisplayMode(
     AUTO_EXTERNAL(
         id = "auto_external",
         title = "Auto Switch When Connected",
-        subtitle = "Outputs to an external HDMI / USB-C / wireless screen whenever connected; uses phone screen when unplugged.",
+        subtitle = "Outputs to an external monitor whenever connected (requires USB-C DisplayPort Alt Mode / HDMI output or Wireless Cast); uses phone screen when unplugged.",
     ),
     EXTERNAL_ONLY(
         id = "external_only",
-        title = "Use External Screen Only (VLC Mode)",
-        subtitle = "Outputs Linux exclusively to an external monitor without needing DeX. Your phone stays off the desktop and acts as a trackpad & keyboard.",
+        title = "Use External Screen Only",
+        subtitle = "Outputs Linux exclusively to an external monitor without needing DeX (device must support USB-C video output / DisplayPort Alt Mode or Wireless Cast). Your phone acts as a trackpad & keyboard.",
     ),
     PHONE_ONLY(
         id = "phone_only",
@@ -264,7 +264,7 @@ object SessionPrefs {
     }
 
     fun showFloatingControls(context: Context): Boolean =
-        prefs(context).getBoolean("show_floating_controls", true)
+        prefs(context).getBoolean("show_floating_controls", false)
 
     fun setShowFloatingControls(context: Context, enabled: Boolean) {
         prefs(context).edit().putBoolean("show_floating_controls", enabled).apply()

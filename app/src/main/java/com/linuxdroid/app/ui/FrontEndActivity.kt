@@ -1465,7 +1465,7 @@ private fun DisplayTabContent(
     showFloatingControls: Boolean,
     onToggleFloatingControls: (Boolean) -> Unit,
 ) {
-    // 1. External Monitor Output Card (VLC-style Non-DeX Presentation + DeX)
+    // 1. External Monitor Output Card (Non-DeX Presentation + DeX)
     SectionCard {
         Row(
             verticalAlignment = Alignment.CenterVertically,
@@ -1478,7 +1478,7 @@ private fun DisplayTabContent(
             )
             Column(modifier = Modifier.weight(1f)) {
                 Text(
-                    text = "External Screen Output (HDMI / USB-C / Cast)",
+                    text = "External Screen Output (USB-C / HDMI / Cast)",
                     style = MaterialTheme.typography.titleMedium,
                     fontWeight = FontWeight.SemiBold,
                 )
@@ -1486,7 +1486,7 @@ private fun DisplayTabContent(
                     text = if (connectedExternalSummary != null) {
                         "Connected: $connectedExternalSummary"
                     } else {
-                        "No external display detected • Works on any phone without Samsung DeX"
+                        "No external display detected • Works without Samsung DeX (requires USB-C display output or Cast)"
                     },
                     style = MaterialTheme.typography.bodySmall,
                     color = if (connectedExternalSummary != null) {
@@ -1503,8 +1503,8 @@ private fun DisplayTabContent(
         Spacer(Modifier.height(10.dp))
 
         SettingToggleRow(
-            title = "Use External Screen Only (VLC Style)",
-            subtitle = "Send the Linux desktop exclusively to a connected external monitor/TV while using your phone as a multi-touch trackpad & keyboard.",
+            title = "Use External Screen Only",
+            subtitle = "Send the Linux desktop exclusively to a connected external monitor/TV without needing DeX (device must support USB-C DisplayPort Alt Mode / HDMI output or Wireless Cast) while using your phone as a trackpad & keyboard.",
             checked = externalMode == ExternalDisplayMode.EXTERNAL_ONLY,
             onCheckedChange = { onlyExt ->
                 onSelectExternalMode(

@@ -136,7 +136,7 @@ class SessionActivity : ComponentActivity() {
     private val temporaryPhoneFallbackState = mutableStateOf(false)
     private val phoneScreenDimmedState = mutableStateOf(false)
     private val touchModeState = mutableStateOf(TouchInputMode.TOUCHSCREEN)
-    private val showFloatingControlsState = mutableStateOf(true)
+    private val showFloatingControlsState = mutableStateOf(false)
 
     private var externalPresentation: ExternalMonitorPresentation? = null
     private var displayManager: DisplayManager? = null
@@ -1004,7 +1004,7 @@ private fun SessionOverlayUi(
                 )
                 QuickMenuAction(
                     Icons.Outlined.Monitor,
-                    if (externalOnlyPref) "Disable External Screen Only Mode" else "Enable External Screen Only (VLC Mode)",
+                    if (externalOnlyPref) "Disable External Screen Only Mode" else "Enable External Screen Only Mode",
                     onToggleExternalOnlyMode,
                 )
                 QuickMenuAction(Icons.Outlined.ScreenRotation, "Cycle Screen Orientation", onCycleOrientation)
@@ -1449,7 +1449,7 @@ private fun WaitingForExternalMonitorOverlay(
                             overflow = TextOverflow.Ellipsis,
                         )
                         Text(
-                            text = "External Screen Only mode (VLC style) is enabled",
+                            text = "External Screen Only mode is enabled",
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.primary,
                             maxLines = 1,
@@ -1459,7 +1459,7 @@ private fun WaitingForExternalMonitorOverlay(
                 }
 
                 Text(
-                    text = "Connect a USB-C / HDMI monitor or Wireless Display. LinuxDroid will automatically output the desktop fullscreen onto the external monitor without needing Samsung DeX.",
+                    text = "Connect a USB-C / HDMI monitor (device must support USB-C DisplayPort Alt Mode video output) or Wireless Display. LinuxDroid will output the desktop fullscreen onto the external monitor without needing Samsung DeX.",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                     maxLines = 4,
