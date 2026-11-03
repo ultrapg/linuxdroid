@@ -1,0 +1,167 @@
+#!/usr/bin/env python3
+import os
+import sys
+
+FLAGS_0 = {
+    "--host",
+    "--clear-env",
+    "--watch-bus",
+    "--expose-pids",
+    "--share-pids",
+    "--sandbox",
+    "--no-network",
+    "--latest-version",
+    "-v",
+    "--verbose",
+}
+
+FLAGS_1 = {
+    "--env",
+    "--unset-env",
+    "--directory",
+    "--forward-fd",
+    "--sandbox-flag",
+    "--sandbox-expose",
+    "--sandbox-expose-ro",
+    "--sandbox-expose-path",
+    "--sandbox-expose-path-ro",
+    "--sandbox-expose-fd",
+    "--sandbox-expose-fd-ro",
+    "--sandbox-a11y-own-name",
+    "--usr-path",
+    "--app-path",
+}
+
+PRESERVE_KEYS = (
+    "LD_PRELOAD",
+    "LINUXDROID_ROOT_SOCKET",
+    "HOME",
+    "USER",
+    "LOGNAME",
+    "XDG_RUNTIME_DIR",
+    "DISPLAY",
+    "WAYLAND_DISPLAY",
+    "DBUS_SESSION_BUS_ADDRESS",
+    "FLATPAK_BWRAP",
+)
+
+
+def strip_sandbox_paths(key):
+    val = os.environ.get(key)
+    if not val:
+        return
+    cleaned = [
+        p
+        for p in val.split(":")
+        if p
+        and not p.startswith(("/app/", "/app", "/tmp/.bwrap-rt-lib", "/var/lib/flatpak/"))
+        and "/.local/share/flatpak/" not in p
+    ]
+    if cleaned:
+        os.environ[key] = ":".join(cleaned)
+    else:
+        os.environ.pop(key, None)
+
+
+def main(argv):
+    args = argv[1:]
+    for a in args:
+        if a == "--":
+            break
+        if a in ("-h", "--help"):
+            print("Usage: flatpak-spawn [OPTION…] COMMAND [ARGUMENT…]")
+            return 0
+        if a == "--version":
+            print("flatpak-spawn 1.14.6")
+            return 0
+
+    env_updates = {}
+    env_unsets = []
+    clear_env = False
+    is_host = False
+    workdir = None
+
+    i = 0
+    while i < len(args):
+        a = args[i]
+        if a == "--":
+            i += 1
+            break
+        if a in FLAGS_0:
+            if a == "--clear-env":
+                clear_env = True
+            elif a == "--host":
+                is_host = True
+            i += 1
+            continue
+        matched_eq = False
+        for prefix in FLAGS_1:
+            if a.startswith(prefix + "="):
+                val = a[len(prefix) + 1 :]
+                if prefix == "--env" and "=" in val:
+                    k, v = val.split("=", 1)
+                    env_updates[k] = v
+                elif prefix == "--unset-env":
+                    env_unsets.append(val)
+                elif prefix == "--directory":
+                    workdir = val
+                matched_eq = True
+                break
+        if matched_eq:
+            i += 1
+            continue
+        if a in FLAGS_1 and i + 1 < len(args):
+            val = args[i + 1]
+            if a == "--env" and "=" in val:
+                k, v = val.split("=", 1)
+                env_updates[k] = v
+            elif a == "--unset-env":
+                env_unsets.append(val)
+            elif a == "--directory":
+                workdir = val
+            i += 2
+            continue
+        if a.startswith("-"):
+            i += 1
+            continue
+        break
+
+    cmd = args[i:]
+    if not cmd:
+        print("flatpak-spawn: No command specified", file=sys.stderr)
+        return 1
+
+    if clear_env:
+        preserved = {k: os.environ[k] for k in PRESERVE_KEYS if k in os.environ}
+        os.environ.clear()
+        os.environ.update(preserved)
+
+    if is_host:
+        for k in ("LD_LIBRARY_PATH", "GI_TYPELIB_PATH", "PYTHONPATH"):
+            strip_sandbox_paths(k)
+
+    os.environ["PATH"] = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+    for k in env_unsets:
+        if k != "LINUXDROID_ROOT_SOCKET":
+            os.environ.pop(k, None)
+    for k, v in env_updates.items():
+        os.environ[k] = v
+
+    if workdir and os.path.isdir(workdir):
+        try:
+            os.chdir(workdir)
+        except OSError:
+            pass
+
+    try:
+        os.execvp(cmd[0], cmd)
+    except FileNotFoundError:
+        print(f"flatpak-spawn: {cmd[0]}: command not found", file=sys.stderr)
+        return 127
+    except OSError as e:
+        print(f"flatpak-spawn: {cmd[0]}: {e.strerror or e}", file=sys.stderr)
+        return 126
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv))

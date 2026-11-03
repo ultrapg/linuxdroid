@@ -45,17 +45,28 @@ It pairs a native Vulkan/AHardwareBuffer Wayland compositor on Android with clea
 
 ---
 
-## Optional Workstation Extras (`linuxdroid-apps`)
+## Optional Workstation Setup (`linuxdroid-apps`)
 
-Inside the Linux desktop, launch **LinuxDroid Workstation Apps** from the application menu or run `linuxdroid-apps` in a terminal:
+Inside the Linux desktop, launch **LinuxDroid Workstation Setup** from the application menu (showing live `[Installed]` / `[Not Installed]` status for each component) or run `linuxdroid-apps` in a terminal:
 
 ```bash
+linuxdroid-apps warehouse    # Install Flatpak + Flathub + Warehouse (Flatpak Store)
 linuxdroid-apps fex-rootfs   # Download Ubuntu 24.04 x86_64 RootFS for FEX-Emu
 linuxdroid-apps vscode       # Install official ARM64 Visual Studio Code
 linuxdroid-apps vscodium     # Install open-source ARM64 VSCodium
+linuxdroid-apps blender      # Install Blender (3D Creation Suite)
+linuxdroid-apps krita        # Install Krita (Digital Painting Studio)
+linuxdroid-apps obs-studio   # Install OBS Studio (Screen Recording & Streaming)
+linuxdroid-apps kdenlive     # Install Kdenlive (Non-Linear Video Editor)
 linuxdroid-apps libreoffice  # Install LibreOffice Workstation Suite
 linuxdroid-apps gimp         # Install GIMP Image Editor
 linuxdroid-apps devtools     # Install GCC/Clang, CMake, Ninja, Python & Node.js
+linuxdroid-apps rust         # Install Rust Toolchain (rustc, cargo)
+linuxdroid-apps golang       # Install Go Toolchain (golang-go)
+linuxdroid-apps openjdk      # Install OpenJDK 21 SDK (Java Development Kit)
+linuxdroid-apps docker-cli   # Install Docker CLI (docker.io, buildx, compose)
+linuxdroid-apps podman       # Install Podman (Rootless Container Engine)
+linuxdroid-apps --list       # Show all workstation components and install status
 ```
 
 ---

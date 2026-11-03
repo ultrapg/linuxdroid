@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+import glob
 import os
 import subprocess
 import sys
@@ -81,6 +82,23 @@ FLAGS_3 = {
     "--overlay",
 }
 
+NEVER_SYMLINK_PREFIXES = (
+    "libc.so",
+    "ld-linux",
+    "libm.so",
+    "libpthread.so",
+    "libdl.so",
+    "librt.so",
+    "libresolv.so",
+    "libnss_",
+    "libnsl.so",
+    "libutil.so",
+    "libBrokenLocale.so",
+    "libanl.so",
+    "libgcc_s.so",
+    "libstdc++.so",
+)
+
 
 def read_args_fd(fd_str):
     try:
@@ -127,22 +145,107 @@ def copy_fd_to_dest(fd_str, dest):
                 break
             data += chunk
         os.close(fd)
+    except (OSError, ValueError):
+        return
+
+    try:
         parent = os.path.dirname(dest)
         if parent:
             os.makedirs(parent, exist_ok=True)
         with open(dest, "wb") as f:
             f.write(data)
-    except (OSError, ValueError):
+        return
+    except OSError:
+        pass
+
+    try:
+        tmp_path = f"/tmp/.bwrap-bind-{os.getpid()}"
+        with open(tmp_path, "wb") as f:
+            f.write(data)
+        subprocess.call(
+            [
+                "/usr/local/bin/linuxdroid-root",
+                "sh",
+                "-c",
+                'mkdir -p "$(dirname "$2")" && cp -f "$1" "$2" && chmod 644 "$2"',
+                "sh",
+                tmp_path,
+                dest,
+            ]
+        )
+        try:
+            os.unlink(tmp_path)
+        except OSError:
+            pass
+    except OSError:
         pass
 
 
-def prepend_env_path(key, entries):
-    cur = [p for p in os.environ.get(key, "").split(":") if p]
+def prepend_env_path(key, entries, default_existing=""):
+    raw = os.environ.get(key, "") or default_existing
+    cur = [p for p in raw.split(":") if p]
     for e in reversed(entries):
-        if e and os.path.isdir(e) and e not in cur:
+        if e and os.path.isdir(e):
+            if e in cur:
+                cur.remove(e)
             cur.insert(0, e)
     if cur:
         os.environ[key] = ":".join(cur)
+
+
+def append_env_path(key, entries, default_existing=""):
+    raw = os.environ.get(key, "") or default_existing
+    cur = [p for p in raw.split(":") if p]
+    for e in entries:
+        if e and os.path.isdir(e) and e not in cur:
+            cur.append(e)
+    if cur:
+        os.environ[key] = ":".join(cur)
+
+
+def build_filtered_runtime_libdir(usr_src):
+    rt_lib_dir = f"/tmp/.bwrap-rt-lib-{os.getuid()}"
+    try:
+        os.makedirs(rt_lib_dir, exist_ok=True)
+    except OSError:
+        return None
+
+    host_lib_dirs = (
+        "/usr/lib/aarch64-linux-gnu",
+        "/lib/aarch64-linux-gnu",
+        "/usr/lib64",
+        "/lib64",
+        "/usr/lib",
+        "/lib",
+    )
+    candidate_dirs = (
+        os.path.join(usr_src, "lib", "aarch64-linux-gnu"),
+        os.path.join(usr_src, "lib64"),
+        os.path.join(usr_src, "lib"),
+    )
+    for src_dir in candidate_dirs:
+        if not os.path.isdir(src_dir):
+            continue
+        try:
+            names = os.listdir(src_dir)
+        except OSError:
+            continue
+        for name in names:
+            if ".so" not in name:
+                continue
+            if name.startswith(NEVER_SYMLINK_PREFIXES):
+                continue
+            if any(os.path.exists(os.path.join(hd, name)) for hd in host_lib_dirs):
+                continue
+            src_file = os.path.join(src_dir, name)
+            dst_link = os.path.join(rt_lib_dir, name)
+            try:
+                if os.path.lexists(dst_link):
+                    os.unlink(dst_link)
+                os.symlink(src_file, dst_link)
+            except OSError:
+                pass
+    return rt_lib_dir
 
 
 def main(argv):
@@ -156,6 +259,7 @@ def main(argv):
             print("usage: bwrap [OPTIONS...] [--] COMMAND [ARGS...]")
             return 0
 
+    keep_root_sock = os.environ.get("LINUXDROID_ROOT_SOCKET")
     args = expand_args(argv[1:])
     chdir_path = None
     argv0 = None
@@ -178,6 +282,8 @@ def main(argv):
                 os.environ["PATH"] = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
                 if keep_preload:
                     os.environ["LD_PRELOAD"] = keep_preload
+                if keep_root_sock:
+                    os.environ["LINUXDROID_ROOT_SOCKET"] = keep_root_sock
             i += 1
         elif a in FLAGS_1 and i + 1 < len(args):
             val = args[i + 1]
@@ -186,7 +292,8 @@ def main(argv):
             elif a == "--argv0":
                 argv0 = val
             elif a == "--unsetenv":
-                os.environ.pop(val, None)
+                if val != "LINUXDROID_ROOT_SOCKET":
+                    os.environ.pop(val, None)
             elif a == "--dir":
                 try:
                     os.makedirs(val, exist_ok=True)
@@ -240,6 +347,11 @@ def main(argv):
         except (OSError, ValueError):
             pass
 
+    if keep_root_sock and "LINUXDROID_ROOT_SOCKET" not in os.environ:
+        os.environ["LINUXDROID_ROOT_SOCKET"] = keep_root_sock
+
+    prepend_env_path("PATH", ["/usr/local/bin", "/usr/bin", "/bin"])
+
     if app_src:
         try:
             if os.path.islink("/app") or not os.path.exists("/app"):
@@ -248,7 +360,7 @@ def main(argv):
                 os.symlink(app_src, "/app")
         except OSError:
             subprocess.call(["/usr/local/bin/linuxdroid-root", "ln", "-sfn", app_src, "/app"])
-        prepend_env_path("PATH", [os.path.join(app_src, "bin")])
+        prepend_env_path("PATH", [os.path.join(app_src, "bin"), "/usr/local/bin"])
         prepend_env_path(
             "LD_LIBRARY_PATH",
             [
@@ -257,20 +369,47 @@ def main(argv):
                 os.path.join(app_src, "lib"),
             ],
         )
+        prepend_env_path(
+            "XDG_DATA_DIRS",
+            [os.path.join(app_src, "share")],
+            default_existing="/usr/local/share:/usr/share",
+        )
+        prepend_env_path(
+            "GI_TYPELIB_PATH",
+            [
+                os.path.join(app_src, "lib", "aarch64-linux-gnu", "girepository-1.0"),
+                os.path.join(app_src, "lib", "girepository-1.0"),
+            ],
+            default_existing="/usr/lib/aarch64-linux-gnu/girepository-1.0:/usr/lib/girepository-1.0",
+        )
+        py_Fallback_dirs = (
+            glob.glob(os.path.join(app_src, "lib", "python*", "site-packages"))
+            + glob.glob(os.path.join(app_src, "lib", "python*", "dist-packages"))
+            + [os.path.join(app_src, "share")]
+        )
+        prepend_env_path("PYTHONPATH", py_Fallback_dirs)
         if cmd[0].startswith("/app/"):
-            candidate = os.path.join(app_src, cmd[0][len("/app/"):])
+            candidate = os.path.join(app_src, cmd[0][len("/app/") :])
             if os.path.exists(candidate):
                 cmd[0] = candidate
 
     if usr_src:
-        prepend_env_path("PATH", [os.path.join(usr_src, "bin")])
-        prepend_env_path(
-            "LD_LIBRARY_PATH",
+        append_env_path("PATH", [os.path.join(usr_src, "bin")])
+        rt_libdir = build_filtered_runtime_libdir(usr_src)
+        if rt_libdir:
+            append_env_path("LD_LIBRARY_PATH", [rt_libdir])
+        append_env_path(
+            "XDG_DATA_DIRS",
+            [os.path.join(usr_src, "share")],
+            default_existing="/usr/local/share:/usr/share",
+        )
+        append_env_path(
+            "GI_TYPELIB_PATH",
             [
-                os.path.join(usr_src, "lib", "aarch64-linux-gnu"),
-                os.path.join(usr_src, "lib64"),
-                os.path.join(usr_src, "lib"),
+                os.path.join(usr_src, "lib", "aarch64-linux-gnu", "girepository-1.0"),
+                os.path.join(usr_src, "lib", "girepository-1.0"),
             ],
+            default_existing="/usr/lib/aarch64-linux-gnu/girepository-1.0:/usr/lib/girepository-1.0",
         )
 
     for fd_str in info_fds:

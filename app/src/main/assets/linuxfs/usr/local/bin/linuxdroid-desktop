@@ -3,6 +3,8 @@ set -u
 
 export BL_DESKTOP=1
 export LINUXDROID_PARENT_WAYLAND="${WAYLAND_DISPLAY:-wayland-0}"
+export FLATPAK_BWRAP="/usr/local/bin/bwrap"
+export XDG_DATA_DIRS="${HOME:-/home/linux}/.local/share/flatpak/exports/share:/var/lib/flatpak/exports/share:${XDG_DATA_DIRS:-/usr/local/share:/usr/share}"
 export APPIMAGE_EXTRACT_AND_RUN=1
 export KDE_DEBUG=1
 export QT_LOGGING_RULES="${QT_LOGGING_RULES:-*.debug=false;qt.qpa.*=false}"

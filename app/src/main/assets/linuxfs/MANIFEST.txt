@@ -24,6 +24,7 @@
 0755 usr/local/bin/apt-get
 0755 usr/local/bin/bwrap
 0755 usr/local/bin/flatpak
+0755 usr/local/bin/flatpak-spawn
 0755 usr/local/bin/kwin_wayland_wrapper
 0755 usr/local/bin/linuxdroid-apps
 0755 usr/local/bin/linuxdroid-bookmarks

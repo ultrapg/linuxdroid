@@ -25,6 +25,8 @@ SYSTEM_MUTATING_CMDS = {
     "remove",
     "repair",
     "mask",
+    "override",
+    "pin",
 }
 
 

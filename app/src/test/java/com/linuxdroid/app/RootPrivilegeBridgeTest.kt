@@ -58,6 +58,8 @@ class RootPrivilegeBridgeTest {
         assertTrue(manifestPaths.contains("usr/local/bin/apt-get"))
         assertTrue(manifestPaths.contains("usr/local/bin/bwrap"))
         assertTrue(manifestPaths.contains("usr/local/bin/flatpak"))
+        assertTrue(manifestPaths.contains("usr/local/bin/flatpak-spawn"))
+        assertTrue(manifestPaths.contains("usr/local/bin/linuxdroid-apps"))
         assertTrue(manifestPaths.contains("usr/sbin/policy-rc.d"))
         assertTrue(manifestPaths.contains("etc/apt/apt.conf.d/99-linuxdroid-container"))
 
@@ -362,6 +364,76 @@ try:
     fp_loader.exec_module(fp_mod)
     assert fp_mod.find_subcommand_and_scope(["remote-add", "--if-not-exists", "flathub", "https://dl.flathub.org/repo/flathub.flatpakrepo"]) == ("remote-add", False)
     assert fp_mod.find_subcommand_and_scope(["install", "--user", "flathub", "org.gimp.GIMP"]) == ("install", True)
+    assert fp_mod.find_subcommand_and_scope(["install", "-y", "flathub", "io.github.flattool.Warehouse"]) == ("install", False)
+
+    # 13. Test flatpak-spawn (--host, --clear-env, --env=KEY=VAL, sandbox path stripping)
+    fp_spawn_bin = os.path.join(bin_dir, "flatpak-spawn")
+    r_fps_ver = subprocess.run([fp_spawn_bin, "--version"], capture_output=True, text=True, timeout=5)
+    assert r_fps_ver.returncode == 0 and "flatpak-spawn" in r_fps_ver.stdout
+    env_fps = dict(env_with_at)
+    env_fps["LD_LIBRARY_PATH"] = "/app/lib:/tmp/.bwrap-rt-lib-1000:/usr/local/lib"
+    r_fps = subprocess.run(
+        [
+            fp_spawn_bin,
+            "--host",
+            "--clear-env",
+            "--env=WAREHOUSE_TEST=ok",
+            "--directory=/tmp",
+            "python3",
+            "-c",
+            "import os; print(os.getcwd(), os.environ.get('WAREHOUSE_TEST'), bool(os.environ.get('LINUXDROID_ROOT_SOCKET')), os.environ.get('LD_LIBRARY_PATH', ''))",
+        ],
+        env=env_fps,
+        capture_output=True,
+        text=True,
+        timeout=5,
+    )
+    assert r_fps.returncode == 0, f"flatpak-spawn failed: {r_fps.stderr}"
+    assert r_fps.stdout.strip() == f"{os.path.realpath('/tmp')} ok True", f"Unexpected flatpak-spawn output: {r_fps.stdout!r}"
+
+    # 14. Test bwrap runtime library filtering (never symlinks libc.so.6, symlinks unique runtime .so)
+    bw_loader = importlib.machinery.SourceFileLoader("bwrap_mod", bwrap_bin)
+    bw_spec = importlib.util.spec_from_loader("bwrap_mod", bw_loader)
+    bw_mod = importlib.util.module_from_spec(bw_spec)
+    bw_loader.exec_module(bw_mod)
+    with tempfile.TemporaryDirectory() as fake_usr:
+        lib_dir = os.path.join(fake_usr, "lib", "aarch64-linux-gnu")
+        os.makedirs(lib_dir, exist_ok=True)
+        with open(os.path.join(lib_dir, "libc.so.6"), "w") as f:
+            f.write("fake")
+        with open(os.path.join(lib_dir, "libunique_flatpak_test.so.1"), "w") as f:
+            f.write("unique")
+        rt_dir = bw_mod.build_filtered_runtime_libdir(fake_usr)
+        assert rt_dir is not None and os.path.isdir(rt_dir)
+        assert not os.path.lexists(os.path.join(rt_dir, "libc.so.6")), "libc.so.6 must never be symlinked from Flatpak runtime"
+        assert os.path.islink(os.path.join(rt_dir, "libunique_flatpak_test.so.1")), "Unique runtime .so should be symlinked"
+        os.unlink(os.path.join(rt_dir, "libunique_flatpak_test.so.1"))
+
+    # 15. Test linuxdroid-apps --list outputs all 16 workstation setup options including Warehouse (Flatpak Store)
+    apps_bin = os.path.join(bin_dir, "linuxdroid-apps")
+    r_apps = subprocess.run([apps_bin, "--list"], capture_output=True, text=True, timeout=5)
+    assert r_apps.returncode == 0, f"linuxdroid-apps --list failed: {r_apps.stderr}"
+    assert "Warehouse (Flatpak Store)" in r_apps.stdout
+    for expected_id in (
+        "warehouse",
+        "fex-rootfs",
+        "vscode",
+        "vscodium",
+        "blender",
+        "krita",
+        "obs-studio",
+        "kdenlive",
+        "libreoffice",
+        "gimp",
+        "devtools",
+        "rust",
+        "golang",
+        "openjdk",
+        "docker-cli",
+        "podman",
+    ):
+        assert expected_id in r_apps.stdout, f"Missing {expected_id} in linuxdroid-apps --list"
+
 
 finally:
     stop_flag = True

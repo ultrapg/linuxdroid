@@ -1,6 +1,134 @@
 #!/bin/bash
 set -euo pipefail
 
+export FLATPAK_BWRAP="/usr/local/bin/bwrap"
+
+ALL_ITEMS=(
+  "warehouse|Warehouse (Flatpak Store) — Flatpak + Flathub + Warehouse GUI"
+  "fex-rootfs|FEX-Emu Ubuntu 24.04 x86_64 RootFS (Run x86_64 Linux Apps)"
+  "vscode|Visual Studio Code (Official ARM64)"
+  "vscodium|VSCodium (Open-Source ARM64)"
+  "blender|Blender (3D Creation Suite)"
+  "krita|Krita (Digital Painting Studio)"
+  "obs-studio|OBS Studio (Screen Recording & Streaming)"
+  "kdenlive|Kdenlive (Non-Linear Video Editor)"
+  "libreoffice|LibreOffice Suite (Writer, Calc, Impress)"
+  "gimp|GIMP (Image Editor)"
+  "devtools|C/C++, CMake, Python & Node.js Toolchain"
+  "rust|Rust Toolchain (rustc, cargo)"
+  "golang|Go Toolchain (golang-go)"
+  "openjdk|OpenJDK 21 SDK (Java Development Kit)"
+  "docker-cli|Docker CLI (docker.io, buildx, compose)"
+  "podman|Podman (Rootless Container Engine)"
+)
+
+is_installed() {
+  local id="$1"
+  case "$id" in
+    warehouse)
+      [ -x /usr/bin/flatpak ] && {
+        [ -d /var/lib/flatpak/app/io.github.flattool.Warehouse ] || \
+        [ -d "${HOME:-/home/linux}/.local/share/flatpak/app/io.github.flattool.Warehouse" ]
+      }
+      ;;
+    fex-rootfs)
+      compgen -G "${HOME:-/home/linux}/.fex-emu/RootFS/*Ubuntu*" >/dev/null 2>&1 || \
+      [ -f "${HOME:-/home/linux}/.fex-emu/Config.json" ]
+      ;;
+    vscode)
+      command -v code >/dev/null 2>&1
+      ;;
+    vscodium)
+      command -v codium >/dev/null 2>&1
+      ;;
+    blender)
+      command -v blender >/dev/null 2>&1
+      ;;
+    krita)
+      command -v krita >/dev/null 2>&1
+      ;;
+    obs-studio)
+      command -v obs >/dev/null 2>&1
+      ;;
+    kdenlive)
+      command -v kdenlive >/dev/null 2>&1
+      ;;
+    libreoffice)
+      command -v libreoffice >/dev/null 2>&1
+      ;;
+    gimp)
+      command -v gimp >/dev/null 2>&1
+      ;;
+    devtools)
+      command -v gcc >/dev/null 2>&1 && command -v cmake >/dev/null 2>&1 && command -v node >/dev/null 2>&1
+      ;;
+    rust)
+      command -v rustc >/dev/null 2>&1 && command -v cargo >/dev/null 2>&1
+      ;;
+    golang)
+      command -v go >/dev/null 2>&1
+      ;;
+    openjdk)
+      command -v javac >/dev/null 2>&1
+      ;;
+    docker-cli)
+      command -v docker >/dev/null 2>&1
+      ;;
+    podman)
+      command -v podman >/dev/null 2>&1
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+}
+
+status_tag() {
+  if is_installed "$1"; then
+    printf '[Installed]'
+  else
+    printf '[Not Installed]'
+  fi
+}
+
+install_warehouse() {
+  echo "==> Installing Flatpak, Flathub repository, and Warehouse (Flatpak Store)..."
+  sudo apt-get update
+  sudo apt-get install -y \
+    flatpak \
+    xdg-dbus-proxy \
+    ca-certificates \
+    gir1.2-adw-1 \
+    gir1.2-gtk-4.0 \
+    python3-gi \
+    python3-gi-cairo \
+    libadwaita-1-0 \
+    adwaita-icon-theme \
+    librsvg2-common
+
+  echo "==> Configuring Flathub remote (https://dl.flathub.org/repo/flathub.flatpakrepo)..."
+  sudo flatpak remote-add --if-not-exists flathub https://dl.flathub.org/repo/flathub.flatpakrepo
+
+  echo "==> Installing Warehouse (io.github.flattool.Warehouse) from Flathub..."
+  sudo flatpak install -y flathub io.github.flattool.Warehouse
+
+  sudo sh -c 'cat > /usr/share/applications/io.github.flattool.Warehouse.desktop <<EOF
+[Desktop Entry]
+Type=Application
+Name=Warehouse (Flatpak Store)
+GenericName=Flatpak Manager & Store
+Comment=Manage installed Flatpaks, remotes, and install apps from Flathub
+Exec=/usr/local/bin/flatpak run io.github.flattool.Warehouse
+Icon=system-software-install
+Terminal=false
+Categories=System;PackageManager;GTK;
+Keywords=flatpak;flathub;warehouse;store;packages;
+StartupWMClass=io.github.flattool.Warehouse
+EOF
+chmod 644 /usr/share/applications/io.github.flattool.Warehouse.desktop'
+  echo "==> Warehouse (Flatpak Store) installed! Launch it from the application menu or via: flatpak run io.github.flattool.Warehouse"
+}
+
 install_fex_rootfs() {
   echo "==> Fetching FEX-Emu Ubuntu 24.04 x86_64 RootFS..."
   /usr/local/bin/linuxdroid-fex fetch-rootfs
@@ -34,6 +162,26 @@ install_vscode() {
   '
 }
 
+install_blender() {
+  echo "==> Installing Blender (3D Creation Suite)..."
+  sudo apt-get update && sudo apt-get install -y blender
+}
+
+install_krita() {
+  echo "==> Installing Krita (Digital Painting Studio)..."
+  sudo apt-get update && sudo apt-get install -y krita
+}
+
+install_obs_studio() {
+  echo "==> Installing OBS Studio (Screen Recording & Streaming)..."
+  sudo apt-get update && sudo apt-get install -y obs-studio
+}
+
+install_kdenlive() {
+  echo "==> Installing Kdenlive (Non-Linear Video Editor)..."
+  sudo apt-get update && sudo apt-get install -y kdenlive
+}
+
 install_libreoffice() {
   echo "==> Installing LibreOffice Workstation Suite..."
   sudo apt-get update && sudo apt-get install -y libreoffice
@@ -45,20 +193,72 @@ install_gimp() {
 }
 
 install_dev_tools() {
-  echo "==> Installing C/C++, CMake, Git & Python Build Toolchain..."
+  echo "==> Installing C/C++, CMake, Python & Node.js Build Toolchain..."
   sudo apt-get update && sudo apt-get install -y build-essential cmake ninja-build pkg-config gdb python3-pip python3-venv nodejs npm
+}
+
+install_rust() {
+  echo "==> Installing Rust Toolchain (rustc, cargo)..."
+  sudo apt-get update && sudo apt-get install -y rustc cargo
+}
+
+install_golang() {
+  echo "==> Installing Go Toolchain (golang-go)..."
+  sudo apt-get update && sudo apt-get install -y golang-go
+}
+
+install_openjdk() {
+  echo "==> Installing OpenJDK 21 SDK (Java Development Kit)..."
+  sudo apt-get update && sudo apt-get install -y openjdk-21-jdk
+}
+
+install_docker_cli() {
+  echo "==> Installing Docker CLI (docker.io, docker-buildx, docker-compose-v2)..."
+  sudo apt-get update && sudo apt-get install -y docker.io docker-buildx docker-compose-v2
+}
+
+install_podman() {
+  echo "==> Installing Podman (Rootless Container Engine)..."
+  sudo apt-get update && sudo apt-get install -y podman
+}
+
+print_list() {
+  echo "LinuxDroid Workstation Setup — Available Components:"
+  for entry in "${ALL_ITEMS[@]}"; do
+    local id="${entry%%|*}"
+    local desc="${entry#*|}"
+    printf "  %-14s %-15s %s\n" "$id" "$(status_tag "$id")" "$desc"
+  done
 }
 
 run_action() {
   case "${1:-}" in
+    warehouse|flatpak|flathub) install_warehouse ;;
     fex-rootfs) install_fex_rootfs ;;
     vscode) install_vscode ;;
     vscodium) install_vscodium ;;
+    blender) install_blender ;;
+    krita) install_krita ;;
+    obs-studio|obs) install_obs_studio ;;
+    kdenlive) install_kdenlive ;;
     libreoffice) install_libreoffice ;;
     gimp) install_gimp ;;
     devtools) install_dev_tools ;;
+    rust) install_rust ;;
+    golang|go) install_golang ;;
+    openjdk|java) install_openjdk ;;
+    docker-cli|docker) install_docker_cli ;;
+    podman) install_podman ;;
+    --list|list|--status|status|-l)
+      print_list
+      return 0
+      ;;
+    -h|--help|help)
+      print_list
+      return 0
+      ;;
     *)
-      echo "Usage: linuxdroid-apps [fex-rootfs | vscode | vscodium | libreoffice | gimp | devtools]"
+      echo "Usage: linuxdroid-apps [warehouse | fex-rootfs | vscode | vscodium | blender | krita | obs-studio | kdenlive | libreoffice | gimp | devtools | rust | golang | openjdk | docker-cli | podman | --list]"
       return 1
       ;;
   esac
@@ -70,23 +270,21 @@ if [ $# -gt 0 ]; then
 fi
 
 if [ -n "${DISPLAY:-}${WAYLAND_DISPLAY:-}" ]; then
+  menu_args=()
+  for entry in "${ALL_ITEMS[@]}"; do
+    item_id="${entry%%|*}"
+    item_desc="${entry#*|}"
+    menu_args+=("$item_id" "$(status_tag "$item_id") $item_desc")
+  done
+
   if command -v kdialog >/dev/null 2>&1; then
-    choice=$(kdialog --title "LinuxDroid Workstation Apps" --menu "Select workstation component to install:" \
-      "fex-rootfs" "FEX-Emu Ubuntu 24.04 x86_64 RootFS (Run x86_64 Linux apps)" \
-      "vscode" "Visual Studio Code (Official ARM64)" \
-      "vscodium" "VSCodium (Open-Source ARM64)" \
-      "libreoffice" "LibreOffice Suite (Writer, Calc, Impress)" \
-      "gimp" "GIMP Image Editor" \
-      "devtools" "Developer C/C++, Node.js & Python Toolchain" 2>/dev/null || true)
+    choice=$(kdialog --title "LinuxDroid Workstation Setup" --geometry 720x540 \
+      --menu "Select a workstation application or toolchain to install:" \
+      "${menu_args[@]}" 2>/dev/null || true)
   elif command -v zenity >/dev/null 2>&1; then
-    choice=$(zenity --list --title="LinuxDroid Workstation Apps" --width=560 --height=360 \
-      --column="ID" --column="Package" \
-      "fex-rootfs" "FEX-Emu Ubuntu 24.04 x86_64 RootFS (Run x86_64 Linux apps)" \
-      "vscode" "Visual Studio Code (Official ARM64)" \
-      "vscodium" "VSCodium (Open-Source ARM64)" \
-      "libreoffice" "LibreOffice Suite (Writer, Calc, Impress)" \
-      "gimp" "GIMP Image Editor" \
-      "devtools" "Developer C/C++, Node.js & Python Toolchain" 2>/dev/null || true)
+    choice=$(zenity --list --title="LinuxDroid Workstation Setup" --width=720 --height=540 \
+      --column="ID" --column="Component" \
+      "${menu_args[@]}" 2>/dev/null || true)
   else
     choice=""
   fi
@@ -101,10 +299,4 @@ if [ -n "${DISPLAY:-}${WAYLAND_DISPLAY:-}" ]; then
   fi
 fi
 
-echo "LinuxDroid Workstation Installer"
-echo "  linuxdroid-apps fex-rootfs   - Fetch FEX-Emu x86_64 RootFS"
-echo "  linuxdroid-apps vscode       - Install VS Code (ARM64)"
-echo "  linuxdroid-apps vscodium     - Install VSCodium (ARM64)"
-echo "  linuxdroid-apps libreoffice  - Install LibreOffice"
-echo "  linuxdroid-apps gimp         - Install GIMP"
-echo "  linuxdroid-apps devtools     - Install C/C++, Node.js & Python build tools"
+print_list

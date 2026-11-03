@@ -154,6 +154,7 @@ find "$XDG_RUNTIME_DIR" -mindepth 1 -maxdepth 1 \
 export XDG_DATA_HOME="${XDG_DATA_HOME:-$HOME/.local/share}"
 export XDG_CONFIG_HOME="${XDG_CONFIG_HOME:-$HOME/.config}"
 export XDG_CACHE_HOME="${XDG_CACHE_HOME:-$HOME/.cache}"
+export XDG_DATA_DIRS="$XDG_DATA_HOME/flatpak/exports/share:/var/lib/flatpak/exports/share:${XDG_DATA_DIRS:-/usr/local/share:/usr/share}"
 export MESA_SHADER_CACHE_DIR="${MESA_SHADER_CACHE_DIR:-$XDG_CACHE_HOME/mesa_shader_cache}"
 export ICEAUTHORITY="$XDG_RUNTIME_DIR/ICEauthority"
 mkdir -p "$HOME" "$XDG_DATA_HOME" "$XDG_CONFIG_HOME" "$XDG_CACHE_HOME" "$MESA_SHADER_CACHE_DIR"
