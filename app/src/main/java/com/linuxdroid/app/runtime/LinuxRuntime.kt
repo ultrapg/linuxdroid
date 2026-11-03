@@ -285,23 +285,165 @@ object LinuxRuntime {
     fun lastBinds(context: Context): List<String> =
         cachedBinds ?: buildBinds(context, null, emptyMap())
 
-    internal fun generateProcStatText(cpuCores: Int): String = buildString {
+    internal fun defaultBootTimeEpochSeconds(): Long {
+        val nowSec = System.currentTimeMillis() / 1000L
+        val uptimeSec = runCatching { android.os.SystemClock.elapsedRealtime() / 1000L }
+            .getOrDefault(0L)
+            .takeIf { it > 0L } ?: 3600L
+        return (nowSec - uptimeSec).coerceAtLeast(1_700_000_000L)
+    }
+
+    internal fun generateProcStatText(
+        cpuCores: Int,
+        bootTimeSec: Long = defaultBootTimeEpochSeconds(),
+    ): String = buildString {
         val count = cpuCores.coerceIn(1, 128)
         append("cpu  ${1000 * count} 0 ${500 * count} ${8500 * count} 0 0 0 0 0 0\n")
         for (i in 0 until count) {
             append("cpu$i 1000 0 500 8500 0 0 0 0 0 0\n")
         }
+        append("intr ${50000L * count} 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0\n")
+        append("ctxt ${100000L * count}\n")
+        append("btime $bootTimeSec\n")
+        append("processes 256\n")
+        append("procs_running 1\n")
+        append("procs_blocked 0\n")
+        append("softirq ${20000L * count} 0 ${5000L * count} 0 ${2000L * count} 0 0 0 ${8000L * count} 0 ${5000L * count}\n")
+    }
+
+    internal fun generateProcUptimeText(cpuCores: Int = 8): String {
+        val count = cpuCores.coerceIn(1, 128)
+        val uptimeSec = runCatching { android.os.SystemClock.elapsedRealtime() / 1000.0 }
+            .getOrDefault(0.0)
+            .takeIf { it > 1.0 } ?: 3600.0
+        val idleSec = uptimeSec * 0.85 * count
+        return String.format(java.util.Locale.US, "%.2f %.2f\n", uptimeSec, idleSec)
+    }
+
+    internal fun generateProcVmstatText(): String = buildString {
+        append("nr_free_pages 262144\n")
+        append("nr_zone_inactive_anon 32768\n")
+        append("nr_zone_active_anon 65536\n")
+        append("nr_zone_inactive_file 65536\n")
+        append("nr_zone_active_file 131072\n")
+        append("nr_zone_unevictable 4096\n")
+        append("nr_zone_write_pending 0\n")
+        append("nr_mlock 4096\n")
+        append("nr_bounce 0\n")
+        append("nr_zspages 0\n")
+        append("nr_free_cma 0\n")
+        append("nr_inactive_anon 32768\n")
+        append("nr_active_anon 65536\n")
+        append("nr_inactive_file 65536\n")
+        append("nr_active_file 131072\n")
+        append("nr_unevictable 4096\n")
+        append("nr_slab_reclaimable 16384\n")
+        append("nr_slab_unreclaimable 16384\n")
+        append("nr_isolated_anon 0\n")
+        append("nr_isolated_file 0\n")
+        append("nr_anon_pages 98304\n")
+        append("nr_mapped 65536\n")
+        append("nr_file_pages 212992\n")
+        append("nr_dirty 0\n")
+        append("nr_writeback 0\n")
+        append("nr_writeback_temp 0\n")
+        append("nr_shmem 16384\n")
+        append("nr_shmem_hugepages 0\n")
+        append("nr_shmem_pmdmapped 0\n")
+        append("nr_file_hugepages 0\n")
+        append("nr_file_pmdmapped 0\n")
+        append("nr_anon_transparent_hugepages 0\n")
+        append("nr_vmscan_write 0\n")
+        append("nr_vmscan_immediate_reclaim 0\n")
+        append("nr_dirtied 1024\n")
+        append("nr_written 1024\n")
+        append("nr_kernel_misc_reclaimable 0\n")
+        append("nr_foll_pin_acquired 0\n")
+        append("nr_foll_pin_released 0\n")
+        append("nr_kernel_stack 8192\n")
+        append("nr_page_table_pages 8192\n")
+        append("nr_dirty_threshold 52428\n")
+        append("nr_dirty_background_threshold 26214\n")
+        append("pgpgin 131072\n")
+        append("pgpgout 32768\n")
+        append("pswpin 0\n")
+        append("pswpout 0\n")
+        append("pgalloc_dma 0\n")
+        append("pgalloc_dma32 0\n")
+        append("pgalloc_normal 524288\n")
+        append("pgalloc_movable 0\n")
+        append("pgfree 786432\n")
+        append("pgactivate 65536\n")
+        append("pgdeactivate 16384\n")
+        append("pglazyfree 0\n")
+        append("pgfault 1048576\n")
+        append("pgmajfault 1024\n")
+        append("pglazyfreed 0\n")
+        append("pgrefill 0\n")
+        append("pgsteal_kswapd 0\n")
+        append("pgsteal_direct 0\n")
+        append("pgscan_kswapd 0\n")
+        append("pgscan_direct 0\n")
+        append("pgscan_direct_throttle 0\n")
+        append("pgscan_anon 0\n")
+        append("pgscan_file 0\n")
+        append("pgsteal_anon 0\n")
+        append("pgsteal_file 0\n")
+        append("pginodesteal 0\n")
+        append("slabs_scanned 0\n")
+        append("kswapd_inodesteal 0\n")
+        append("kswapd_low_wmark_hit_quickly 0\n")
+        append("kswapd_high_wmark_hit_quickly 0\n")
+        append("pageoutrun 0\n")
+        append("pgrotated 0\n")
+        append("drop_pagecache 0\n")
+        append("drop_slab 0\n")
+        append("oom_kill 0\n")
+    }
+
+    internal const val DEFAULT_TTY_DRIVERS =
+        "/dev/tty             /dev/tty        5       0 system:/dev/tty\n" +
+            "/dev/console         /dev/console    5       1 system:console\n" +
+            "/dev/ptmx            /dev/ptmx       5       2 system\n" +
+            "rfcomm               /dev/rfcomm   216 0-255 serial\n" +
+            "ttyprintk            /dev/ttyprintk   5       3 console\n" +
+            "serial               /dev/ttyS       4 64-95 serial\n" +
+            "pty_slave            /dev/pts      136 0-1048575 pty:slave\n" +
+            "pty_master           /dev/ptm      128 0-1048575 pty:master\n"
+
+    private fun isHostProcReadable(path: String, requireNonEmpty: Boolean = true): Boolean {
+        val f = File(path)
+        if (!f.exists() || !f.canRead()) return false
+        return try {
+            f.inputStream().use { input ->
+                val b = input.read()
+                !requireNonEmpty || b >= 0
+            }
+        } catch (_: Exception) {
+            false
+        }
     }
 
     private fun seedSyntheticProc(root: File, specs: MutableList<String>, effectiveCpuCores: Int) {
         val fakeProc = File(root, "etc/linuxdroid/proc").apply { mkdirs() }
-        // Always refresh synthetic /proc/stat so configured CPU core count takes effect immediately
+        // Always refresh synthetic /proc/stat, /proc/uptime, and /proc/vmstat on session launch
         FileUtils.writeString(File(fakeProc, "stat"), generateProcStatText(effectiveCpuCores))
+        FileUtils.writeString(File(fakeProc, "uptime"), generateProcUptimeText(effectiveCpuCores))
+        FileUtils.writeString(File(fakeProc, "vmstat"), generateProcVmstatText())
+        val kernelRelease = runCatching { Os.uname().release }.getOrNull()?.takeIf { it.isNotBlank() } ?: "6.1.0-linuxdroid"
+        val kernelVersion = runCatching { Os.uname().version }.getOrNull()?.takeIf { it.isNotBlank() } ?: "#1 SMP PREEMPT"
         val defaults = mapOf(
             "pci_devices" to "",
             "loadavg" to "0.20 0.15 0.10 1/256 1000\n",
-            "uptime" to "3600.00 3500.00\n",
-            "vmstat" to "nr_free_pages 262144\n",
+            "tty_drivers" to DEFAULT_TTY_DRIVERS,
+            "version" to "Linux version $kernelRelease (linuxdroid@android) (gcc (Ubuntu 13.3.0) 13.3.0) $kernelVersion\n",
+            "swaps" to "Filename\t\t\t\tType\t\tSize\t\tUsed\t\tPriority\n",
+            "diskstats" to "   7       0 loop0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0\n",
+            "locks" to "",
+            "file-nr" to "1024\t0\t9223372036854775807\n",
+            "pid_max" to "32768\n",
+            "osrelease" to "$kernelRelease\n",
+            "sched_autogroup_enabled" to "0\n",
             "cap_last_cap" to "40\n",
             "overflowuid" to "65534\n",
             "overflowgid" to "65534\n",
@@ -310,7 +452,7 @@ object LinuxRuntime {
         )
         for ((name, text) in defaults) {
             val f = File(fakeProc, name)
-            if (!f.isFile) FileUtils.writeString(f, text)
+            if (!f.isFile || f.length() == 0L) FileUtils.writeString(f, text)
         }
         val mappings = listOf(
             "pci_devices" to "/proc/bus/pci/devices",
@@ -318,16 +460,27 @@ object LinuxRuntime {
             "loadavg" to "/proc/loadavg",
             "uptime" to "/proc/uptime",
             "vmstat" to "/proc/vmstat",
+            "tty_drivers" to "/proc/tty/drivers",
+            "version" to "/proc/version",
+            "swaps" to "/proc/swaps",
+            "diskstats" to "/proc/diskstats",
+            "locks" to "/proc/locks",
+            "file-nr" to "/proc/sys/fs/file-nr",
+            "pid_max" to "/proc/sys/kernel/pid_max",
+            "osrelease" to "/proc/sys/kernel/osrelease",
+            "sched_autogroup_enabled" to "/proc/sys/kernel/sched_autogroup_enabled",
             "cap_last_cap" to "/proc/sys/kernel/cap_last_cap",
             "overflowuid" to "/proc/sys/kernel/overflowuid",
             "overflowgid" to "/proc/sys/kernel/overflowgid",
             "file-max" to "/proc/sys/fs/file-max",
             "overcommit_memory" to "/proc/sys/vm/overcommit_memory",
         )
+        val allowEmpty = setOf("/proc/bus/pci/devices", "/proc/locks")
         for ((srcName, guestTarget) in mappings) {
-            val hostCheck = File(guestTarget)
             val srcFile = File(fakeProc, srcName)
-            if (!hostCheck.canRead() && srcFile.isFile) {
+            if (!srcFile.isFile) continue
+            val readable = isHostProcReadable(guestTarget, requireNonEmpty = guestTarget !in allowEmpty)
+            if (!readable) {
                 specs.add("${srcFile.absolutePath}:$guestTarget")
             }
         }

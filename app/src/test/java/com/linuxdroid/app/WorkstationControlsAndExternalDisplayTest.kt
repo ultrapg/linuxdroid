@@ -66,12 +66,32 @@ class WorkstationControlsAndExternalDisplayTest {
 
     @Test
     fun generateProcStatTextMatchesConfiguredCoreCount() {
-        val stat4 = LinuxRuntime.generateProcStatText(4)
+        val stat4 = LinuxRuntime.generateProcStatText(4, bootTimeSec = 1_730_000_000L)
         val lines = stat4.trim().lines()
-        assertEquals(5, lines.size)
-        assertTrue(lines[0].startsWith("cpu  "))
-        assertTrue(lines[1].startsWith("cpu0 "))
-        assertTrue(lines[4].startsWith("cpu3 "))
+        val cpuLines = lines.filter { it.startsWith("cpu") }
+        assertEquals(5, cpuLines.size)
+        assertTrue(cpuLines[0].startsWith("cpu  "))
+        assertTrue(cpuLines[1].startsWith("cpu0 "))
+        assertTrue(cpuLines[4].startsWith("cpu3 "))
+        assertTrue(lines.any { it == "btime 1730000000" })
+        assertTrue(lines.any { it.startsWith("ctxt ") })
+        assertTrue(lines.any { it.startsWith("intr ") })
+        assertTrue(lines.any { it.startsWith("processes ") })
+        assertTrue(lines.any { it.startsWith("procs_running ") })
+        assertTrue(lines.any { it.startsWith("procs_blocked ") })
+        assertTrue(lines.any { it.startsWith("softirq ") })
+
+        // Boundary core counts clamp cleanly to [1, 128]
+        val statMin = LinuxRuntime.generateProcStatText(0)
+        assertEquals(2, statMin.trim().lines().count { it.startsWith("cpu") })
+        val statMax = LinuxRuntime.generateProcStatText(256)
+        assertEquals(129, statMax.trim().lines().count { it.startsWith("cpu") })
+
+        val vmstat = LinuxRuntime.generateProcVmstatText()
+        assertTrue(vmstat.contains("nr_free_pages "))
+        assertTrue(vmstat.contains("pgpgin "))
+        assertTrue(vmstat.contains("pgpgout "))
+        assertTrue(vmstat.contains("pgfault "))
     }
 
     @Test

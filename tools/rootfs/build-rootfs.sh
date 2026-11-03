@@ -14,7 +14,7 @@ OUT_DIR="${OUT_DIR:-$REPO_ROOT/dist}"
 WORK_DIR="${WORK_DIR:-/tmp/linuxdroid-rootfs-build}"
 CACHE_DIR="${CACHE_DIR:-$WORK_DIR/cache}"
 GITHUB_REPO="${GITHUB_REPO:-ultrapg/linuxdroid}"
-RELEASE_TAG="${RELEASE_TAG:-v1.0.7}"
+RELEASE_TAG="${RELEASE_TAG:-v1.0.8}"
 
 UBUNTU_BASE_URL="https://cdimage.ubuntu.com/ubuntu-base/releases/24.04/release/ubuntu-base-24.04.5-base-arm64.tar.gz"
 UBUNTU_BASE_SHA256="a91d5a93010193712d346d761372b7c9db6dfcf093893161c64ca107f05914f2"
@@ -133,6 +133,10 @@ ensure_host_proot() {
 run_in_rootfs() {
   local root="$1"
   shift
+  local preload_bind=()
+  if [ -f "$root/etc/ld.so.preload" ]; then
+    preload_bind=(-b "$root/etc/ld.so.preload:/etc/ld.so.preload")
+  fi
   sudo "$CACHE_DIR/proot-host" \
     -q /usr/bin/qemu-aarch64-static \
     -r "$root" \
@@ -140,6 +144,7 @@ run_in_rootfs() {
     -b /proc \
     -b /sys \
     -b /dev/urandom:/dev/random \
+    "${preload_bind[@]}" \
     -w /root \
     /usr/bin/env -i \
     HOME=/root \
@@ -171,13 +176,29 @@ stage_linuxfs_overlay() {
     sudo chmod "$mode" "$root/$rel"
   done < "$manifest"
 
-  sudo mkdir -p "$root/etc/linuxdroid/empty" "$root/mnt/linuxdroid" "$root/run/linuxdroid" "$root/tmp" "$root/var/tmp"
+  sudo mkdir -p "$root/etc/linuxdroid/empty" "$root/mnt/linuxdroid" "$root/run/linuxdroid" "$root/tmp" "$root/var/tmp" "$root/etc/skel"
   sudo chmod 0700 "$root/run/linuxdroid"
   sudo chmod 1777 "$root/tmp" "$root/var/tmp"
+  sudo touch "$root/etc/skel/.sudo_as_admin_successful"
+  sudo chmod 0644 "$root/etc/skel/.sudo_as_admin_successful"
   printf '%s\n' "$edition_label" | sudo tee "$root/etc/linuxdroid/edition" >/dev/null
   sudo chmod 0644 "$root/etc/linuxdroid/edition"
   printf '%s\n' "${RELEASE_TAG#v}" | sudo tee "$root/etc/linuxdroid/version" >/dev/null
   sudo chmod 0644 "$root/etc/linuxdroid/version"
+
+  for pair in \
+    "sdcard_rw:1015" "media_rw:1023" "sdcard_r:1028" \
+    "external_storage:1077" "ext_data_rw:1078" "ext_obb_rw:1079" \
+    "net_bt_admin:3001" "net_bt:3002" "inet:3003" "net_raw:3004" \
+    "net_admin:3005" "net_bw_stats:3006" "net_bw_acct:3007" \
+    "readproc:3009" "wakelock:3010" "uhid:3011" "readtracefs:3012" \
+    "everybody:9997"; do
+    local gname="${pair%%:*}"
+    local gid="${pair#*:}"
+    if ! sudo grep -qE "^(${gname}:|[^:]+:[^:]*:${gid}:)" "$root/etc/group" 2>/dev/null; then
+      printf '%s:x:%s:root\n' "$gname" "$gid" | sudo tee -a "$root/etc/group" >/dev/null
+    fi
+  done
 
   printf '/usr/local/lib/libblsession.so\n/usr/local/lib/libblfastpath.so\n' \
     | sudo tee "$root/etc/ld.so.preload" >/dev/null
@@ -193,6 +214,7 @@ clean_and_pack_rootfs() {
     rm -rf /var/lib/apt/lists/* /var/cache/apt/archives/*.deb /var/cache/apt/archives/partial/*
     rm -rf /tmp/* /var/tmp/* /var/log/*.log /var/log/apt/* /var/log/dpkg.log
     rm -f /usr/sbin/policy-rc.d /usr/share/dbus-1/services/org.freedesktop.systemd1.service
+    rm -rf /dev/shm/.linuxdroid-procstat* /tmp/.linuxdroid-procstat*
   '
 
   sudo rm -f "$root/etc/resolv.conf"
@@ -238,6 +260,17 @@ smoke_test_rootfs() {
     test -f /usr/share/vulkan/icd.d/lvp_icd.aarch64.json
     ldd /usr/lib/aarch64-linux-gnu/libvulkan_freedreno.so | (! grep -q 'not found')
     python3 -c 'import gi; gi.require_version(\"Gio\", \"2.0\"); from gi.repository import Gio, GLib; print(\"Gio OK\")'
+    grep -q '^btime ' /proc/stat
+    grep -q '^ctxt ' /proc/stat
+    grep -q '^processes ' /proc/stat
+    grep -q '^procs_running ' /proc/stat
+    getent group 3003 20948 50948 9997 >/dev/null
+    top -b -n 2 -d 0.05 >/dev/null
+    vmstat 1 2 >/dev/null
+    ps aux >/dev/null
+    free -h >/dev/null
+    uptime >/dev/null
+    fastfetch --pipe >/dev/null
   "
 
   # Ensure zero DroidDeck / Steam / Vapor branding exists anywhere in /etc/skel or /usr/share/linuxdroid
@@ -425,16 +458,18 @@ MOZLIST
   clean_and_pack_rootfs "$WORK_DIR/kde" "$kde_archive"
   sudo rm -rf "$WORK_DIR/kde"
 
-  log "Installing authentic upstream XFCE4 Workstation into $WORK_DIR/xfce..."
-  run_in_rootfs "$WORK_DIR/xfce" /bin/bash -euxc '
-    apt-get install -y \
-      xfce4-session xfwm4 xfce4-panel xfdesktop4 xfce4-settings xfconf xfce4-appfinder \
-      xfce4-terminal thunar thunar-archive-plugin thunar-volman gvfs gvfs-backends tumbler \
-      mousepad atril ristretto engrampa xfce4-screenshooter xfce4-taskmanager \
-      xfce4-pulseaudio-plugin xfce4-power-manager xfce4-notifyd xfce4-whiskermenu-plugin \
-      zenity adwaita-icon-theme elementary-xfce-icon-theme greybird-gtk-theme \
-      xdg-user-dirs xdg-user-dirs-gtk policykit-1-gnome
-  '
+  if [ ! -x "$WORK_DIR/xfce/usr/bin/startxfce4" ]; then
+    log "Installing authentic upstream XFCE4 Workstation into $WORK_DIR/xfce..."
+    run_in_rootfs "$WORK_DIR/xfce" /bin/bash -euxc '
+      apt-get install -y \
+        xfce4-session xfwm4 xfce4-panel xfdesktop4 xfce4-settings xfconf xfce4-appfinder \
+        xfce4-terminal thunar thunar-archive-plugin thunar-volman gvfs gvfs-backends tumbler \
+        mousepad atril ristretto engrampa xfce4-screenshooter xfce4-taskmanager \
+        xfce4-pulseaudio-plugin xfce4-power-manager xfce4-notifyd xfce4-whiskermenu-plugin \
+        zenity adwaita-icon-theme elementary-xfce-icon-theme greybird-gtk-theme \
+        xdg-user-dirs xdg-user-dirs-gtk policykit-1-gnome
+    '
+  fi
   stage_linuxfs_overlay "$WORK_DIR/xfce" "Ubuntu 24.04 LTS — XFCE4 Workstation"
   smoke_test_rootfs "$WORK_DIR/xfce" "/usr/bin/startxfce4"
   local xfce_archive="$OUT_DIR/linuxdroid-ubuntu-xfce-arm64.tar.zst"

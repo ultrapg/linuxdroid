@@ -48,7 +48,7 @@ static int read_only_copy(const char *data, size_t len, int flags) {
   if (rw < 0) return -1;
   int ro = -1;
   if (write_all(rw, data, len) == 0)
-    ro = (int)syscall(SYS_openat, AT_FDCWD, path, O_RDONLY | (flags & O_CLOEXEC));
+    ro = (int)syscall(SYS_openat, AT_FDCWD, path, O_RDONLY | (flags & O_CLOEXEC), 0);
   unlink(path);
   close(rw);
   return ro;
@@ -64,7 +64,7 @@ __attribute__((visibility("hidden"))) int bl_status_without_tracer(const char *p
   long pid;
   if ((flags & O_ACCMODE) != O_RDONLY || (pid = status_pid(path)) < 0)
     return -1;
-  int in = (int)syscall(SYS_openat, AT_FDCWD, path, O_RDONLY | O_CLOEXEC);
+  int in = (int)syscall(SYS_openat, AT_FDCWD, path, O_RDONLY | O_CLOEXEC, 0);
   if (in < 0) goto done;
   for (;;) {
     ssize_t n = read(in, text + len, sizeof(text) - 1 - len);

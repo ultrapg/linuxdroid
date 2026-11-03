@@ -86,6 +86,15 @@ class RuntimeStabilityPerformanceTest {
         val funcs = readDefinedElf64DynamicFunctions(sessionSo)
         assertTrue("libblsession.so must export 64-bit link() for libICE/ksmserver & libXau", funcs.contains("link"))
         assertTrue("libblsession.so must export 64-bit linkat()", funcs.contains("linkat"))
+        assertTrue("libblsession.so must export getgrgid() for Android supplementary GIDs", funcs.contains("getgrgid"))
+        assertTrue("libblsession.so must export getgrgid_r() for Android supplementary GIDs", funcs.contains("getgrgid_r"))
+        assertTrue("libblsession.so must export fopen() for /proc/stat synthesis", funcs.contains("fopen"))
+        assertTrue("libblsession.so must export fopen64() for /proc/stat synthesis", funcs.contains("fopen64"))
+        assertTrue("libblsession.so must export __open_2() for fortified open calls", funcs.contains("__open_2"))
+        assertTrue("libblsession.so must export __openat_2() for fortified openat calls", funcs.contains("__openat_2"))
+        assertTrue("libblsession.so must export lseek() for live /proc refresh", funcs.contains("lseek"))
+        assertTrue("libblsession.so must export fseek() for live /proc refresh", funcs.contains("fseek"))
+        assertTrue("libblsession.so must export rewind() for live /proc refresh", funcs.contains("rewind"))
     }
 
     @Test

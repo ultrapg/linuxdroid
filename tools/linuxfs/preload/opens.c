@@ -9,6 +9,8 @@
 #include <unistd.h>
 
 int bl_status_without_tracer(const char *path, int flags, const void *caller) __attribute__((visibility("hidden")));
+int bl_proc_open(int dirfd, const char *path, int flags) __attribute__((visibility("hidden")));
+void bl_proc_close(int fd) __attribute__((visibility("hidden")));
 int bl_writable_retry(int dirfd, const char *path, int flags) __attribute__((visibility("hidden")));
 
 static int (*real_open)(const char *, int, ...);
@@ -38,6 +40,7 @@ int open(const char *path, int flags, ...) {
     return -1;
   }
   if ((fd = bl_status_without_tracer(path, flags, __builtin_return_address(0))) >= 0) return fd;
+  if ((fd = bl_proc_open(AT_FDCWD, path, flags)) >= 0) return fd;
   if (real_open == NULL) real_open = dlsym(RTLD_NEXT, "open");
   if (real_open == NULL) {
     errno = ENOSYS;
@@ -62,6 +65,7 @@ int openat(int dirfd, const char *path, int flags, ...) {
     return -1;
   }
   if ((fd = bl_status_without_tracer(path, flags, __builtin_return_address(0))) >= 0) return fd;
+  if ((fd = bl_proc_open(dirfd, path, flags)) >= 0) return fd;
   if (real_openat == NULL) real_openat = dlsym(RTLD_NEXT, "openat");
   if (real_openat == NULL) {
     errno = ENOSYS;
@@ -79,6 +83,7 @@ int close(int fd) {
     errno = ENOSYS;
     return -1;
   }
+  bl_proc_close(fd);
   int saved = errno;
   int mode = fd >= 0 ? fcntl(fd, F_GETFL) : -1;
   int r = real_close(fd);
@@ -91,3 +96,13 @@ int close(int fd) {
 
 int open64(const char *path, int flags, ...) __attribute__((alias("open")));
 int openat64(int dirfd, const char *path, int flags, ...) __attribute__((alias("openat")));
+
+int __open_2(const char *path, int flags) {
+  return open(path, flags, 0);
+}
+int __open64_2(const char *path, int flags) __attribute__((alias("__open_2")));
+
+int __openat_2(int dirfd, const char *path, int flags) {
+  return openat(dirfd, path, flags, 0);
+}
+int __openat64_2(int dirfd, const char *path, int flags) __attribute__((alias("__openat_2")));

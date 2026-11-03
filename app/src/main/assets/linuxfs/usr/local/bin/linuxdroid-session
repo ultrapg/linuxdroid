@@ -47,6 +47,67 @@ sync_timezone() {
 }
 sync_timezone
 
+sync_android_groups() {
+  [ -r /etc/group ] || return 0
+  local gids gid gname user_id rem
+  gids="$(id -G 2>/dev/null || true)"
+  [ -n "$gids" ] || return 0
+  local missing_lines=""
+  for gid in $gids; do
+    case "$gid" in ''|*[!0-9]*) continue ;; esac
+    if ! grep -qE "^[^:]+:[^:]*:${gid}:" /etc/group 2>/dev/null; then
+      case "$gid" in
+        1015) gname="sdcard_rw" ;;
+        1023) gname="media_rw" ;;
+        1028) gname="sdcard_r" ;;
+        1077) gname="external_storage" ;;
+        1078) gname="ext_data_rw" ;;
+        1079) gname="ext_obb_rw" ;;
+        3001) gname="net_bt_admin" ;;
+        3002) gname="net_bt" ;;
+        3003) gname="inet" ;;
+        3004) gname="net_raw" ;;
+        3005) gname="net_admin" ;;
+        3006) gname="net_bw_stats" ;;
+        3007) gname="net_bw_acct" ;;
+        3009) gname="readproc" ;;
+        3010) gname="wakelock" ;;
+        3011) gname="uhid" ;;
+        3012) gname="readtracefs" ;;
+        9997) gname="everybody" ;;
+        *)
+          user_id=$((gid / 100000))
+          rem=$((gid % 100000))
+          if [ "$rem" -ge 20000 ] && [ "$rem" -le 29999 ]; then
+            gname="u${user_id}_a$((rem - 20000))_cache"
+          elif [ "$rem" -ge 30000 ] && [ "$rem" -le 39999 ]; then
+            gname="u${user_id}_a$((rem - 30000))_ext"
+          elif [ "$rem" -ge 40000 ] && [ "$rem" -le 49999 ]; then
+            gname="u${user_id}_a$((rem - 40000))_ext_cache"
+          elif [ "$rem" -ge 50000 ] && [ "$rem" -le 59999 ]; then
+            if [ "$user_id" -eq 0 ]; then
+              gname="all_a$((rem - 50000))"
+            else
+              gname="u${user_id}_all_a$((rem - 50000))"
+            fi
+          else
+            gname="aid_${gid}"
+          fi
+          ;;
+      esac
+      if grep -qE "^${gname}:" /etc/group 2>/dev/null; then
+        gname="aid_${gid}"
+      fi
+      missing_lines="${missing_lines}${gname}:x:${gid}:${USER},root"$'\n'
+    fi
+  done
+  if [ -n "$missing_lines" ]; then
+    printf '%s' "$missing_lines" >> /etc/group 2>/dev/null || \
+      printf '%s' "$missing_lines" | linuxdroid-root tee -a /etc/group >/dev/null 2>&1 || true
+  fi
+}
+sync_android_groups
+
 prepare_locale() {
   local dir=/usr/lib/locale stamp=/var/tmp/.linuxdroid-locale
   [ -f "$stamp" ] && [ -f "$dir/locale-archive" ] && return 0
@@ -102,6 +163,7 @@ if [ -d /etc/skel ] && [ ! -e "$skel_done" ]; then
   cp -rn /etc/skel/. "$HOME/" 2>/dev/null || true
   mkdir -p "${skel_done%/*}" && : > "$skel_done"
 fi
+[ -e "$HOME/.sudo_as_admin_successful" ] || : > "$HOME/.sudo_as_admin_successful" 2>/dev/null || true
 
 if [ -d /sdcard ]; then
   ln -sfn /sdcard "$HOME/Android" 2>/dev/null || true

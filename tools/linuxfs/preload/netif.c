@@ -569,13 +569,24 @@ static FILE *synthesize(const char *table) {
 }
 
 int bl_status_without_tracer(const char *path, int flags, const void *caller) __attribute__((visibility("hidden")));
+int bl_proc_open(int dirfd, const char *path, int flags) __attribute__((visibility("hidden")));
+void bl_proc_close(int fd) __attribute__((visibility("hidden")));
+int bl_proc_is_tracked_fd(int fd) __attribute__((visibility("hidden")));
 
 static FILE *open_stream(fopen_fn real, const char *path, const char *mode, const void *caller) {
     int status = mode && mode[0] == 'r' && !strchr(mode, '+')
             ? bl_status_without_tracer(path, O_RDONLY | O_CLOEXEC, caller) : -1;
+    if (status < 0 && mode && mode[0] == 'r' && !strchr(mode, '+')) {
+        status = bl_proc_open(AT_FDCWD, path, O_RDONLY | O_CLOEXEC);
+    }
     if (status >= 0) {
         FILE *copy = fdopen(status, "r");
-        if (copy == NULL) close(status);
+        if (copy == NULL) {
+            bl_proc_close(status);
+            close(status);
+        } else if (bl_proc_is_tracked_fd(status)) {
+            setvbuf(copy, NULL, _IONBF, 0);
+        }
         return copy;
     }
     int table = path && mode && mode[0] == 'r' ? denied_table(path) : -1;

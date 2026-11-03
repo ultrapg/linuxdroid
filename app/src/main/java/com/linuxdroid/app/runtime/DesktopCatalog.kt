@@ -31,8 +31,8 @@ object DesktopCatalog {
             desktop = "kde",
             description = "Full KDE Plasma Breeze desktop with Konsole, Dolphin, Kate, Okular, Firefox, MPV, FEX-Emu, and hardware SoC Vulkan/OpenGL.",
             downloadUrl = "$RELEASE_BASE/linuxdroid-ubuntu-kde-arm64.tar.zst",
-            sha256 = "676dde907a9aa2be89cce9fd9eb17e35965261122a2643ade24c718827314857",
-            sizeBytes = 721_023_812L,
+            sha256 = "e074018090cd4dc8aa694a8a761a0da75010567196bec4d1effe5b5f561abcf5",
+            sizeBytes = 720_990_663L,
         ),
         DesktopEdition(
             id = "ubuntu-xfce-arm64",
@@ -40,8 +40,8 @@ object DesktopCatalog {
             desktop = "xfce",
             description = "Lightweight XFCE4 desktop with Thunar, XFCE Terminal, Mousepad, Atril, Firefox, MPV, FEX-Emu, and hardware SoC Vulkan/OpenGL.",
             downloadUrl = "$RELEASE_BASE/linuxdroid-ubuntu-xfce-arm64.tar.zst",
-            sha256 = "de7012cd19c591fcc86d72d5b5622c371ce31cecaeb18614852c1daeddfdf297",
-            sizeBytes = 559_741_805L,
+            sha256 = "efdce2c58f7aeb1f0141540b68b6252f072ef255f20c0c1408803156a4110662",
+            sizeBytes = 559_752_588L,
         ),
     )
 
