@@ -24,8 +24,11 @@ import java.io.OutputStream
 import java.util.Collections
 import java.util.concurrent.atomic.AtomicInteger
 
+import android.net.LocalSocketAddress
+
 object RootSpawner {
     private const val TAG = "RootSpawner"
+    const val FS_SOCKET_FILE_NAME = "root.sock"
     private val seq = AtomicInteger()
 
     @Volatile
@@ -34,7 +37,15 @@ object RootSpawner {
     @Volatile
     private var legacyAtServer: LocalServerSocket? = null
 
+    @Volatile
+    private var fsServerBoundSocket: LocalSocket? = null
+
+    @Volatile
+    private var fsServer: LocalServerSocket? = null
+
     fun socketName(context: Context): String = "${context.packageName}.root"
+
+    fun fsSocketFile(context: Context): File = File(LinuxRuntime.runtimeDir(context), FS_SOCKET_FILE_NAME)
 
     fun normalizeSocketName(raw: String?, defaultName: String = "com.linuxdroid.app.root"): String {
         val cleaned = raw?.trim()?.trimStart('@', '\u0000')?.trim().orEmpty()
@@ -51,6 +62,29 @@ object RootSpawner {
         if (legacyAtServer == null) {
             legacyAtServer = bindAndAccept(app, "@$name")
         }
+        val sockFile = fsSocketFile(app)
+        if (fsServer == null || !sockFile.exists()) {
+            runCatching { fsServer?.close() }
+            runCatching { fsServerBoundSocket?.close() }
+            fsServer = null
+            fsServerBoundSocket = null
+            bindFilesystemSocket(app, sockFile)
+        }
+    }
+
+    private fun bindFilesystemSocket(app: Context, sockFile: File) {
+        try {
+            sockFile.parentFile?.mkdirs()
+            sockFile.delete()
+            val bound = LocalSocket(LocalSocket.SOCKET_STREAM)
+            bound.bind(LocalSocketAddress(sockFile.absolutePath, LocalSocketAddress.Namespace.FILESYSTEM))
+            val serverSock = LocalServerSocket(bound.fileDescriptor)
+            fsServerBoundSocket = bound
+            fsServer = serverSock
+            startAcceptThread(app, serverSock, sockFile.absolutePath)
+        } catch (e: IOException) {
+            Log.w(TAG, "Cannot listen on filesystem socket ${sockFile.absolutePath}", e)
+        }
     }
 
     private fun bindAndAccept(app: Context, listenName: String): LocalServerSocket? {
@@ -60,6 +94,11 @@ object RootSpawner {
             Log.e(TAG, "Cannot listen on abstract socket $listenName", e)
             return null
         }
+        startAcceptThread(app, sock, listenName)
+        return sock
+    }
+
+    private fun startAcceptThread(app: Context, sock: LocalServerSocket, listenName: String) {
         Thread({
             var consecutiveErrors = 0
             while (true) {
@@ -72,6 +111,11 @@ object RootSpawner {
                         synchronized(this@RootSpawner) {
                             if (server === sock) server = null
                             if (legacyAtServer === sock) legacyAtServer = null
+                            if (fsServer === sock) {
+                                fsServer = null
+                                runCatching { fsServerBoundSocket?.close() }
+                                fsServerBoundSocket = null
+                            }
                         }
                         runCatching { sock.close() }
                         break
@@ -92,7 +136,6 @@ object RootSpawner {
             isDaemon = true
             start()
         }
-        return sock
     }
 
     private fun serve(context: Context, client: LocalSocket) {
@@ -273,11 +316,14 @@ object RootSpawner {
             synchronized(out) { frame(out, 'P', pid.toString().toByteArray()) }
 
             val pumps = ArrayList<Thread>()
+            var fallbackInStream: FileInputStream? = null
             if (streams[0].redirect == null) {
                 val fd = streams[0].fd
                 if (fd != null) {
                     markFdOwnedByStream(fd)
-                    pumps.add(pump(FileInputStream(fd), proc.outputStream, "root-in-$pid"))
+                    val fis = FileInputStream(fd)
+                    fallbackInStream = fis
+                    pumps.add(pump(fis, proc.outputStream, "root-in-$pid"))
                 } else {
                     runCatching { proc.outputStream.close() }
                 }
@@ -321,6 +367,8 @@ object RootSpawner {
             }, "root-watch-$pid").apply { isDaemon = true; start() }
 
             val exitCode = proc.waitFor()
+            runCatching { proc.outputStream.close() }
+            runCatching { fallbackInStream?.close() }
             pumps.filter { it.name.startsWith("root-out") || it.name.startsWith("root-err") }
                 .forEach { it.join(1500) }
             runCatching { synchronized(out) { frame(out, 'X', exitCode.toString().toByteArray()) } }

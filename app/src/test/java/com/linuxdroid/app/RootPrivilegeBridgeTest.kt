@@ -56,6 +56,8 @@ class RootPrivilegeBridgeTest {
         assertTrue(manifestPaths.contains("usr/local/bin/pkexec"))
         assertTrue(manifestPaths.contains("usr/local/bin/apt"))
         assertTrue(manifestPaths.contains("usr/local/bin/apt-get"))
+        assertTrue(manifestPaths.contains("usr/local/bin/bwrap"))
+        assertTrue(manifestPaths.contains("usr/local/bin/flatpak"))
         assertTrue(manifestPaths.contains("usr/sbin/policy-rc.d"))
         assertTrue(manifestPaths.contains("etc/apt/apt.conf.d/99-linuxdroid-container"))
 
@@ -103,11 +105,19 @@ sudo_bin = os.path.join(bin_dir, "sudo")
 su_bin = os.path.join(bin_dir, "su")
 pkexec_bin = os.path.join(bin_dir, "pkexec")
 apt_bin = os.path.join(bin_dir, "apt")
+bwrap_bin = os.path.join(bin_dir, "bwrap")
+flatpak_bin = os.path.join(bin_dir, "flatpak")
 
 sock_base = f"com.linuxdroid.test.{uuid.uuid4().hex[:12]}.root"
 server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
 server.bind("\0" + sock_base)
 server.listen(16)
+
+fs_sock_dir = tempfile.mkdtemp(prefix="ld-root-fs-")
+fs_sock_path = os.path.join(fs_sock_dir, "root.sock")
+fs_server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+fs_server.bind(fs_sock_path)
+fs_server.listen(16)
 
 recorded_requests = []
 stop_flag = False
@@ -158,17 +168,19 @@ def handle_client(conn):
         rc_bytes = str(rc).encode()
         conn.sendall(b"X" + struct.pack(">i", len(rc_bytes)) + rc_bytes)
 
-def accept_loop():
+def accept_loop(srv):
     while not stop_flag:
         try:
-            conn, _ = server.accept()
+            conn, _ = srv.accept()
         except OSError:
             break
         t = threading.Thread(target=handle_client, args=(conn,), daemon=True)
         t.start()
 
-accept_thread = threading.Thread(target=accept_loop, daemon=True)
+accept_thread = threading.Thread(target=accept_loop, args=(server,), daemon=True)
 accept_thread.start()
+fs_accept_thread = threading.Thread(target=accept_loop, args=(fs_server,), daemon=True)
+fs_accept_thread.start()
 
 try:
     # 1. Test with leading '@' in LINUXDROID_ROOT_SOCKET (exact regression from screenshot)
@@ -185,6 +197,19 @@ try:
         timeout=5,
     )
     assert res.returncode == 0, f"linuxdroid-root --check failed: {res.stderr}"
+
+    # 1b. Test filesystem socket path in LINUXDROID_ROOT_SOCKET (/run/linuxdroid/root.sock fallback)
+    env_fs = dict(env_with_at)
+    env_fs["LINUXDROID_ROOT_SOCKET"] = fs_sock_path
+    res_fs = subprocess.run(
+        [sudo_bin, "python3", "-c", "print('FS_SOCKET_OK')"],
+        env=env_fs,
+        capture_output=True,
+        text=True,
+        timeout=5,
+    )
+    assert res_fs.returncode == 0, f"Filesystem socket sudo failed: {res_fs.stderr}"
+    assert res_fs.stdout.strip() == "FS_SOCKET_OK"
 
     # 2. Test sudo command execution and stdout/stderr pipe capture
     res = subprocess.run(
@@ -306,9 +331,47 @@ try:
     rc_missing = root_mod.exec_already_root(["/nonexistent_linuxdroid_binary_xyz"])
     assert rc_missing == 127, f"Expected 127 for missing binary, got {rc_missing}"
 
+    # 11. Test bwrap shim (--version, --args FD, --info-fd FD, --setenv, --chdir)
+    r_bw_ver = subprocess.run([bwrap_bin, "--version"], capture_output=True, text=True, timeout=5)
+    assert r_bw_ver.returncode == 0 and "bubblewrap" in r_bw_ver.stdout
+    args_r, args_w = os.pipe()
+    info_r, info_w = os.pipe()
+    os.write(args_w, b"--unshare-all\0--ro-bind\0/\0/\0--setenv\0BWRAP_TEST_VAR\0ok_val\0--chdir\0/tmp\0--info-fd\0" + str(info_w).encode() + b"\0")
+    os.close(args_w)
+    os.set_inheritable(args_r, True)
+    os.set_inheritable(info_w, True)
+    r_bw = subprocess.run(
+        [bwrap_bin, "--args", str(args_r), "--", "python3", "-c", "import os; print(os.getcwd(), os.environ.get('BWRAP_TEST_VAR'))"],
+        pass_fds=(args_r, info_w),
+        capture_output=True,
+        text=True,
+        timeout=5,
+    )
+    os.close(args_r)
+    os.close(info_w)
+    info_json = json.loads(os.read(info_r, 1024).decode())
+    os.close(info_r)
+    assert r_bw.returncode == 0, f"bwrap failed: {r_bw.stderr}"
+    assert r_bw.stdout.strip() == f"{os.path.realpath('/tmp')} ok_val"
+    assert "child-pid" in info_json
+
+    # 12. Test flatpak wrapper subcommand & scope parser
+    fp_loader = importlib.machinery.SourceFileLoader("flatpak_wrapper", flatpak_bin)
+    fp_spec = importlib.util.spec_from_loader("flatpak_wrapper", fp_loader)
+    fp_mod = importlib.util.module_from_spec(fp_spec)
+    fp_loader.exec_module(fp_mod)
+    assert fp_mod.find_subcommand_and_scope(["remote-add", "--if-not-exists", "flathub", "https://dl.flathub.org/repo/flathub.flatpakrepo"]) == ("remote-add", False)
+    assert fp_mod.find_subcommand_and_scope(["install", "--user", "flathub", "org.gimp.GIMP"]) == ("install", True)
+
 finally:
     stop_flag = True
     server.close()
+    fs_server.close()
+    try:
+        os.unlink(fs_sock_path)
+        os.rmdir(fs_sock_dir)
+    except OSError:
+        pass
 """.trimIndent()
 
         val proc = ProcessBuilder("python3", "-c", pyTest, binDir)

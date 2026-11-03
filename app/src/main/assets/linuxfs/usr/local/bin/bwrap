@@ -1,0 +1,310 @@
+#!/usr/bin/env python3
+import os
+import subprocess
+import sys
+
+FLAGS_0 = {
+    "--level-prefix",
+    "--unshare-all",
+    "--share-net",
+    "--unshare-user",
+    "--unshare-user-try",
+    "--unshare-ipc",
+    "--unshare-pid",
+    "--unshare-net",
+    "--unshare-uts",
+    "--unshare-cgroup",
+    "--unshare-cgroup-try",
+    "--disable-userns",
+    "--assert-userns-disabled",
+    "--clearenv",
+    "--new-session",
+    "--die-with-parent",
+    "--as-pid-1",
+    "--not-a-security-boundary",
+}
+
+FLAGS_1 = {
+    "--args",
+    "--argv0",
+    "--userns",
+    "--userns2",
+    "--pidns",
+    "--uid",
+    "--gid",
+    "--hostname",
+    "--chdir",
+    "--unsetenv",
+    "--lock-file",
+    "--sync-fd",
+    "--remount-ro",
+    "--overlay-src",
+    "--tmp-overlay",
+    "--ro-overlay",
+    "--exec-label",
+    "--file-label",
+    "--proc",
+    "--dev",
+    "--tmpfs",
+    "--mqueue",
+    "--dir",
+    "--seccomp",
+    "--add-seccomp-fd",
+    "--block-fd",
+    "--userns-block-fd",
+    "--info-fd",
+    "--json-status-fd",
+    "--cap-add",
+    "--cap-drop",
+    "--perms",
+    "--size",
+}
+
+FLAGS_2 = {
+    "--setenv",
+    "--bind",
+    "--bind-try",
+    "--dev-bind",
+    "--dev-bind-try",
+    "--ro-bind",
+    "--ro-bind-try",
+    "--bind-fd",
+    "--ro-bind-fd",
+    "--file",
+    "--bind-data",
+    "--ro-bind-data",
+    "--symlink",
+    "--chmod",
+}
+
+FLAGS_3 = {
+    "--overlay",
+}
+
+
+def read_args_fd(fd_str):
+    try:
+        fd = int(fd_str)
+        data = b""
+        while True:
+            chunk = os.read(fd, 65536)
+            if not chunk:
+                break
+            data += chunk
+        os.close(fd)
+        parts = [p.decode("utf-8", errors="surrogateescape") for p in data.split(b"\0")]
+        if parts and parts[-1] == "":
+            parts.pop()
+        return parts
+    except (OSError, ValueError):
+        return []
+
+
+def expand_args(raw_args):
+    expanded = []
+    i = 0
+    while i < len(raw_args):
+        a = raw_args[i]
+        if a == "--":
+            expanded.extend(raw_args[i:])
+            break
+        if a == "--args" and i + 1 < len(raw_args):
+            expanded.extend(expand_args(read_args_fd(raw_args[i + 1])))
+            i += 2
+            continue
+        expanded.append(a)
+        i += 1
+    return expanded
+
+
+def copy_fd_to_dest(fd_str, dest):
+    try:
+        fd = int(fd_str)
+        data = b""
+        while True:
+            chunk = os.read(fd, 65536)
+            if not chunk:
+                break
+            data += chunk
+        os.close(fd)
+        parent = os.path.dirname(dest)
+        if parent:
+            os.makedirs(parent, exist_ok=True)
+        with open(dest, "wb") as f:
+            f.write(data)
+    except (OSError, ValueError):
+        pass
+
+
+def prepend_env_path(key, entries):
+    cur = [p for p in os.environ.get(key, "").split(":") if p]
+    for e in reversed(entries):
+        if e and os.path.isdir(e) and e not in cur:
+            cur.insert(0, e)
+    if cur:
+        os.environ[key] = ":".join(cur)
+
+
+def main(argv):
+    for a in argv[1:]:
+        if a == "--":
+            break
+        if a == "--version":
+            print("bubblewrap 0.11.0")
+            return 0
+        if a == "--help":
+            print("usage: bwrap [OPTIONS...] [--] COMMAND [ARGS...]")
+            return 0
+
+    args = expand_args(argv[1:])
+    chdir_path = None
+    argv0 = None
+    info_fds = []
+    block_fds = []
+    close_fds = []
+    app_src = None
+    usr_src = None
+
+    i = 0
+    while i < len(args):
+        a = args[i]
+        if a == "--":
+            i += 1
+            break
+        if a in FLAGS_0:
+            if a == "--clearenv":
+                keep_preload = os.environ.get("LD_PRELOAD")
+                os.environ.clear()
+                os.environ["PATH"] = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+                if keep_preload:
+                    os.environ["LD_PRELOAD"] = keep_preload
+            i += 1
+        elif a in FLAGS_1 and i + 1 < len(args):
+            val = args[i + 1]
+            if a == "--chdir":
+                chdir_path = val
+            elif a == "--argv0":
+                argv0 = val
+            elif a == "--unsetenv":
+                os.environ.pop(val, None)
+            elif a == "--dir":
+                try:
+                    os.makedirs(val, exist_ok=True)
+                except OSError:
+                    pass
+            elif a in ("--info-fd", "--json-status-fd"):
+                info_fds.append(val)
+            elif a in ("--block-fd", "--userns-block-fd"):
+                block_fds.append(val)
+            elif a in ("--seccomp", "--add-seccomp-fd"):
+                close_fds.append(val)
+            i += 2
+        elif a in FLAGS_2 and i + 2 < len(args):
+            v1, v2 = args[i + 1], args[i + 2]
+            if a == "--setenv":
+                os.environ[v1] = v2
+            elif a in ("--file", "--bind-data", "--ro-bind-data"):
+                copy_fd_to_dest(v1, v2)
+            elif a in ("--bind", "--bind-try", "--ro-bind", "--ro-bind-try", "--dev-bind", "--dev-bind-try"):
+                if v2 == "/app" and v1 != "/app" and os.path.isdir(v1):
+                    app_src = v1
+                elif v2 == "/usr" and v1 != "/usr" and os.path.isdir(v1):
+                    usr_src = v1
+            elif a == "--symlink":
+                try:
+                    if v2.startswith(("/tmp/", "/run/", "/var/tmp/")):
+                        parent = os.path.dirname(v2)
+                        if parent:
+                            os.makedirs(parent, exist_ok=True)
+                        if os.path.lexists(v2):
+                            os.unlink(v2)
+                        os.symlink(v1, v2)
+                except OSError:
+                    pass
+            i += 3
+        elif a in FLAGS_3 and i + 3 < len(args):
+            i += 4
+        elif a.startswith("-"):
+            i += 1
+        else:
+            break
+
+    cmd = args[i:]
+    if not cmd:
+        print("bwrap: No command specified", file=sys.stderr)
+        return 1
+
+    for fd_str in close_fds:
+        try:
+            os.close(int(fd_str))
+        except (OSError, ValueError):
+            pass
+
+    if app_src:
+        try:
+            if os.path.islink("/app") or not os.path.exists("/app"):
+                if os.path.islink("/app"):
+                    os.unlink("/app")
+                os.symlink(app_src, "/app")
+        except OSError:
+            subprocess.call(["/usr/local/bin/linuxdroid-root", "ln", "-sfn", app_src, "/app"])
+        prepend_env_path("PATH", [os.path.join(app_src, "bin")])
+        prepend_env_path(
+            "LD_LIBRARY_PATH",
+            [
+                os.path.join(app_src, "lib", "aarch64-linux-gnu"),
+                os.path.join(app_src, "lib64"),
+                os.path.join(app_src, "lib"),
+            ],
+        )
+        if cmd[0].startswith("/app/"):
+            candidate = os.path.join(app_src, cmd[0][len("/app/"):])
+            if os.path.exists(candidate):
+                cmd[0] = candidate
+
+    if usr_src:
+        prepend_env_path("PATH", [os.path.join(usr_src, "bin")])
+        prepend_env_path(
+            "LD_LIBRARY_PATH",
+            [
+                os.path.join(usr_src, "lib", "aarch64-linux-gnu"),
+                os.path.join(usr_src, "lib64"),
+                os.path.join(usr_src, "lib"),
+            ],
+        )
+
+    for fd_str in info_fds:
+        try:
+            fd = int(fd_str)
+            os.write(fd, f'{{"child-pid": {os.getpid()}}}\n'.encode())
+            os.close(fd)
+        except (OSError, ValueError):
+            pass
+
+    for fd_str in block_fds:
+        try:
+            fd = int(fd_str)
+            os.read(fd, 1)
+            os.close(fd)
+        except (OSError, ValueError):
+            pass
+
+    if chdir_path and os.path.isdir(chdir_path):
+        try:
+            os.chdir(chdir_path)
+        except OSError:
+            pass
+
+    exec_args = [argv0 if argv0 is not None else cmd[0]] + cmd[1:]
+    try:
+        os.execvp(cmd[0], exec_args)
+    except FileNotFoundError:
+        print(f"bwrap: execvp {cmd[0]}: No such file or directory", file=sys.stderr)
+        return 127
+    except OSError as e:
+        print(f"bwrap: execvp {cmd[0]}: {e.strerror or e}", file=sys.stderr)
+        return 126
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv))

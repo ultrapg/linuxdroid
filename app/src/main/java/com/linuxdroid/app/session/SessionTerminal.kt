@@ -66,6 +66,7 @@ object SessionTerminal {
         cmd.add("GLIBC_TUNABLES=${SessionPrefs.GLIBC_TUNABLES}")
         cmd.add("XDG_RUNTIME_DIR=${LinuxRuntime.GUEST_RUNTIME_DIR}")
         cmd.add("LINUXDROID_ROOT_SOCKET=${RootSpawner.socketName(context)}")
+        cmd.add("FLATPAK_BWRAP=/usr/local/bin/bwrap")
         cmd.add("WAYLAND_DISPLAY=wayland-0")
         cmd.add("DISPLAY=:0")
         cmd.add("PULSE_SERVER=unix:${File(context.filesDir, "pulseaudio/PS0").absolutePath}")

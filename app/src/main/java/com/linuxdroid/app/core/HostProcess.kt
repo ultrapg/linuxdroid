@@ -24,6 +24,7 @@ object HostProcess {
                 builder.environment().clear()
                 builder.environment().putAll(env)
             }
+            builder.redirectInput(File("/dev/null"))
             builder.redirectErrorStream(true)
             if (onLine == null) {
                 if (outputFile == null) {

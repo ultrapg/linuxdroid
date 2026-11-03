@@ -29,14 +29,13 @@ def candidate_socket_addresses():
                 raw = f.read().strip()
         except OSError:
             raw = ""
+    addrs = []
+    if raw.startswith("/"):
+        addrs.append(raw)
     clean = normalize_socket_name(raw)
-    addrs = ["\0" + clean]
-    if "\0@" + clean not in addrs:
-        addrs.append("\0@" + clean)
-    if clean != DEFAULT_SOCKET_NAME:
-        addrs.append("\0" + DEFAULT_SOCKET_NAME)
-    if os.path.exists(FALLBACK_FS_SOCKET):
-        addrs.append(FALLBACK_FS_SOCKET)
+    for candidate in ("\0" + clean, "\0@" + clean, "\0" + DEFAULT_SOCKET_NAME, FALLBACK_FS_SOCKET):
+        if candidate not in addrs:
+            addrs.append(candidate)
     return addrs
 
 

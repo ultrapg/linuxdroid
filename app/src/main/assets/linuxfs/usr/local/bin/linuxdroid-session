@@ -7,6 +7,7 @@ export USER="${USER:-$(id -un 2>/dev/null || echo linux)}"
 export LOGNAME="$USER"
 export SHELL=/bin/bash
 export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+export FLATPAK_BWRAP="/usr/local/bin/bwrap"
 export GLIBC_TUNABLES="${GLIBC_TUNABLES:-glibc.pthread.rseq=0:glibc.malloc.top_pad=16777216}"
 
 boot_step() {

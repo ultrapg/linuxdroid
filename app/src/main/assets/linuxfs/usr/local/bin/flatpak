@@ -1,0 +1,60 @@
+#!/usr/bin/env python3
+import os
+import sys
+
+REAL_FLATPAK = "/usr/bin/flatpak"
+_SELF_DIR = os.path.dirname(os.path.abspath(__file__))
+BWRAP_SHIM = (
+    os.path.join(_SELF_DIR, "bwrap")
+    if os.path.exists(os.path.join(_SELF_DIR, "bwrap"))
+    else "/usr/local/bin/bwrap"
+)
+LINUXDROID_ROOT = (
+    os.path.join(_SELF_DIR, "linuxdroid-root")
+    if os.path.exists(os.path.join(_SELF_DIR, "linuxdroid-root"))
+    else "/usr/local/bin/linuxdroid-root"
+)
+
+SYSTEM_MUTATING_CMDS = {
+    "remote-add",
+    "remote-modify",
+    "remote-delete",
+    "install",
+    "update",
+    "uninstall",
+    "remove",
+    "repair",
+    "mask",
+}
+
+
+def find_subcommand_and_scope(args):
+    subcmd = None
+    explicit_user = False
+    for a in args:
+        if a == "--":
+            break
+        if a in ("--user", "-u"):
+            explicit_user = True
+        elif not a.startswith("-") and subcmd is None:
+            subcmd = a
+    return subcmd, explicit_user
+
+
+def main(argv):
+    if not os.path.exists(REAL_FLATPAK):
+        print("flatpak: command not found (install with: sudo apt install flatpak)", file=sys.stderr)
+        return 127
+
+    os.environ.setdefault("FLATPAK_BWRAP", BWRAP_SHIM)
+    args = argv[1:]
+    subcmd, explicit_user = find_subcommand_and_scope(args)
+
+    if os.geteuid() != 0 and not explicit_user and subcmd in SYSTEM_MUTATING_CMDS:
+        os.execv(LINUXDROID_ROOT, [LINUXDROID_ROOT, REAL_FLATPAK] + args)
+
+    os.execv(REAL_FLATPAK, [REAL_FLATPAK] + args)
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv))
