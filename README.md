@@ -34,7 +34,7 @@ It pairs a native Vulkan/AHardwareBuffer Wayland compositor on Android with clea
 
 ## Installation
 
-1. Download **`linuxdroid-release.apk`** from the [Releases](https://github.com/ultrapg/linuxdroid/releases) page and install it on an ARM64 Android 8.0+ (`minSdk 26`) device.
+1. Download **`linuxdroid-release.apk`** from the [Releases](https://github.com/ultrapg/linuxdroid/releases) page and install it on an ARM64 Android 14+ (`minSdk 34`) device.
 2. Open **LinuxDroid** and select one of the official ARM64 desktop editions to download & verify automatically:
    - **Ubuntu 24.04 LTS — KDE Plasma (Wayland)** (`linuxdroid-ubuntu-kde-arm64.tar.zst`)
    - **Ubuntu 24.04 LTS — XFCE4 Workstation** (`linuxdroid-ubuntu-xfce-arm64.tar.zst`)

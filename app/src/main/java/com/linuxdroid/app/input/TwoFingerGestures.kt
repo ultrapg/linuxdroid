@@ -65,7 +65,7 @@ class TwoFingerGestures {
             if (action == MotionEvent.ACTION_UP || action == MotionEvent.ACTION_CANCEL) {
                 if (scrolling) {
                     WaylandCompositor.sendFingerScroll(0, 0)
-                } else if (event.eventTime - downTimeMs <= TAP_TIMEOUT_MS) {
+                } else if (action == MotionEvent.ACTION_UP && event.eventTime - downTimeMs <= TAP_TIMEOUT_MS) {
                     val ix = InputSpace.x(prevMidX, viewWidth)
                     val iy = InputSpace.y(prevMidY, viewHeight)
                     WaylandCompositor.nativeSendPointer(InputSpace.POINTER_HOVER, ix, iy)

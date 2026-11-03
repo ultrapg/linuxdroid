@@ -10,6 +10,7 @@ import android.graphics.drawable.GradientDrawable
 import android.hardware.display.DisplayManager
 import android.os.Build
 import android.os.Bundle
+import android.os.SystemClock
 import android.view.Choreographer
 import android.view.Display
 import android.view.Gravity
@@ -24,20 +25,25 @@ import android.view.WindowManager
 import android.widget.FrameLayout
 import android.widget.TextView
 import androidx.activity.ComponentActivity
+import androidx.activity.compose.BackHandler
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -47,6 +53,7 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.BrightnessLow
 import androidx.compose.material.icons.outlined.CheckCircle
+import androidx.compose.material.icons.outlined.Close
 import androidx.compose.material.icons.outlined.Dashboard
 import androidx.compose.material.icons.outlined.ErrorOutline
 import androidx.compose.material.icons.outlined.Keyboard
@@ -61,6 +68,7 @@ import androidx.compose.material.icons.outlined.Terminal
 import androidx.compose.material.icons.outlined.TouchApp
 import androidx.compose.material.icons.outlined.VisibilityOff
 import androidx.compose.material3.Button
+import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CircularProgressIndicator
@@ -70,7 +78,6 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
@@ -129,6 +136,7 @@ class SessionActivity : ComponentActivity() {
     private val touchGestures = TwoFingerGestures()
     private val trackpadController = TrackpadController()
     private var prevMouseButtonMask = 0
+    private var lastBackHandledUptimeMs = 0L
 
     private val showQuickMenuState = mutableStateOf(false)
     private val routingModeState = mutableStateOf(DisplayRoutingMode.INTERNAL_LAPTOP)
@@ -257,6 +265,10 @@ class SessionActivity : ComponentActivity() {
                         onOpenQuickMenu = {
                             setPhoneDimmed(false)
                             showQuickMenuState.value = true
+                            hideSystemBarsIfFullscreen()
+                        },
+                        onSystemBack = {
+                            handleAndroidBackAction()
                         },
                         onTogglePhoneDimmed = {
                             setPhoneDimmed(!phoneScreenDimmedState.value)
@@ -432,12 +444,7 @@ class SessionActivity : ComponentActivity() {
 
         if (kc == KeyEvent.KEYCODE_BACK && (event.source and InputDevice.SOURCE_MOUSE) == 0) {
             if (event.action == KeyEvent.ACTION_UP && !event.isCanceled) {
-                if (imeBridge.imeVisible.value) {
-                    imeBridge.hideKeyboard()
-                } else {
-                    setPhoneDimmed(false)
-                    showQuickMenuState.value = !showQuickMenuState.value
-                }
+                handleAndroidBackAction()
             }
             return true
         }
@@ -460,7 +467,24 @@ class SessionActivity : ComponentActivity() {
         return super.dispatchKeyEvent(event)
     }
 
+    private fun handleAndroidBackAction() {
+        val now = SystemClock.uptimeMillis()
+        if (now - lastBackHandledUptimeMs < 150L) return
+        lastBackHandledUptimeMs = now
+        if (imeBridge.imeVisible.value) {
+            imeBridge.hideKeyboard()
+            hideSystemBarsIfFullscreen()
+        } else {
+            setPhoneDimmed(false)
+            showQuickMenuState.value = !showQuickMenuState.value
+            hideSystemBarsIfFullscreen()
+        }
+    }
+
     private fun handleMotionInput(view: View, event: MotionEvent): Boolean {
+        if (showQuickMenuState.value) {
+            return false
+        }
         if (event.isFromSource(InputDevice.SOURCE_MOUSE) || event.getToolType(0) == MotionEvent.TOOL_TYPE_MOUSE) {
             return handleMouseTouchEvent(view, event)
         }
@@ -881,6 +905,7 @@ private fun SessionOverlayUi(
     externalOnlyPref: Boolean,
     onDismissQuickMenu: () -> Unit,
     onOpenQuickMenu: () -> Unit,
+    onSystemBack: () -> Unit,
     onTogglePhoneDimmed: () -> Unit,
     onUsePhoneScreenTemporary: () -> Unit,
     onToggleExternalOnlyMode: () -> Unit,
@@ -898,6 +923,10 @@ private fun SessionOverlayUi(
     val snap by SessionState.state.collectAsState()
     var sawActiveDesktop by remember { mutableStateOf(false) }
     var elapsedSec by remember { mutableIntStateOf(0) }
+
+    BackHandler(enabled = true) {
+        onSystemBack()
+    }
 
     LaunchedEffect(snap.phase, snap.firstFrameReady) {
         if (snap.firstFrameReady && (snap.phase == SessionPhase.RUNNING || snap.phase == SessionPhase.PAUSED)) {
@@ -967,73 +996,270 @@ private fun SessionOverlayUi(
     }
 
     if (showQuickMenu) {
-        ModalBottomSheet(
-            onDismissRequest = onDismissQuickMenu,
-            containerColor = MaterialTheme.colorScheme.surface,
+        QuickMenuOverlay(
+            snap = snap,
+            imeVisible = imeVisible,
+            showFloatingControls = showFloatingControls,
+            touchMode = touchMode,
+            externalOnlyPref = externalOnlyPref,
+            onDismissQuickMenu = onDismissQuickMenu,
+            onToggleKeyboard = onToggleKeyboard,
+            onToggleFloatingControls = onToggleFloatingControls,
+            onToggleTouchMode = onToggleTouchMode,
+            onToggleExternalOnlyMode = onToggleExternalOnlyMode,
+            onCycleOrientation = onCycleOrientation,
+            onOpenTerminal = onOpenTerminal,
+            onRestartSession = {
+                onDismissQuickMenu()
+                onRetryBoot(false)
+            },
+            onTogglePause = onTogglePause,
+            onOpenDashboard = onOpenDashboard,
+            onShutdown = onShutdown,
+        )
+    }
+}
+
+private data class QuickMenuEntry(
+    val icon: ImageVector,
+    val label: String,
+    val onClick: () -> Unit,
+)
+
+/**
+ * Responsive, fixed-bounds, scrollable Quick Menu overlay designed for both phone screens
+ * (landscape & portrait) and tablets. Replaces ModalBottomSheet so it never opens half-expanded,
+ * never clips off-screen in landscape on phones, and keeps immersive fullscreen intact.
+ */
+@Composable
+private fun QuickMenuOverlay(
+    snap: SessionSnapshot,
+    imeVisible: Boolean,
+    showFloatingControls: Boolean,
+    touchMode: TouchInputMode,
+    externalOnlyPref: Boolean,
+    onDismissQuickMenu: () -> Unit,
+    onToggleKeyboard: () -> Unit,
+    onToggleFloatingControls: () -> Unit,
+    onToggleTouchMode: () -> Unit,
+    onToggleExternalOnlyMode: () -> Unit,
+    onCycleOrientation: () -> Unit,
+    onOpenTerminal: () -> Unit,
+    onRestartSession: () -> Unit,
+    onTogglePause: () -> Unit,
+    onOpenDashboard: () -> Unit,
+    onShutdown: () -> Unit,
+) {
+    val entries = listOf(
+        QuickMenuEntry(
+            icon = Icons.Outlined.Keyboard,
+            label = if (imeVisible) "Hide Android Keyboard" else "Show Android Keyboard",
+            onClick = onToggleKeyboard,
+        ),
+        QuickMenuEntry(
+            icon = if (touchMode == TouchInputMode.TOUCHSCREEN) Icons.Outlined.Mouse else Icons.Outlined.TouchApp,
+            label = if (touchMode == TouchInputMode.TOUCHSCREEN) "Switch to Virtual Trackpad" else "Switch to Direct Touchscreen",
+            onClick = onToggleTouchMode,
+        ),
+        QuickMenuEntry(
+            icon = Icons.Outlined.VisibilityOff,
+            label = if (showFloatingControls) "Hide Floating Controls Pill" else "Show Floating Controls Pill",
+            onClick = onToggleFloatingControls,
+        ),
+        QuickMenuEntry(
+            icon = Icons.Outlined.Monitor,
+            label = if (externalOnlyPref) "Disable External Screen Only" else "Enable External Screen Only",
+            onClick = onToggleExternalOnlyMode,
+        ),
+        QuickMenuEntry(
+            icon = Icons.Outlined.ScreenRotation,
+            label = "Cycle Screen Orientation",
+            onClick = onCycleOrientation,
+        ),
+        QuickMenuEntry(
+            icon = Icons.Outlined.Terminal,
+            label = "Open Linux Terminal",
+            onClick = onOpenTerminal,
+        ),
+        QuickMenuEntry(
+            icon = Icons.Outlined.Refresh,
+            label = "Restart Session (Apply)",
+            onClick = onRestartSession,
+        ),
+        QuickMenuEntry(
+            icon = Icons.Outlined.Pause,
+            label = if (snap.phase == SessionPhase.PAUSED) "Resume Frozen Session" else "Pause Session (0% CPU)",
+            onClick = onTogglePause,
+        ),
+    )
+
+    val menuScroll = rememberScrollState()
+    val backdropInteraction = remember { MutableInteractionSource() }
+    val cardInteraction = remember { MutableInteractionSource() }
+
+    BoxWithConstraints(
+        modifier = Modifier
+            .fillMaxSize()
+            .background(Color(0xCC05080D))
+            .clickable(
+                interactionSource = backdropInteraction,
+                indication = null,
+                onClick = onDismissQuickMenu,
+            )
+            .padding(horizontal = 12.dp, vertical = 10.dp),
+        contentAlignment = Alignment.Center,
+    ) {
+        val cardWidth = minOf(maxWidth, 640.dp)
+        val cardMaxHeight = minOf(maxHeight, 480.dp)
+        val useTwoColumns = cardWidth >= 420.dp
+
+        Card(
+            shape = RoundedCornerShape(16.dp),
+            colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+            border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline),
+            modifier = Modifier
+                .width(cardWidth)
+                .heightIn(max = cardMaxHeight)
+                .clickable(
+                    interactionSource = cardInteraction,
+                    indication = null,
+                    onClick = {},
+                ),
         ) {
             Column(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .padding(horizontal = 20.dp, vertical = 8.dp),
-                verticalArrangement = Arrangement.spacedBy(4.dp),
+                    .padding(horizontal = 14.dp, vertical = 12.dp),
+                verticalArrangement = Arrangement.spacedBy(8.dp),
             ) {
-                Text(
-                    text = "LinuxDroid Quick Menu",
-                    style = MaterialTheme.typography.titleMedium,
-                    fontWeight = FontWeight.Bold,
-                )
-                Text(
-                    text = "${snap.statusText} • ${snap.activeGpuSummary.ifEmpty { "ARM64 Workstation" }}",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
-                )
-                HorizontalDivider(modifier = Modifier.padding(vertical = 8.dp))
-
-                QuickMenuAction(Icons.Outlined.Keyboard, "Show Android On-Screen Keyboard", onToggleKeyboard)
-                QuickMenuAction(
-                    Icons.Outlined.VisibilityOff,
-                    if (showFloatingControls) "Hide Floating Keyboard & Menu Pill" else "Show Floating Keyboard & Menu Pill",
-                    onToggleFloatingControls,
-                )
-                QuickMenuAction(
-                    if (touchMode == TouchInputMode.TOUCHSCREEN) Icons.Outlined.Mouse else Icons.Outlined.TouchApp,
-                    if (touchMode == TouchInputMode.TOUCHSCREEN) "Switch to Virtual Trackpad" else "Switch to Direct Touchscreen",
-                    onToggleTouchMode,
-                )
-                QuickMenuAction(
-                    Icons.Outlined.Monitor,
-                    if (externalOnlyPref) "Disable External Screen Only Mode" else "Enable External Screen Only Mode",
-                    onToggleExternalOnlyMode,
-                )
-                QuickMenuAction(Icons.Outlined.ScreenRotation, "Cycle Screen Orientation", onCycleOrientation)
-                QuickMenuAction(Icons.Outlined.Terminal, "Open Linux Terminal", onOpenTerminal)
-                QuickMenuAction(
-                    Icons.Outlined.Refresh,
-                    "Restart Linux Session (Apply Settings)",
-                    {
-                        onDismissQuickMenu()
-                        onRetryBoot(false)
-                    },
-                )
-                QuickMenuAction(
-                    Icons.Outlined.Pause,
-                    if (snap.phase == SessionPhase.PAUSED) "Resume Frozen Session" else "Pause / Freeze Session (0% CPU)",
-                    onTogglePause,
-                )
-                QuickMenuAction(Icons.Outlined.Dashboard, "Workstation Dashboard & Settings", onOpenDashboard)
-
-                HorizontalDivider(modifier = Modifier.padding(vertical = 8.dp))
-                Button(
-                    onClick = onShutdown,
+                // Pinned Header Row
+                Row(
                     modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.SpaceBetween,
                 ) {
-                    Icon(Icons.Outlined.PowerSettingsNew, contentDescription = null)
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text(
+                            text = "LinuxDroid Quick Menu",
+                            style = MaterialTheme.typography.titleMedium,
+                            fontWeight = FontWeight.Bold,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                        )
+                        Text(
+                            text = "${snap.statusText} • ${snap.activeGpuSummary.ifEmpty { "ARM64 Workstation" }}",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                        )
+                    }
                     Spacer(Modifier.width(8.dp))
-                    Text("Shut Down Linux Workstation")
+                    IconButton(
+                        onClick = onDismissQuickMenu,
+                        modifier = Modifier.size(32.dp),
+                    ) {
+                        Icon(
+                            imageVector = Icons.Outlined.Close,
+                            contentDescription = "Close Quick Menu",
+                            tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                            modifier = Modifier.size(20.dp),
+                        )
+                    }
                 }
-                Spacer(Modifier.height(16.dp))
+
+                HorizontalDivider()
+
+                // Scrollable Responsive Action Grid (2 columns in landscape/tablet, 1 column in narrow portrait)
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .weight(1f, fill = false)
+                        .verticalScroll(menuScroll),
+                    verticalArrangement = Arrangement.spacedBy(6.dp),
+                ) {
+                    if (useTwoColumns) {
+                        for (rowItems in entries.chunked(2)) {
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                            ) {
+                                for (item in rowItems) {
+                                    QuickMenuTile(
+                                        icon = item.icon,
+                                        label = item.label,
+                                        onClick = item.onClick,
+                                        modifier = Modifier.weight(1f),
+                                    )
+                                }
+                                if (rowItems.size == 1) {
+                                    Spacer(Modifier.weight(1f))
+                                }
+                            }
+                        }
+                    } else {
+                        for (item in entries) {
+                            QuickMenuTile(
+                                icon = item.icon,
+                                label = item.label,
+                                onClick = item.onClick,
+                                modifier = Modifier.fillMaxWidth(),
+                            )
+                        }
+                    }
+                }
+
+                HorizontalDivider()
+
+                // Pinned Footer Action Bar (Dashboard & Shut Down are always visible without scrolling)
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    OutlinedButton(
+                        onClick = onOpenDashboard,
+                        contentPadding = PaddingValues(horizontal = 12.dp, vertical = 8.dp),
+                        modifier = Modifier
+                            .weight(1f)
+                            .heightIn(min = 38.dp),
+                    ) {
+                        Icon(
+                            imageVector = Icons.Outlined.Dashboard,
+                            contentDescription = null,
+                            modifier = Modifier.size(17.dp),
+                        )
+                        Spacer(Modifier.width(6.dp))
+                        Text(
+                            text = "Dashboard & Settings",
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                        )
+                    }
+                    Button(
+                        onClick = onShutdown,
+                        colors = ButtonDefaults.buttonColors(
+                            containerColor = MaterialTheme.colorScheme.error,
+                            contentColor = MaterialTheme.colorScheme.onError,
+                        ),
+                        contentPadding = PaddingValues(horizontal = 12.dp, vertical = 8.dp),
+                        modifier = Modifier
+                            .weight(1f)
+                            .heightIn(min = 38.dp),
+                    ) {
+                        Icon(
+                            imageVector = Icons.Outlined.PowerSettingsNew,
+                            contentDescription = null,
+                            modifier = Modifier.size(17.dp),
+                        )
+                        Spacer(Modifier.width(6.dp))
+                        Text(
+                            text = "Shut Down Linux",
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                        )
+                    }
+                }
             }
         }
     }
@@ -1090,7 +1316,7 @@ private fun BootProgressOverlay(
         contentAlignment = Alignment.Center,
     ) {
         val cardWidth = minOf(maxWidth, 600.dp)
-        val cardHeight = minOf(maxHeight, 344.dp).coerceAtLeast(220.dp)
+        val cardHeight = minOf(maxHeight, 344.dp)
 
         Card(
             shape = RoundedCornerShape(16.dp),
@@ -1276,6 +1502,7 @@ private fun BootProgressOverlay(
     }
 }
 
+@OptIn(ExperimentalLayoutApi::class)
 @Composable
 private fun BootFailedOverlay(
     snap: SessionSnapshot,
@@ -1296,7 +1523,7 @@ private fun BootFailedOverlay(
         contentAlignment = Alignment.Center,
     ) {
         val cardWidth = minOf(maxWidth, 620.dp)
-        val cardHeight = minOf(maxHeight, 360.dp).coerceAtLeast(240.dp)
+        val cardHeight = minOf(maxHeight, 360.dp)
 
         Card(
             shape = RoundedCornerShape(16.dp),
@@ -1362,17 +1589,15 @@ private fun BootFailedOverlay(
                     }
                 }
 
-                Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .height(38.dp),
+                FlowRow(
+                    modifier = Modifier.fillMaxWidth(),
                     horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.End),
-                    verticalAlignment = Alignment.CenterVertically,
+                    verticalArrangement = Arrangement.spacedBy(6.dp),
                 ) {
                     Button(
                         onClick = { onRetryBoot(true) },
                         contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp),
-                        modifier = Modifier.height(36.dp),
+                        modifier = Modifier.height(34.dp),
                     ) {
                         Icon(Icons.Outlined.Refresh, contentDescription = null, modifier = Modifier.size(16.dp))
                         Spacer(Modifier.width(6.dp))
@@ -1381,20 +1606,23 @@ private fun BootFailedOverlay(
                     OutlinedButton(
                         onClick = { onRetryBoot(false) },
                         contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp),
-                        modifier = Modifier.height(36.dp),
+                        modifier = Modifier.height(34.dp),
                     ) {
                         Text("Retry")
                     }
                     OutlinedButton(
                         onClick = onOpenTerminal,
                         contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp),
-                        modifier = Modifier.height(36.dp),
+                        modifier = Modifier.height(34.dp),
                     ) {
                         Icon(Icons.Outlined.Terminal, contentDescription = null, modifier = Modifier.size(16.dp))
                         Spacer(Modifier.width(4.dp))
                         Text("Terminal")
                     }
-                    TextButton(onClick = onOpenDashboard) {
+                    TextButton(
+                        onClick = onOpenDashboard,
+                        modifier = Modifier.height(34.dp),
+                    ) {
                         Text("Dashboard")
                     }
                 }
@@ -1408,6 +1636,7 @@ private fun WaitingForExternalMonitorOverlay(
     onUsePhoneScreenTemporary: () -> Unit,
     onOpenDashboard: () -> Unit,
 ) {
+    val bodyScroll = rememberScrollState()
     BoxWithConstraints(
         modifier = Modifier
             .fillMaxSize()
@@ -1416,7 +1645,7 @@ private fun WaitingForExternalMonitorOverlay(
         contentAlignment = Alignment.Center,
     ) {
         val cardWidth = minOf(maxWidth, 520.dp)
-        val cardHeight = minOf(maxHeight, 250.dp).coerceAtLeast(210.dp)
+        val cardHeight = minOf(maxHeight, 250.dp)
 
         Card(
             shape = RoundedCornerShape(16.dp),
@@ -1427,8 +1656,8 @@ private fun WaitingForExternalMonitorOverlay(
             Column(
                 modifier = Modifier
                     .fillMaxSize()
-                    .padding(20.dp),
-                verticalArrangement = Arrangement.SpaceBetween,
+                    .padding(18.dp),
+                verticalArrangement = Arrangement.spacedBy(10.dp),
             ) {
                 Row(
                     verticalAlignment = Alignment.CenterVertically,
@@ -1458,13 +1687,18 @@ private fun WaitingForExternalMonitorOverlay(
                     }
                 }
 
-                Text(
-                    text = "Connect a USB-C / HDMI monitor (device must support USB-C DisplayPort Alt Mode video output) or Wireless Display. LinuxDroid will output the desktop fullscreen onto the external monitor without needing Samsung DeX.",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    maxLines = 4,
-                    overflow = TextOverflow.Ellipsis,
-                )
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .weight(1f)
+                        .verticalScroll(bodyScroll),
+                ) {
+                    Text(
+                        text = "Connect a USB-C / HDMI monitor (device must support USB-C DisplayPort Alt Mode video output) or Wireless Display. LinuxDroid will output the desktop fullscreen onto the external monitor without needing Samsung DeX.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
 
                 Row(
                     modifier = Modifier.fillMaxWidth(),
@@ -1483,6 +1717,7 @@ private fun WaitingForExternalMonitorOverlay(
     }
 }
 
+@OptIn(ExperimentalLayoutApi::class)
 @Composable
 private fun ExternalMonitorTrackpadOverlay(
     externalMonitorLabel: String,
@@ -1571,11 +1806,12 @@ private fun ExternalMonitorTrackpadOverlay(
             )
         }
 
-        Row(
+        FlowRow(
             modifier = Modifier
                 .align(Alignment.BottomCenter)
                 .fillMaxWidth(),
-            horizontalArrangement = Arrangement.spacedBy(10.dp, Alignment.CenterHorizontally),
+            horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.CenterHorizontally),
+            verticalArrangement = Arrangement.spacedBy(8.dp),
         ) {
             OutlinedButton(
                 onClick = onToggleKeyboard,
@@ -1660,24 +1896,33 @@ private fun FloatingSessionControls(
 }
 
 @Composable
-private fun QuickMenuAction(
+private fun QuickMenuTile(
     icon: ImageVector,
     label: String,
     onClick: () -> Unit,
+    modifier: Modifier = Modifier,
 ) {
-    TextButton(
+    OutlinedButton(
         onClick = onClick,
-        modifier = Modifier.fillMaxWidth(),
+        shape = RoundedCornerShape(10.dp),
+        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline.copy(alpha = 0.75f)),
+        contentPadding = PaddingValues(horizontal = 12.dp, vertical = 8.dp),
+        modifier = modifier.heightIn(min = 42.dp),
     ) {
         Row(
             modifier = Modifier.fillMaxWidth(),
             verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(12.dp),
+            horizontalArrangement = Arrangement.spacedBy(10.dp),
         ) {
-            Icon(icon, contentDescription = null, tint = MaterialTheme.colorScheme.primary)
+            Icon(
+                imageVector = icon,
+                contentDescription = null,
+                tint = MaterialTheme.colorScheme.primary,
+                modifier = Modifier.size(18.dp),
+            )
             Text(
                 text = label,
-                style = MaterialTheme.typography.bodyLarge,
+                style = MaterialTheme.typography.bodyMedium,
                 color = MaterialTheme.colorScheme.onSurface,
                 maxLines = 2,
                 overflow = TextOverflow.Ellipsis,
