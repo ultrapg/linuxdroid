@@ -97,7 +97,34 @@ start_x11_helpers() {
   ) &
 }
 
+# Remove task manager launchers whose .desktop file is not installed (Plasma's default pins Discover,
+# which would show up as a blank icon). Handles existing configs on disk and the live shell config.
+prune_missing_launchers() {
+  local rc="$HOME/.config/plasma-org.kde.plasma.desktop-appletsrc" app
+  if [ -f "$rc" ] && [ ! -e /usr/share/applications/org.kde.discover.desktop ]; then
+    sed -i -E '/^launchers=/ { s#,applications:org\.kde\.discover\.desktop##g; s#=applications:org\.kde\.discover\.desktop,?#=#; }' "$rc" 2>/dev/null || true
+  fi
+  [ -e /usr/share/applications/org.kde.discover.desktop ] && return 0
+  local js='
+    var ps = panels();
+    for (var i = 0; i < ps.length; i++) {
+      var ws = ps[i].widgets();
+      for (var j = 0; j < ws.length; j++) {
+        var w = ws[j];
+        if (w.type == "org.kde.plasma.icontasks" || w.type == "org.kde.plasma.taskmanager") {
+          w.currentConfigGroup = ["General"];
+          var cur = String(w.readConfig("launchers", "applications:systemsettings.desktop,applications:org.kde.discover.desktop,preferred://filemanager,preferred://browser"));
+          var keep = cur.split(",").filter(function (l) { return l.indexOf("org.kde.discover.desktop") < 0 && l.length > 0; });
+          w.writeConfig("launchers", keep.join(","));
+        }
+      }
+    }'
+  dbus-send --session --dest=org.kde.plasmashell --type=method_call /PlasmaShell \
+    org.kde.PlasmaShell.evaluateScript string:"$js" >/dev/null 2>&1 || true
+}
+
 if [ "$desktop_choice" = "kde" ]; then
+  prune_missing_launchers
   boot_step 5 "Starting KDE Plasma Wayland compositor (${PIXEL_WIDTH}x${PIXEL_HEIGHT}, scale=${SCALE})..."
 
   export XDG_SESSION_TYPE=wayland
@@ -161,7 +188,7 @@ ENTRY
   fi
 
   echo "== linuxdroid-desktop: starting KDE Plasma Wayland (logical=${WIDTH}x${HEIGHT}, pixel=${PIXEL_WIDTH}x${PIXEL_HEIGHT}, scale=${SCALE}, KWIN_COMPOSE=${KWIN_COMPOSE})"
-  export -f start_x11_helpers
+  export -f start_x11_helpers prune_missing_launchers
   dbus-run-session -- /bin/bash -c '
     write_status() {
       echo "$2"
@@ -189,6 +216,7 @@ ENTRY
         if dbus-send --session --dest=org.kde.plasmashell --type=method_call --print-reply /PlasmaShell org.freedesktop.DBus.Introspectable.Introspect 2>/dev/null | grep -q "org.kde.PlasmaShell"; then
           dbus-send --session --dest=org.kde.KWin --type=method_call /VirtualKeyboard org.freedesktop.DBus.Properties.Set string:"org.kde.kwin.VirtualKeyboard" string:"enabled" variant:boolean:true >/dev/null 2>&1 || true
           sleep 0.2
+          prune_missing_launchers
           write_status "READY|KDE Plasma desktop ready" "== [BOOT READY] KDE Plasma desktop ready"
           break
         fi
