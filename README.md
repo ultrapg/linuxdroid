@@ -26,7 +26,7 @@ It pairs a native Vulkan/AHardwareBuffer Wayland compositor on Android with clea
 - **Native True-Pixel HiDPI Scaling (`100%`–`200%`)**: Full native pixel rendering via logical Wayland output scaling on KDE Plasma (`kwin_wayland --scale`) and XSettings `Gdk/WindowScalingFactor` + `Xft/DPI` on XFCE4, with live restart-and-apply from the Dashboard.
 - **Complete Android ↔ Linux Workstation Integration**:
   - Non-root workstation user (`linux`, `/home/linux`) with passwordless `sudo`, `pkexec`, and `linuxdroid-root` (`RootSpawner`).
-  - 1-tap floating on-screen keyboard pill plus automatic Android soft keyboard popup on both touchscreen taps and trackpad/mouse clicks into text fields (`zwp_text_input_v3`, KWin `/VirtualKeyboard` D-Bus, and X11 AT-SPI2).
+  - Manual 1-tap on-screen Android keyboard trigger via the Quick Menu and optional Floating Controls Pill (`zwp_text_input_v3` and X11 key event bridge, without intrusive auto-popup).
   - Two-way clipboard sync, low-latency `AAudio` PulseAudio sink + optional microphone input, real battery % & charging state (`UPower`), dynamic Wi-Fi / DNS sync (`NetworkManager`), and `/home/linux/Android` storage + custom host folder mounts with Dolphin/Thunar sidebar bookmarks.
   - Persistent background Foreground Service with **Pause / Freeze** (`SIGSTOP`/`SIGCONT`, 0% CPU) and **Shut Down** controls directly from the Android notification.
 

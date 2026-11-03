@@ -193,13 +193,11 @@ class ImeCaptureView(context: Context) : View(context) {
 class ImeBridge(
     private val activity: Activity,
     private val captureView: ImeCaptureView,
+    @Suppress("UNUSED_PARAMETER")
     private val imeStateFile: File,
 ) {
     private val mainHandler = Handler(Looper.getMainLooper())
     private var running = false
-    private var lastStamp = -1L
-    private var lastSeq = -1
-    private var lastGuestActive = false
     private var pendingFocusListener: ViewTreeObserver.OnWindowFocusChangeListener? = null
 
     @Volatile
@@ -217,34 +215,11 @@ class ImeBridge(
         }
     }
 
-    private val pollRunnable = object : Runnable {
-        override fun run() {
-            if (!running) return
-            val mod = imeStateFile.lastModified()
-            if (mod != 0L && mod != lastStamp) {
-                lastStamp = mod
-                val parsed = parseImeStateJson(FileUtils.readString(imeStateFile).orEmpty())
-                if (parsed != null && (parsed.second != lastSeq || parsed.first != lastGuestActive)) {
-                    val prev = lastGuestActive
-                    lastGuestActive = parsed.first
-                    lastSeq = parsed.second
-                    if (parsed.first != prev || parsed.first) {
-                        onAutoInputFocusChanged(parsed.first)
-                    }
-                }
-            }
-            mainHandler.postDelayed(this, 140L)
-        }
-    }
-
     fun start() {
         running = true
-        lastStamp = -1L
         WaylandCompositor.setTextInputListener { enabled, _, _, _, _, _ ->
             captureView.waylandTextInputActive = enabled
-            mainHandler.post { onAutoInputFocusChanged(enabled) }
         }
-        mainHandler.post(pollRunnable)
     }
 
     fun stop() {
@@ -319,15 +294,6 @@ class ImeBridge(
             if (captureView.viewTreeObserver.isAlive) {
                 captureView.viewTreeObserver.removeOnWindowFocusChangeListener(existing)
             }
-        }
-    }
-
-    private fun onAutoInputFocusChanged(active: Boolean) {
-        if (physicalKeyboardTyped) return
-        if (active) {
-            showKeyboardManual()
-        } else if (!captureView.waylandTextInputActive && !lastGuestActive) {
-            hideKeyboard()
         }
     }
 
