@@ -200,6 +200,11 @@ object LinuxRuntime {
         File(root, "tmp").apply {
             mkdirs()
             FileUtils.chmod(this, 0b1_111_111_111)
+            listFiles()?.forEach { child ->
+                if (child.name.startsWith(".linuxdroid-svc-")) {
+                    runCatching { child.delete() }
+                }
+            }
         }
         File(root, "var/tmp").apply {
             mkdirs()

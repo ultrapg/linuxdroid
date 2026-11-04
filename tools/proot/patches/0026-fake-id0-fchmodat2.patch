@@ -1,44 +1,53 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
-Date: Wed, 4 Nov 2026 16:15:00 +0000
-Subject: [PATCH] fake_id0: handle PR_fchmodat2 mode preservation, symlink
- resolution, AT_SYMLINK_NOFOLLOW, and permission-error masking
+Date: Wed, 4 Nov 2026 17:18:00 +0000
+Subject: [PATCH] fake_id0, seccomp: harden PR_fchmodat2 mode preservation,
+ symlink/rename/unlink handling, AT_EMPTY_PATH, and Android 14 SIGSYS
 
 ---
+diff --git a/src/extension/fake_id0/config.h b/src/extension/fake_id0/config.h
+index 4f3b39f..e68f579 100644
 --- a/src/extension/fake_id0/config.h
 +++ b/src/extension/fake_id0/config.h
-@@ -2,7 +2,11 @@
+@@ -2,8 +2,12 @@
  #define FAKE_ID0_CONFIG_H
  
  #include <sys/types.h>   /* uid_t, gid_t */
 +#include <sys/queue.h>   /* LIST_*, */
  #include <stdbool.h>
-+
+ 
 +struct ModifiedNode;
 +LIST_HEAD(ModifiedNodes, ModifiedNode);
- 
++
  typedef struct {
  	uid_t ruid;
-@@ -17,7 +21,7 @@
+ 	uid_t euid;
+@@ -17,7 +21,8 @@ typedef struct {
  
  	mode_t umask;
  
 -
 +	struct ModifiedNodes modified_nodes;
++	bool in_sigsys;
  
  	bool identity;
  } Config;
+diff --git a/src/extension/fake_id0/fake_id0.c b/src/extension/fake_id0/fake_id0.c
+index a5ee018..c9eeed8 100644
 --- a/src/extension/fake_id0/fake_id0.c
 +++ b/src/extension/fake_id0/fake_id0.c
-@@ -23,6 +23,8 @@
+@@ -23,7 +23,10 @@
  #include <assert.h>      /* assert(3), */
  #include <stdint.h>      /* intptr_t, */
  #include <errno.h>       /* E*, */
+-#include <sys/stat.h>    /* chmod(2), stat(2) */
 +#include <fcntl.h>       /* AT_*, */
-+#include <string.h>      /* strcmp(3), */
- #include <sys/stat.h>    /* chmod(2), stat(2) */
++#include <stdio.h>       /* snprintf(3), */
++#include <sys/stat.h>    /* chmod(2), stat(2), lstat(2) */
++#include <sys/wait.h>    /* WIFSTOPPED, WSTOPSIG */
  #include <sys/types.h>   /* uid_t, gid_t, get*id(2), */
  #include <unistd.h>      /* get*id(2),  */
-@@ -47,6 +49,10 @@
+ #include <sys/ptrace.h>  /* linux.git:c0a3a20b  */
+@@ -47,6 +50,10 @@
  #include "path/binding.h"
  #include "path/f2fs-bug.h"
  #include "arch.h"
@@ -49,7 +58,7 @@ Subject: [PATCH] fake_id0: handle PR_fchmodat2 mode preservation, symlink
  
  #include "extension/fake_id0/chown.h"
  #include "extension/fake_id0/chroot.h"
-@@ -259,9 +265,10 @@
+@@ -259,9 +266,14 @@
  	return 0;							\
  } while (0)
  
@@ -57,11 +66,15 @@ Subject: [PATCH] fake_id0: handle PR_fchmodat2 mode preservation, symlink
 +typedef struct ModifiedNode {
  	char *path;
  	mode_t mode;
++	dev_t dev;
++	ino_t ino;
++	bool is_dir;
++	bool skip_restore;
 +	LIST_ENTRY(ModifiedNode) link;
  } ModifiedNode;
  
  /* List of syscalls handled by this extensions.  */
-@@ -290,6 +297,7 @@
+@@ -290,6 +302,7 @@ static FilteredSysnum filtered_sysnums[] = {
  	{ PR_execve,		FILTER_SYSEXIT },
  	{ PR_fchmod,		FILTER_SYSEXIT },
  	{ PR_fchmodat,		FILTER_SYSEXIT },
@@ -69,97 +82,230 @@ Subject: [PATCH] fake_id0: handle PR_fchmodat2 mode preservation, symlink
  	{ PR_fchown,		FILTER_SYSEXIT },
  	{ PR_fchown32,		FILTER_SYSEXIT },
  	{ PR_fchownat,		FILTER_SYSEXIT },
-@@ -394,8 +402,38 @@
+@@ -394,31 +407,201 @@ static FilteredSysnum identity_sysnums[] = {
   */
  static int restore_mode(ModifiedNode *node)
  {
+-	(void) chmod(node->path, node->mode);
 +	LIST_REMOVE(node, link);
- 	(void) chmod(node->path, node->mode);
++	if (!node->skip_restore && node->path != NULL)
++		(void) chmod(node->path, node->mode);
  	return 0;
+ }
+ 
++static void restore_all_modified_nodes(Config *config)
++{
++	while (!LIST_EMPTY(&config->modified_nodes)) {
++		ModifiedNode *node = LIST_FIRST(&config->modified_nodes);
++		TALLOC_FREE(node);
++	}
 +}
 +
-+static bool get_chmod_final_mode(const Tracee *tracee, const char *path, mode_t *mode_out)
++static bool resolve_l2s_final(const char *path, char resolved[PATH_MAX], struct stat *perms)
 +{
-+	switch (get_sysnum(tracee, ORIGINAL)) {
++	char inter[PATH_MAX];
++	const char *base;
++	ssize_t n;
++
++	n = readlink(path, inter, PATH_MAX - 1);
++	if (n <= 0 || n >= PATH_MAX - 1)
++		return false;
++	inter[n] = '\0';
++
++	base = strrchr(inter, '/');
++	base = (base == NULL ? inter : base + 1);
++	if (strncmp(base, ".l2s.", 5) != 0 && strncmp(base, ".proot.l2s.", 11) != 0)
++		return false;
++
++	n = readlink(inter, resolved, PATH_MAX - 1);
++	if (n <= 0 || n >= PATH_MAX - 1)
++		return false;
++	resolved[n] = '\0';
++
++	if (lstat(resolved, perms) < 0 || S_ISLNK(perms->st_mode))
++		return false;
++	return true;
++}
++
++static void finalize_modified_nodes_before_exit(const Tracee *tracee, Config *config)
++{
++	char target_path[PATH_MAX];
++	ModifiedNode *node;
++	struct stat st;
++	Sysnum sysnum;
++	int status;
++
++	if (config->in_sigsys || tracee->status < 0 || LIST_EMPTY(&config->modified_nodes))
++		return;
++
++	if ((int) peek_reg(tracee, CURRENT, SYSARG_RESULT) != 0)
++		return;
++
++	sysnum = get_sysnum(tracee, ORIGINAL);
++	switch (sysnum) {
 +	case PR_chmod:
-+		*mode_out = peek_reg(tracee, ORIGINAL, SYSARG_2);
-+		return true;
-+
 +	case PR_fchmodat:
-+		*mode_out = peek_reg(tracee, ORIGINAL, SYSARG_3);
-+		return true;
-+
 +	case PR_fchmodat2: {
-+		word_t flags = peek_reg(tracee, ORIGINAL, SYSARG_4);
-+		if ((flags & ~(AT_SYMLINK_NOFOLLOW | AT_EMPTY_PATH)) != 0)
-+			return false;
-+		if ((flags & AT_SYMLINK_NOFOLLOW) != 0) {
-+			struct stat lperms;
-+			if (lstat(path, &lperms) < 0 || S_ISLNK(lperms.st_mode))
-+				return false;
++		Reg path_reg = (sysnum == PR_chmod ? SYSARG_1 : SYSARG_2);
++		word_t flags = (sysnum == PR_fchmodat2 ? peek_reg(tracee, ORIGINAL, SYSARG_4) : 0);
++
++		status = read_path(tracee, target_path, peek_reg(tracee, MODIFIED, path_reg));
++		if (status < 0)
++			return;
++		if (sysnum == PR_fchmodat2 && target_path[0] == '\0' && (flags & AT_EMPTY_PATH) != 0) {
++			snprintf(target_path, sizeof(target_path), "/proc/%d/fd/%d",
++				tracee->pid, (int) peek_reg(tracee, MODIFIED, SYSARG_1));
++			status = stat(target_path, &st);
++		} else if (sysnum == PR_fchmodat2 && (flags & AT_SYMLINK_NOFOLLOW) != 0) {
++			status = lstat(target_path, &st);
++		} else {
++			status = stat(target_path, &st);
 +		}
-+		*mode_out = peek_reg(tracee, ORIGINAL, SYSARG_3);
-+		return true;
++		if (status < 0 || !S_ISDIR(st.st_mode))
++			return;
++		LIST_FOREACH(node, &config->modified_nodes, link) {
++			if (node->is_dir && node->dev == st.st_dev && node->ino == st.st_ino)
++				node->skip_restore = true;
++		}
++		return;
++	}
++
++	case PR_rename:
++	case PR_renameat:
++	case PR_renameat2: {
++		Reg new_reg = (sysnum == PR_rename ? SYSARG_2 : SYSARG_4);
++		if (read_path(tracee, target_path, peek_reg(tracee, MODIFIED, new_reg)) <= 0)
++			return;
++		if (lstat(target_path, &st) < 0 || !S_ISDIR(st.st_mode))
++			return;
++		LIST_FOREACH(node, &config->modified_nodes, link) {
++			if (node->is_dir && node->dev == st.st_dev && node->ino == st.st_ino) {
++				char *dup = talloc_strdup(node, target_path);
++				if (dup != NULL) {
++					TALLOC_FREE(node->path);
++					node->path = dup;
++				}
++			}
++		}
++		return;
 +	}
 +
 +	default:
-+		return false;
++		return;
 +	}
- }
- 
++}
++
  /**
-@@ -404,17 +442,41 @@
-  * The original permissions are restored through talloc destructors.
+  * Force permissions of @path to "rwx" during the path translation of
+  * current @tracee's syscall, in order to simulate CAP_DAC_OVERRIDE.
+- * The original permissions are restored through talloc destructors.
++ * The original permissions are restored on syscall exit (or tracee teardown).
   * See canonicalize() for the meaning of @is_final.
   */
 -static void override_permissions(const Tracee *tracee, const char *path, bool is_final)
-+static void override_permissions(const Tracee *tracee, Config *config, const char *path, bool is_final)
++static void override_permissions(Tracee *tracee, Config *config, const char *path, bool is_final)
  {
++	char l2s_target[PATH_MAX];
++	const char *effective_path = path;
  	ModifiedNode *node;
  	struct stat perms;
  	mode_t new_mode;
-+	mode_t chmod_mode = 0;
-+	bool is_chmod_final = false;
- 	int status;
+-	int status;
++	Sysnum sysnum;
  
  	/* Get the meta-data */
- 	if (should_skip_file_access_due_to_f2fs_bug(tracee, path)) 
+-	if (should_skip_file_access_due_to_f2fs_bug(tracee, path)) 
++	if (should_skip_file_access_due_to_f2fs_bug(tracee, path))
  		return;
  
-+	if (is_final && get_sysnum(tracee, ORIGINAL) == PR_fchmodat2) {
-+		word_t flags = peek_reg(tracee, ORIGINAL, SYSARG_4);
-+		if ((flags & ~(AT_SYMLINK_NOFOLLOW | AT_EMPTY_PATH)) != 0)
-+			return;
-+		if ((flags & AT_SYMLINK_NOFOLLOW) != 0) {
-+			struct stat lperms;
-+			if (lstat(path, &lperms) < 0 || S_ISLNK(lperms.st_mode))
-+				return;
-+		}
-+	}
+-	status = stat(path, &perms);
+-	if (status < 0)
++	sysnum = config->in_sigsys
++		? get_sysnum(tracee, CURRENT)
++		: get_sysnum(tracee, ORIGINAL);
 +
-+	if (is_final) {
-+		is_chmod_final = get_chmod_final_mode(tracee, path, &chmod_mode);
-+		if (is_chmod_final) {
-+			ModifiedNode *existing;
-+			LIST_FOREACH(existing, &config->modified_nodes, link) {
-+				if (strcmp(existing->path, path) == 0)
-+					existing->mode = chmod_mode;
-+			}
-+		}
-+	}
-+
- 	status = stat(path, &perms);
- 	if (status < 0)
++	if (lstat(path, &perms) < 0)
  		return;
-@@ -441,17 +503,11 @@
- 		/* Restore the previous mode of any non final components.  */
- 		node->mode = perms.st_mode;
- 	}
-+	else if (is_chmod_final) {
-+		node->mode = chmod_mode;
+ 
++	if (S_ISLNK(perms.st_mode)) {
++		if (!is_final
++		    || sysnum == PR_unlink
++		    || sysnum == PR_unlinkat
++		    || sysnum == PR_link
++		    || sysnum == PR_linkat
++		    || sysnum == PR_rename
++		    || sysnum == PR_renameat
++		    || sysnum == PR_renameat2
++		    || !resolve_l2s_final(path, l2s_target, &perms))
++			return;
++		effective_path = l2s_target;
 +	}
- 	else {
- 		switch (get_sysnum(tracee, ORIGINAL)) {
++
++	switch (sysnum) {
++	/* chmod/fchmodat/fchmodat2 never require permission bits on the target
++	 * file or target directory itself; only intermediate directories
++	 * traversed during path lookup need S_IXUSR. */
++	case PR_chmod:
++	case PR_fchmodat:
++	case PR_fchmodat2:
++		if (is_final || !S_ISDIR(perms.st_mode))
++			return;
++		break;
++
++	/* Syscalls that never check permission bits on the final component. */
++	case PR_fstatat64:
++	case PR_lstat:
++	case PR_lstat64:
++	case PR_newfstatat:
++	case PR_oldlstat:
++	case PR_oldstat:
++	case PR_stat:
++	case PR_stat64:
++	case PR_statfs:
++	case PR_statfs64:
++	case PR_statx:
++	case PR_readlink:
++	case PR_readlinkat:
++	case PR_lchown:
++	case PR_lchown32:
++	case PR_unlink:
++	case PR_unlinkat:
++	case PR_rmdir:
++		if (is_final)
++			return;
++		break;
++
++	/* rename only checks write permission on a moved directory (for ".."),
++	 * never on renamed or replaced non-directory files. */
++	case PR_rename:
++	case PR_renameat:
++	case PR_renameat2:
++		if (is_final && !S_ISDIR(perms.st_mode))
++			return;
++		break;
++
++	default:
++		break;
++	}
++
+ 	/* Copy the current permissions */
+ 	new_mode = perms.st_mode & (S_IRWXU | S_IRWXG | S_IRWXO);
+ 
+@@ -433,59 +616,33 @@ static void override_permissions(const Tracee *tracee, const char *path, bool is
+ 	if (new_mode == (perms.st_mode & (S_IRWXU | S_IRWXG | S_IRWXO)))
+ 		return;
+ 
+-	node = talloc_zero(tracee->ctx, ModifiedNode);
++	node = talloc_zero(config, ModifiedNode);
+ 	if (node == NULL)
+ 		return;
+ 
+-	if (!is_final) {
+-		/* Restore the previous mode of any non final components.  */
+-		node->mode = perms.st_mode;
+-	}
+-	else {
+-		switch (get_sysnum(tracee, ORIGINAL)) {
 -		/* For chmod syscalls: restore the new mode of the final component.  */
 -		case PR_chmod:
 -			node->mode = peek_reg(tracee, ORIGINAL, SYSARG_2);
@@ -169,27 +315,58 @@ Subject: [PATCH] fake_id0: handle PR_fchmodat2 mode preservation, symlink
 -			node->mode = peek_reg(tracee, ORIGINAL, SYSARG_3);
 -			break;
 -
- 		/* For stat syscalls: don't touch the mode of the final component.  */
- 		case PR_fstatat64:
- 		case PR_lstat:
-@@ -463,6 +519,7 @@
- 		case PR_stat64:
- 		case PR_statfs:
- 		case PR_statfs64:
-+			TALLOC_FREE(node);
- 			return;
- 
- 		/* Otherwise: restore the previous mode of the final component.  */
-@@ -478,6 +535,8 @@
+-		/* For stat syscalls: don't touch the mode of the final component.  */
+-		case PR_fstatat64:
+-		case PR_lstat:
+-		case PR_lstat64:
+-		case PR_newfstatat:
+-		case PR_oldlstat:
+-		case PR_oldstat:
+-		case PR_stat:
+-		case PR_stat64:
+-		case PR_statfs:
+-		case PR_statfs64:
+-			return;
+-
+-		/* Otherwise: restore the previous mode of the final component.  */
+-		default:
+-			node->mode = perms.st_mode;
+-			break;
+-		}
+-	}
+-
+-	node->path = talloc_strdup(node, path);
++	node->mode = perms.st_mode;
++	node->dev = perms.st_dev;
++	node->ino = perms.st_ino;
++	node->is_dir = S_ISDIR(perms.st_mode);
++	node->skip_restore = false;
++	node->path = talloc_strdup(node, effective_path);
+ 	if (node->path == NULL) {
+ 		/* Keep only consistent nodes.  */
  		TALLOC_FREE(node);
  		return;
  	}
-+
-+	LIST_INSERT_HEAD(&config->modified_nodes, node, link);
  
- 	/* The mode restoration works because Talloc destructors are
- 	 * called in reverse order.  */
-@@ -957,6 +1016,7 @@
+-	/* The mode restoration works because Talloc destructors are
+-	 * called in reverse order.  */
++	LIST_INSERT_HEAD(&config->modified_nodes, node, link);
++
++	/* The mode restoration works in reverse (LIFO) order.  */
+ 	talloc_set_destructor(node, restore_mode);
+ 
+-	(void) chmod(path, new_mode);
++	if (!config->in_sigsys && tracee->seccomp == ENABLED) {
++		tracee->restart_how = PTRACE_SYSCALL;
++		tracee->sysexit_pending = true;
++	}
+ 
+-	return;
++	(void) chmod(effective_path, new_mode);
+ }
+ 
+ /**
+@@ -957,6 +1114,7 @@ static int handle_sysexit_end(Tracee *tracee, Config *config)
  	case PR_fchown32:
  	case PR_lchown32:
  	case PR_fchmodat:
@@ -197,23 +374,42 @@ Subject: [PATCH] fake_id0: handle PR_fchmodat2 mode preservation, symlink
  	case PR_fchownat: 
  		return handle_perm_err_exit_end(tracee, config, false);
  
-@@ -1163,6 +1223,7 @@
+@@ -1163,6 +1321,8 @@ int fake_id0_callback(Extension *extension, ExtensionEvent event, intptr_t data1
  		config->fsgid = gid;
  			/* Set the umask to the typical linux value. */
  			config->umask = 022;
 +		LIST_INIT(&config->modified_nodes);
++		config->in_sigsys = false;
  
  		config->identity = (uid != 0 && uid == (int) getuid() && gid == (int) getgid());
  		extension->filtered_sysnums = config->identity
-@@ -1193,6 +1254,7 @@
+@@ -1193,6 +1353,25 @@ int fake_id0_callback(Extension *extension, ExtensionEvent event, intptr_t data1
  			return -1;
  
  		memcpy(extension->config, parent->config, sizeof(Config));
 +		LIST_INIT(&((Config *)extension->config)->modified_nodes);
++		((Config *)extension->config)->in_sigsys = false;
++		return 0;
++	}
++
++	case NEW_STATUS: {
++		Tracee *tracee = TRACEE(extension);
++		Config *config = talloc_get_type_abort(extension->config, Config);
++		int tracee_status = (int) data1;
++
++		config->in_sigsys = (WIFSTOPPED(tracee_status) && WSTOPSIG(tracee_status) == SIGSYS);
++		if (!config->in_sigsys && IS_IN_SYSENTER(tracee))
++			restore_all_modified_nodes(config);
++		return 0;
++	}
++
++	case SYSCALL_ENTER_START: {
++		Config *config = talloc_get_type_abort(extension->config, Config);
++		restore_all_modified_nodes(config);
  		return 0;
  	}
  
-@@ -1203,7 +1265,7 @@
+@@ -1203,7 +1382,7 @@ int fake_id0_callback(Extension *extension, ExtensionEvent event, intptr_t data1
  		/* Force permissions if the tracee was supposed to
  		 * have the capability.  */
  		if (config->euid == 0) /* TODO: || HAS_CAP(DAC_OVERRIDE) */
@@ -222,3 +418,147 @@ Subject: [PATCH] fake_id0: handle PR_fchmodat2 mode preservation, symlink
  		return 0;
  	}
  
+@@ -1270,8 +1449,12 @@ int fake_id0_callback(Extension *extension, ExtensionEvent event, intptr_t data1
+ 	case SYSCALL_EXIT_END: {
+ 		Tracee *tracee = TRACEE(extension);
+ 		Config *config = talloc_get_type_abort(extension->config, Config);
++		int status;
+ 
+-		return handle_sysexit_end(tracee, config);
++		finalize_modified_nodes_before_exit(tracee, config);
++		status = handle_sysexit_end(tracee, config);
++		restore_all_modified_nodes(config);
++		return status;
+ 	}
+ 
+ 	case SIGSYS_OCC: {
+diff --git a/src/syscall/enter.c b/src/syscall/enter.c
+index 98241bd..d7bf570 100644
+--- a/src/syscall/enter.c
++++ b/src/syscall/enter.c
+@@ -491,6 +491,10 @@ int translate_syscall_enter(Tracee *tracee)
+ 		if (status < 0)
+ 			break;
+ 
++		if (path[0] == '\0' && peek_reg(tracee, CURRENT, SYSARG_2) != 0
++		    && dirfd == AT_FDCWD && (flags & 0x1000 /* AT_EMPTY_PATH */) != 0)
++			strcpy(path, ".");
++
+ 		if ((flags & AT_SYMLINK_NOFOLLOW) != 0)
+ 			status = translate_path2(tracee, dirfd, path, SYSARG_2, SYMLINK);
+ 		else
+diff --git a/src/tracee/seccomp.c b/src/tracee/seccomp.c
+index 0af232b..dc8af41 100644
+--- a/src/tracee/seccomp.c
++++ b/src/tracee/seccomp.c
+@@ -7,6 +7,11 @@
+ #include <linux/net.h> /* SYS_SENDMMSG */
+ #include <assert.h>    /* assert(3), */
+ #include <time.h>      /* time(2), */
++#include <fcntl.h>     /* AT_*, */
++#include <sys/stat.h>  /* stat(2), lstat(2), S_ISLNK, */
++#ifndef AT_EMPTY_PATH
++#define AT_EMPTY_PATH 0x1000
++#endif
+ 
+ #include "extension/extension.h"
+ #include "cli/note.h"
+@@ -97,6 +102,7 @@ int handle_seccomp_event(Tracee* tracee)
+ 	tracee->_regs[CURRENT].orig_eax = tracee->_regs[CURRENT].eax;
+ #endif
+ 
++	save_current_regs(tracee, ORIGINAL);
+ 	print_current_regs(tracee, 3, "seccomp SIGSYS");
+ 
+ 	return handle_seccomp_event_common(tracee);
+@@ -518,6 +524,90 @@ static int handle_seccomp_event_common(Tracee *tracee)
+ 		break;
+ 	}
+ 
++	case PR_fchmodat2:
++	{
++		word_t flags = peek_reg(tracee, CURRENT, SYSARG_4);
++		int dirfd = (int) peek_reg(tracee, CURRENT, SYSARG_1);
++		char original[PATH_MAX];
++		char path[PATH_MAX];
++		struct stat st;
++		int size;
++
++		if ((flags & ~(AT_SYMLINK_NOFOLLOW | AT_EMPTY_PATH)) != 0) {
++			set_result_after_seccomp(tracee, -EINVAL);
++			break;
++		}
++		if (peek_reg(tracee, CURRENT, SYSARG_2) == 0) {
++			set_result_after_seccomp(tracee, -EFAULT);
++			break;
++		}
++		size = read_string(tracee, original, peek_reg(tracee, CURRENT, SYSARG_2), PATH_MAX);
++		if (size < 0) {
++			set_result_after_seccomp(tracee, size);
++			break;
++		}
++		if (size >= PATH_MAX) {
++			set_result_after_seccomp(tracee, -ENAMETOOLONG);
++			break;
++		}
++		if (size == 1) {
++			if ((flags & AT_EMPTY_PATH) == 0) {
++				set_result_after_seccomp(tracee, -ENOENT);
++				break;
++			}
++			if (dirfd == AT_FDCWD) {
++				strcpy(original, ".");
++			} else {
++				snprintf(path, sizeof(path), "/proc/%d/fd/%d", tracee->pid, dirfd);
++				if (stat(path, &st) < 0) {
++					set_result_after_seccomp(tracee, -EBADF);
++					break;
++				}
++				if (S_ISLNK(st.st_mode)) {
++					set_result_after_seccomp(tracee, -EOPNOTSUPP);
++					break;
++				}
++				snprintf(path, sizeof(path), "/proc/self/fd/%d", dirfd);
++				ret = set_sysarg_path(tracee, path, SYSARG_2);
++				if (ret < 0) {
++					set_result_after_seccomp(tracee, ret);
++					break;
++				}
++				set_sysnum(tracee, PR_fchmodat);
++				poke_reg(tracee, SYSARG_1, AT_FDCWD);
++				poke_reg(tracee, SYSARG_4, 0);
++				restart_syscall_after_seccomp(tracee);
++				break;
++			}
++		}
++		if ((flags & AT_SYMLINK_NOFOLLOW) != 0) {
++			status = translate_path(tracee, path, dirfd, original, false);
++			if (status < 0) {
++				set_result_after_seccomp(tracee, status);
++				break;
++			}
++			if (lstat(path, &st) < 0) {
++				set_result_after_seccomp(tracee, -errno);
++				break;
++			}
++			if (S_ISLNK(st.st_mode)) {
++				set_result_after_seccomp(tracee, -EOPNOTSUPP);
++				break;
++			}
++		}
++		if (size == 1 && dirfd == AT_FDCWD) {
++			ret = set_sysarg_path(tracee, original, SYSARG_2);
++			if (ret < 0) {
++				set_result_after_seccomp(tracee, ret);
++				break;
++			}
++		}
++		set_sysnum(tracee, PR_fchmodat);
++		poke_reg(tracee, SYSARG_4, 0);
++		restart_syscall_after_seccomp(tracee);
++		break;
++	}
++
+ 	case PR_ftruncate:
+ 	{
+ 		if (detranslate_sysnum(get_abi(tracee), PR_ftruncate64) == SYSCALL_AVOIDER) {

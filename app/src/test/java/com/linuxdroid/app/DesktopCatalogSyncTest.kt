@@ -2,14 +2,27 @@ package com.linuxdroid.app
 
 import com.linuxdroid.app.runtime.DesktopCatalog
 import org.junit.Assert.assertEquals
-import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import java.io.File
+import java.security.MessageDigest
 
 class DesktopCatalogSyncTest {
 
     private val sha256Regex = Regex("^[0-9a-f]{64}$")
+
+    private fun sha256Hex(file: File): String {
+        val md = MessageDigest.getInstance("SHA-256")
+        val buf = ByteArray(1024 * 1024)
+        file.inputStream().use { input ->
+            while (true) {
+                val n = input.read(buf)
+                if (n <= 0) break
+                md.update(buf, 0, n)
+            }
+        }
+        return md.digest().joinToString("") { "%02x".format(it) }
+    }
 
     @Test
     fun fallbackEditionsHaveValidIntegrityMetadataAndLatestUrls() {
@@ -76,6 +89,12 @@ class DesktopCatalogSyncTest {
                     "Archive byte length on disk for $archiveName must match catalog sizeBytes",
                     archiveFile.length(),
                     fromFallback.sizeBytes
+                )
+                val actualSha256 = sha256Hex(archiveFile)
+                assertEquals(
+                    "Archive SHA-256 on disk for $archiveName must match FALLBACK_EDITIONS",
+                    actualSha256,
+                    fromFallback.sha256
                 )
             }
         }

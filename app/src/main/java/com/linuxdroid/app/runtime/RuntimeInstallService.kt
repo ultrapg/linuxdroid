@@ -248,7 +248,8 @@ class RuntimeInstallService : Service() {
             SessionPrefs.setDesktopEnvironment(this, desktop)
         }
         LinuxRuntime.clearCachedBinds()
-        LinuxRuntime.stageBundledOverlay(this, SessionPrefs.prootFastPath(this))
+        val enableFastPath = !SessionPrefs.prootNoSeccomp(this) && SessionPrefs.prootFastPath(this)
+        LinuxRuntime.stageBundledOverlay(this, enableFastPath)
         UserProvisioner.provisionRootfs(targetRoot, SessionPrefs.username(this), Process.myUid())
     }
 

@@ -334,15 +334,23 @@ CTRL
     /usr/bin/python3 -c '
 import ctypes, errno, os, stat, tempfile
 libc = ctypes.CDLL("libc.so.6", use_errno=True)
-AT_FDCWD, AT_SYMLINK_NOFOLLOW, SYS_fchmodat2 = -100, 0x100, 452
+AT_FDCWD, AT_SYMLINK_NOFOLLOW, AT_EMPTY_PATH, O_PATH, O_NOFOLLOW, SYS_fchmodat2 = -100, 0x100, 0x1000, 0o10000000, 0o400000, 452
 with tempfile.TemporaryDirectory(dir="/tmp") as d:
     ro = os.path.join(d, "ro0444")
     open(ro, "w").close()
     os.chmod(ro, 0o444)
     assert stat.S_IMODE(os.stat(ro).st_mode) == 0o444
-    assert libc.syscall(ctypes.c_long(SYS_fchmodat2), AT_FDCWD, ro.encode(), 0o755, 0) == 0
-    assert stat.S_IMODE(os.stat(ro).st_mode) == 0o755
+    # Failed fchmodat2 (trailing slash ENOTDIR) must NEVER mutate 0444 target mode
+    rc = libc.syscall(ctypes.c_long(SYS_fchmodat2), AT_FDCWD, (ro + "/").encode(), 0o755, 0)
+    assert rc == -1 and ctypes.get_errno() == errno.ENOTDIR
+    assert stat.S_IMODE(os.stat(ro).st_mode) == 0o444
+    # Regular + special bits (0755, 04755, 02755) on read-only 0444 file
+    for m in (0o755, 0o4755, 0o2755):
+        os.chmod(ro, 0o444)
+        assert libc.syscall(ctypes.c_long(SYS_fchmodat2), AT_FDCWD, ro.encode(), m, 0) == 0
+        assert stat.S_IMODE(os.stat(ro).st_mode) == m
     os.chmod(ro, 0o444)
+    # AT_SYMLINK_NOFOLLOW on real symlink returns EOPNOTSUPP and preserves 0444 target
     sym = os.path.join(d, "sym")
     os.symlink(ro, sym)
     rc = libc.syscall(ctypes.c_long(SYS_fchmodat2), AT_FDCWD, sym.encode(), 0o755, AT_SYMLINK_NOFOLLOW)
@@ -350,6 +358,70 @@ with tempfile.TemporaryDirectory(dir="/tmp") as d:
     assert stat.S_IMODE(os.stat(ro).st_mode) == 0o444
     assert libc.syscall(ctypes.c_long(SYS_fchmodat2), AT_FDCWD, sym.encode(), 0o751, 0) == 0
     assert stat.S_IMODE(os.stat(ro).st_mode) == 0o751
+    # Unlinking symlink to 0444 file must preserve 0444 target
+    os.chmod(ro, 0o444)
+    os.unlink(sym)
+    assert stat.S_IMODE(os.stat(ro).st_mode) == 0o444
+    # link2symlink hardlink with AT_SYMLINK_NOFOLLOW must succeed (not EOPNOTSUPP)
+    hl = os.path.join(d, "hl")
+    os.link(ro, hl)
+    assert libc.syscall(ctypes.c_long(SYS_fchmodat2), AT_FDCWD, hl.encode(), 0o2755, AT_SYMLINK_NOFOLLOW) == 0
+    assert stat.S_IMODE(os.stat(ro).st_mode) == 0o2755
+    os.chmod(ro, 0o444)
+    os.unlink(hl)
+    assert stat.S_IMODE(os.stat(ro).st_mode) == 0o444
+    # AT_EMPTY_PATH on O_PATH fd and AT_FDCWD
+    fd = os.open(ro, O_PATH | O_NOFOLLOW)
+    try:
+        assert libc.syscall(ctypes.c_long(SYS_fchmodat2), fd, b"", 0o750, AT_EMPTY_PATH) == 0
+    finally:
+        os.close(fd)
+    assert stat.S_IMODE(os.stat(ro).st_mode) == 0o750
+    sub = os.path.join(d, "sub")
+    os.mkdir(sub, 0o555)
+    old_cwd = os.getcwd()
+    try:
+        os.chdir(sub)
+        assert libc.syscall(ctypes.c_long(SYS_fchmodat2), AT_FDCWD, b"", 0o753, AT_EMPTY_PATH) == 0
+    finally:
+        os.chdir(old_cwd)
+    assert stat.S_IMODE(os.stat(sub).st_mode) == 0o753
+    # dpkg-style rename of 0440 file must preserve 0440
+    sd_tmp = os.path.join(d, "sudoers.dpkg-new")
+    sd_dst = os.path.join(d, "sudoers")
+    open(sd_tmp, "w").close()
+    os.chmod(sd_tmp, 0o440)
+    os.rename(sd_tmp, sd_dst)
+    assert stat.S_IMODE(os.stat(sd_dst).st_mode) == 0o440
+    # Real ARM64 dpkg unpack/configure/upgrade/purge under unprivileged proot -0 --link2symlink
+    import subprocess
+    adm, inst, pkg, deb, logf = [os.path.join(d, x) for x in ("adm", "inst", "pkg", "test.deb", "dpkg.log")]
+    for subp in ("updates", "info", "triggers", "parts"):
+        os.makedirs(os.path.join(adm, subp), exist_ok=True)
+    for fn in ("status", "available", "diversions", "statoverride"):
+        open(os.path.join(adm, fn), "w").close()
+    os.makedirs(inst, exist_ok=True)
+    os.makedirs(os.path.join(pkg, "DEBIAN"), exist_ok=True)
+    os.makedirs(os.path.join(pkg, "etc"), exist_ok=True)
+    os.makedirs(os.path.join(pkg, "usr/bin"), exist_ok=True)
+    with open(os.path.join(pkg, "DEBIAN/control"), "w") as f:
+        f.write("Package: proot-fchmodat2-test\nVersion: 1.0\nArchitecture: all\nMaintainer: test <t@local>\nDescription: test\n")
+    os.chmod(os.path.join(pkg, "DEBIAN"), 0o755)
+    f440 = os.path.join(pkg, "etc/ro440")
+    open(f440, "w").write("secret\n")
+    os.chmod(f440, 0o440)
+    b2755 = os.path.join(pkg, "usr/bin/sgidbin")
+    open(b2755, "w").write("#!/bin/sh\nexit 0\n")
+    os.chmod(b2755, 0o2755)
+    os.link(b2755, os.path.join(pkg, "usr/bin/sgidbin-hl"))
+    os.symlink("sgidbin", os.path.join(pkg, "usr/bin/sgidbin-sym"))
+    dpkg_env = dict(os.environ, PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin")
+    subprocess.run(["dpkg-deb", "--root-owner-group", "--build", pkg, deb], env=dpkg_env, check=True)
+    subprocess.run(["dpkg", f"--admindir={adm}", f"--instdir={inst}", f"--log={logf}", "-i", deb], env=dpkg_env, check=True)
+    subprocess.run(["dpkg", f"--admindir={adm}", f"--instdir={inst}", f"--log={logf}", "-i", deb], env=dpkg_env, check=True)
+    assert stat.S_IMODE(os.stat(os.path.join(inst, "etc/ro440")).st_mode) == 0o440
+    assert stat.S_IMODE(os.stat(os.path.join(inst, "usr/bin/sgidbin")).st_mode) == 0o2755
+    subprocess.run(["dpkg", f"--admindir={adm}", f"--instdir={inst}", f"--log={logf}", "-P", "proot-fchmodat2-test"], env=dpkg_env, check=True)
 '
 
   # Ensure zero DroidDeck / Steam / Vapor branding exists anywhere in /etc/skel or /usr/share/linuxdroid

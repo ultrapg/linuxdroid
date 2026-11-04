@@ -21,13 +21,29 @@ dpkg_needs_repair() {
   return 1
 }
 
+clear_reinstreq_packages() {
+  if ! command -v dpkg-query >/dev/null 2>&1; then
+    return 0
+  fi
+  local pkgs
+  pkgs="$(dpkg-query -W -f='${db:Status-Eflag} ${Package}\n' 2>/dev/null | awk 'tolower($1) == "reinstreq" {print $2}' || true)"
+  if [ -n "$pkgs" ]; then
+    echo "==> Removing orphaned reinstreq package entries: $(echo "$pkgs" | tr '\n' ' ')"
+    # shellcheck disable=SC2086
+    sudo env DEBIAN_FRONTEND=noninteractive dpkg --remove --force-remove-reinstreq --force-depends $pkgs || true
+  fi
+}
+
 repair_package_state() {
   sudo env DEBIAN_FRONTEND=noninteractive dpkg --configure -a --force-confdef --force-confold || true
   if dpkg_needs_repair; then
     echo "==> Detected half-installed or broken package state; healing dpkg/apt..."
-    sudo env DEBIAN_FRONTEND=noninteractive apt-get install -y -f "${DPKG_FORCE_OPTS[@]}" || true
+    if ! sudo env DEBIAN_FRONTEND=noninteractive apt-get install -y -f "${DPKG_FORCE_OPTS[@]}"; then
+      clear_reinstreq_packages
+    fi
     sudo env DEBIAN_FRONTEND=noninteractive dpkg --configure -a --force-confdef --force-confold || true
     if dpkg_needs_repair; then
+      clear_reinstreq_packages
       sudo env DEBIAN_FRONTEND=noninteractive apt-get install -y -f "${DPKG_FORCE_OPTS[@]}"
       sudo env DEBIAN_FRONTEND=noninteractive dpkg --configure -a --force-confdef --force-confold || true
     fi
@@ -43,10 +59,29 @@ apt_install() {
   if ! sudo env DEBIAN_FRONTEND=noninteractive apt-get install -y "${DPKG_FORCE_OPTS[@]}" "$@"; then
     echo "==> Install reported errors; repairing package state and retrying..."
     sudo env DEBIAN_FRONTEND=noninteractive dpkg --configure -a --force-confdef --force-confold || true
-    sudo env DEBIAN_FRONTEND=noninteractive apt-get install -y -f "${DPKG_FORCE_OPTS[@]}"
+    if ! sudo env DEBIAN_FRONTEND=noninteractive apt-get install -y -f "${DPKG_FORCE_OPTS[@]}"; then
+      clear_reinstreq_packages
+      sudo env DEBIAN_FRONTEND=noninteractive apt-get install -y -f "${DPKG_FORCE_OPTS[@]}"
+    fi
     sudo env DEBIAN_FRONTEND=noninteractive dpkg --configure -a --force-confdef --force-confold || true
     sudo env DEBIAN_FRONTEND=noninteractive apt-get install -y "${DPKG_FORCE_OPTS[@]}" "$@"
   fi
+}
+
+pkg_not_broken() {
+  local pkg="$1" st
+  if ! command -v dpkg-query >/dev/null 2>&1; then
+    return 0
+  fi
+  st="$(dpkg-query -W -f='${db:Status-Status} ${db:Status-Eflag}' "$pkg" 2>/dev/null || true)"
+  case "$st" in
+    ""|"not-installed ok"|"config-files ok"|"installed ok")
+      return 0
+      ;;
+    *)
+      return 1
+      ;;
+  esac
 }
 
 ALL_ITEMS=(
@@ -73,7 +108,7 @@ is_installed() {
   local id="$1"
   case "$id" in
     warehouse)
-      [ -x /usr/bin/flatpak ] && {
+      pkg_not_broken flatpak && [ -x /usr/bin/flatpak ] && {
         [ -d /var/lib/flatpak/app/io.github.flattool.Warehouse ] || \
         [ -d "${HOME:-/home/linux}/.local/share/flatpak/app/io.github.flattool.Warehouse" ]
       }
@@ -87,51 +122,55 @@ is_installed() {
       ;;
     chromium)
       # /usr/local/bin/chromium is only a sandbox-disabling shim, so check for the real binary.
-      { [ -x /usr/bin/chromium ] && ! grep -qs "snap" /usr/bin/chromium; } || \
-      [ -x /usr/lib/chromium/chromium ] || \
-      [ -x /usr/lib/chromium-browser/chromium-browser ]
+      pkg_not_broken chromium && {
+        { [ -x /usr/bin/chromium ] && ! grep -qs "snap" /usr/bin/chromium; } || \
+        [ -x /usr/lib/chromium/chromium ] || \
+        [ -x /usr/lib/chromium-browser/chromium-browser ]
+      }
       ;;
     vscode)
-      command -v code >/dev/null 2>&1
+      pkg_not_broken code && command -v code >/dev/null 2>&1
       ;;
     vscodium)
-      command -v codium >/dev/null 2>&1
+      pkg_not_broken codium && command -v codium >/dev/null 2>&1
       ;;
     blender)
-      command -v blender >/dev/null 2>&1
+      pkg_not_broken blender && command -v blender >/dev/null 2>&1
       ;;
     krita)
-      command -v krita >/dev/null 2>&1
+      pkg_not_broken krita && command -v krita >/dev/null 2>&1
       ;;
     obs-studio)
-      command -v obs >/dev/null 2>&1
+      pkg_not_broken obs-studio && command -v obs >/dev/null 2>&1
       ;;
     kdenlive)
-      command -v kdenlive >/dev/null 2>&1
+      pkg_not_broken kdenlive && command -v kdenlive >/dev/null 2>&1
       ;;
     libreoffice)
-      command -v libreoffice >/dev/null 2>&1
+      pkg_not_broken libreoffice && command -v libreoffice >/dev/null 2>&1
       ;;
     gimp)
-      command -v gimp >/dev/null 2>&1
+      pkg_not_broken gimp && command -v gimp >/dev/null 2>&1
       ;;
     devtools)
+      pkg_not_broken build-essential && pkg_not_broken cmake && pkg_not_broken nodejs && \
       command -v gcc >/dev/null 2>&1 && command -v cmake >/dev/null 2>&1 && command -v node >/dev/null 2>&1
       ;;
     rust)
+      pkg_not_broken rustc && pkg_not_broken cargo && \
       command -v rustc >/dev/null 2>&1 && command -v cargo >/dev/null 2>&1
       ;;
     golang)
-      command -v go >/dev/null 2>&1
+      pkg_not_broken golang-go && command -v go >/dev/null 2>&1
       ;;
     openjdk)
-      command -v javac >/dev/null 2>&1
+      pkg_not_broken openjdk-21-jdk && command -v javac >/dev/null 2>&1
       ;;
     docker-cli)
-      command -v docker >/dev/null 2>&1
+      pkg_not_broken docker.io && command -v docker >/dev/null 2>&1
       ;;
     podman)
-      command -v podman >/dev/null 2>&1
+      pkg_not_broken podman && command -v podman >/dev/null 2>&1
       ;;
     *)
       return 1
@@ -366,6 +405,11 @@ run_action() {
     openjdk|java) install_openjdk ;;
     docker-cli|docker) install_docker_cli ;;
     podman) install_podman ;;
+    --repair|repair)
+      sudo env DEBIAN_FRONTEND=noninteractive apt-get update || true
+      repair_package_state
+      return 0
+      ;;
     --list|list|--status|status|-l)
       print_list
       return 0
@@ -375,7 +419,7 @@ run_action() {
       return 0
       ;;
     *)
-      echo "Usage: linuxdroid-apps [warehouse | fex-rootfs | chromium | vscode | vscodium | blender | krita | obs-studio | kdenlive | libreoffice | gimp | devtools | rust | golang | openjdk | docker-cli | podman | --list]"
+      echo "Usage: linuxdroid-apps [warehouse | fex-rootfs | chromium | vscode | vscodium | blender | krita | obs-studio | kdenlive | libreoffice | gimp | devtools | rust | golang | openjdk | docker-cli | podman | --repair | --list]"
       return 1
       ;;
   esac

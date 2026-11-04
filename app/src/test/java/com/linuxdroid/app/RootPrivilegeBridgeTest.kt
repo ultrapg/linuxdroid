@@ -888,7 +888,7 @@ sys.exit(0)
     env = dict(os.environ)
     env["PATH"] = mock_bin + ":" + env.get("PATH", "/usr/bin:/bin")
     with open(apps_script, "r") as sf:
-        helper_src = "".join(sf.readlines()[:51])
+        helper_src = sf.read().split("\nALL_ITEMS=(")[0]
     runner = os.path.join(tmp, "run_test.sh")
     with open(runner, "w") as rf:
         rf.write(helper_src + "\napt_install code\n")
@@ -907,5 +907,166 @@ sys.exit(0)
         val finished = proc.waitFor(15, TimeUnit.SECONDS)
         assertTrue("linuxdroid-apps broken dpkg test timed out:\n$output", finished)
         assertEquals("linuxdroid-apps broken dpkg test failed:\n$output", 0, proc.exitValue())
+    }
+
+    @Test
+    fun linuxdroidAppsClearsOrphanedReinstReqAndRejectsHalfInstalledStatus() {
+        val assetsRoot = findAssetsLinuxfs().canonicalFile
+        val appsScript = File(assetsRoot, "usr/local/bin/linuxdroid-apps").canonicalPath
+
+        val srcRoot = listOf(
+            File("src/main/java/com/linuxdroid/app"),
+            File("app/src/main/java/com/linuxdroid/app"),
+        ).firstOrNull { it.isDirectory }
+        assertNotNull("Expected Kotlin source root", srcRoot)
+        val installServiceSrc = File(srcRoot!!, "runtime/RuntimeInstallService.kt").readText()
+        assertTrue(
+            "RuntimeInstallService must gate fastpath staging on !SessionPrefs.prootNoSeccomp(this)",
+            installServiceSrc.contains("!SessionPrefs.prootNoSeccomp(this) && SessionPrefs.prootFastPath(this)")
+        )
+
+        val pyTest = """
+import os
+import re
+import subprocess
+import sys
+import tempfile
+
+apps_script = sys.argv[1]
+
+with tempfile.TemporaryDirectory(prefix="ld-apps-reinstreq-") as tmp:
+    mock_bin = os.path.join(tmp, "bin")
+    os.makedirs(mock_bin, exist_ok=True)
+    reinst_file = os.path.join(tmp, "reinstreq_present")
+    unmet_file = os.path.join(tmp, "unmet_present")
+    code_status_file = os.path.join(tmp, "code_status")
+    log_file = os.path.join(tmp, "calls.log")
+
+    for p, v in ((reinst_file, "1"), (unmet_file, "1"), (code_status_file, "unpacked ok")):
+        with open(p, "w") as f:
+            f.write(v)
+
+    def write_exec(name, body):
+        p = os.path.join(mock_bin, name)
+        with open(p, "w") as f:
+            f.write(body)
+        os.chmod(p, 0o755)
+
+    write_exec("sudo", '''#!/usr/bin/env python3
+import os, sys
+args = sys.argv[1:]
+if args and args[0] == "env":
+    args = args[1:]
+    while args and "=" in args[0] and not args[0].startswith("-"):
+        k, v = args[0].split("=", 1)
+        os.environ[k] = v
+        args = args[1:]
+os.execvp(args[0], args)
+''')
+
+    write_exec("code", "#!/bin/sh\nexit 0\n")
+
+    write_exec("dpkg-query", f'''#!/usr/bin/env python3
+import os, sys
+args = sys.argv[1:]
+fmt = ""
+pkgs = []
+i = 0
+while i < len(args):
+    a = args[i]
+    if a == "-W":
+        i += 1
+    elif a.startswith("-f="):
+        fmt = a[3:]
+        i += 1
+    elif a == "-f" and i + 1 < len(args):
+        fmt = args[i + 1]
+        i += 2
+    else:
+        pkgs.append(a)
+        i += 1
+if not pkgs:
+    if os.path.exists({reinst_file!r}):
+        print("reinstreq orphan-v1019-pkg")
+    print("ok bash")
+    sys.exit(0)
+pkg = pkgs[0]
+if pkg == "code":
+    st = open({code_status_file!r}).read().strip()
+    if not st:
+        sys.exit(1)
+    print(st, end="")
+    sys.exit(0)
+sys.exit(1)
+''')
+
+    write_exec("dpkg", f'''#!/usr/bin/env python3
+import os, sys
+args = sys.argv[1:]
+with open({log_file!r}, "a") as lf:
+    lf.write("dpkg " + " ".join(args) + "\\n")
+if args and args[0] == "--audit":
+    if os.path.exists({reinst_file!r}) or os.path.exists({unmet_file!r}):
+        print("broken package state")
+    sys.exit(0)
+if "--remove" in args and "--force-remove-reinstreq" in args and "orphan-v1019-pkg" in args:
+    if os.path.exists({reinst_file!r}):
+        os.remove({reinst_file!r})
+    sys.exit(0)
+if args and args[0] == "--configure":
+    sys.exit(1 if (os.path.exists({reinst_file!r}) or os.path.exists({unmet_file!r})) else 0)
+sys.exit(0)
+''')
+
+    write_exec("apt-get", f'''#!/usr/bin/env python3
+import os, sys
+args = sys.argv[1:]
+with open({log_file!r}, "a") as lf:
+    lf.write("apt-get " + " ".join(args) + "\\n")
+if "update" in args:
+    sys.exit(0)
+if "check" in args:
+    sys.exit(100 if (os.path.exists({reinst_file!r}) or os.path.exists({unmet_file!r})) else 0)
+if "install" in args and ("-f" in args or "--fix-broken" in args):
+    if os.path.exists({reinst_file!r}):
+        sys.stderr.write("E: The package orphan-v1019-pkg needs to be reinstalled, but I can't find an archive for it.\\n")
+        sys.exit(100)
+    if os.path.exists({unmet_file!r}):
+        os.remove({unmet_file!r})
+    sys.exit(0)
+sys.exit(0)
+''')
+
+    env = dict(os.environ)
+    env["PATH"] = mock_bin + ":" + env.get("PATH", "/usr/bin:/bin")
+
+    # 1. Half-unpacked 'code' binary on PATH must report [Not Installed], NOT [Installed]
+    r_list_broken = subprocess.run([apps_script, "--list"], env=env, capture_output=True, text=True, timeout=10)
+    assert r_list_broken.returncode == 0, r_list_broken.stderr
+    assert re.search(r"^\s*vscode\s+\[Not Installed\]", r_list_broken.stdout, re.M), f"Expected vscode [Not Installed], got:\n{r_list_broken.stdout}"
+
+    # 2. Cleanly installed 'code' reports [Installed]
+    with open(code_status_file, "w") as f:
+        f.write("installed ok")
+    r_list_ok = subprocess.run([apps_script, "--list"], env=env, capture_output=True, text=True, timeout=10)
+    assert r_list_ok.returncode == 0, r_list_ok.stderr
+    assert re.search(r"^\s*vscode\s+\[Installed\]", r_list_ok.stdout, re.M), f"Expected vscode [Installed], got:\n{r_list_ok.stdout}"
+
+    # 3. --repair clears orphaned reinstreq package and heals remaining unmet dependencies
+    r_repair = subprocess.run([apps_script, "--repair"], env=env, capture_output=True, text=True, timeout=10)
+    assert r_repair.returncode == 0, f"--repair failed:\nSTDOUT:{r_repair.stdout}\nSTDERR:{r_repair.stderr}"
+    assert not os.path.exists(reinst_file), "Orphaned reinstreq package was not removed!"
+    assert not os.path.exists(unmet_file), "Remaining unmet dependency state was not healed!"
+    calls = open(log_file).read().splitlines()
+    assert any("--force-remove-reinstreq" in c and "orphan-v1019-pkg" in c for c in calls), f"Missing reinstreq removal in {calls}"
+""".trimIndent()
+
+        val proc = ProcessBuilder("python3", "-B", "-c", pyTest, appsScript)
+            .redirectErrorStream(true)
+            .start()
+        val output = proc.inputStream.bufferedReader().readText()
+        val finished = proc.waitFor(15, TimeUnit.SECONDS)
+        assertTrue("linuxdroid-apps reinstreq test timed out:\n$output", finished)
+        assertEquals("linuxdroid-apps reinstreq test failed:\n$output", 0, proc.exitValue())
     }
 }

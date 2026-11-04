@@ -1284,11 +1284,16 @@ static long fp_chmod(int dirfd, const char *path, mode_t mode, int flags) {
   if (rs == 0 || rs == UNSEEN) return sc(SYS_fchmodat, AT_FDCWD, (long)r.host, mode, 0, 0);
   return rs;
 }
-int fchmodat(int dirfd, const char *path, mode_t mode, int flags) {
+static int chmod_common(int dirfd, const char *path, mode_t mode, int flags) {
   REAL(fchmodat, int (*)(int, const char *, mode_t, int));
-  ANSWER(fp_chmod(dirfd, path, mode, flags), dirfd, path, real_fchmodat(dirfd, path, mode, flags));
+  long rs = fp_chmod(dirfd, path, mode, flags);
+  if (rs != FP_SLOW) { hits++; return ret(rs); }
+  missed(__func__, dirfd, path);
+  if (!flags) return (int)syscall(SYS_fchmodat, dirfd, path, mode);
+  return real_fchmodat(dirfd, path, mode, flags);
 }
-int chmod(const char *path, mode_t mode) { return fchmodat(AT_FDCWD, path, mode, 0); }
+int fchmodat(int dirfd, const char *path, mode_t mode, int flags) { return chmod_common(dirfd, path, mode, flags); }
+int chmod(const char *path, mode_t mode) { return chmod_common(AT_FDCWD, path, mode, 0); }
 
 static long fp_utimens(int dirfd, const char *path, const struct timespec times[2], int flags) {
   struct res r;
