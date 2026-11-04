@@ -23,8 +23,8 @@ android {
         // Target SDK 28 preserves Android SELinux untrusted_app_27 execution & background workstation permissions
         // required by PRoot, FEX-Emu JIT, PulseAudio, and VirGL/Venus render server across Android 14-16+.
         targetSdk 28
-        versionCode 22
-        versionName "1.0.21"
+        versionCode 23
+        versionName "1.0.22"
 
         buildConfigField "String", "CATALOG_URL", "\"https://github.com/ultrapg/linuxdroid/releases/latest/download/catalog.json\""
         buildConfigField "String", "GITHUB_REPO", "\"ultrapg/linuxdroid\""
@@ -123,5 +123,6 @@ dependencies {
     implementation 'com.termux.termux-app:terminal-view:0.118.0'
 
     testImplementation 'junit:junit:4.13.2'
+    testImplementation 'org.json:json:20240303'
     testRuntimeOnly 'com.github.luben:zstd-jni:1.5.7-4@jar'
 }

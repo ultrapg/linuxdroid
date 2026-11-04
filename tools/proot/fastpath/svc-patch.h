@@ -80,6 +80,7 @@ long fp_svc_dispatch(const long *r) {
     if (svc_stack_room(frame)) { result = svc_path_call(r); svc_busy = 0; }
     else svc_busy = previous;
   }
+  if (result == FP_SLOW) result = svc_fallback_blocked(r);
   if (result == FP_SLOW) {
     __atomic_fetch_add(&svc_slow, 1, __ATOMIC_RELAXED);
     result = svc_original(r);

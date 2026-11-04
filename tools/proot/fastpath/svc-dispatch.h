@@ -25,11 +25,16 @@ static long svc_output(long result, void *value, long out, size_t size) {
   return svc_memory(value, out, size, 1) == (long)size ? result : FP_SLOW;
 }
 
+#ifndef SYS_fchmodat2
+#define SYS_fchmodat2 452
+#endif
+
 static int svc_supported(int nr) {
   switch (nr) {
   case SYS_openat: case SYS_newfstatat: case SYS_statx: case SYS_readlinkat:
   case SYS_faccessat: case SYS_mkdirat: case SYS_unlinkat: case SYS_renameat:
-  case SYS_renameat2: case SYS_symlinkat: case SYS_fchmodat: case SYS_utimensat:
+  case SYS_renameat2: case SYS_symlinkat: case SYS_fchmodat: case SYS_fchmodat2:
+  case SYS_utimensat:
   case SYS_truncate: case SYS_statfs: case SYS_getxattr: case SYS_lgetxattr:
   case SYS_listxattr: case SYS_llistxattr: case SYS_inotify_add_watch: case SYS_getcwd:
     return 1;
@@ -44,6 +49,11 @@ static int svc_supported(int nr) {
 static long svc_blocked(const long *r) {
   if (!svc_android_api) return FP_SLOW;
   if (r[8] == SYS_faccessat2 || (r[8] == SYS_clone3 && svc_android_api < 35)) return -ENOSYS;
+  return FP_SLOW;
+}
+
+static long svc_fallback_blocked(const long *r) {
+  if (svc_android_api > 0 && svc_android_api < 35 && r[8] == SYS_fchmodat2) return -ENOSYS;
   return FP_SLOW;
 }
 
@@ -112,6 +122,7 @@ static long svc_path_call(const long *r) {
     return fp_rename((int)r[0], path, (int)r[2], other, r[8] == SYS_renameat2 ? (unsigned)r[4] : 0);
   case SYS_symlinkat: return fp_symlink(path, (int)r[1], other);
   case SYS_fchmodat: return fp_chmod((int)r[0], path, (mode_t)r[2], 0);
+  case SYS_fchmodat2: return fp_chmod((int)r[0], path, (mode_t)r[2], (int)r[3]);
   case SYS_utimensat: return fp_utimens((int)r[0], path, when, (int)r[3]);
   case SYS_truncate: return fp_truncate(path, (off_t)r[1]);
   case SYS_statfs: {

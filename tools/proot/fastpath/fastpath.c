@@ -1277,9 +1277,11 @@ int symlink(const char *target, const char *path) { return symlinkat(target, AT_
 
 static long fp_chmod(int dirfd, const char *path, mode_t mode, int flags) {
   struct res r;
-  long rs = flags ? FP_SLOW : resolve(dirfd, path, 1 | MAY_BE_UNSEEN, &r);
-  if (rs == 1) rs = -ENOENT;
-  if (rs == 0 || rs == UNSEEN) rs = sc(SYS_fchmodat, AT_FDCWD, (long)r.host, mode, 0, 0);
+  if (flags & ~AT_SYMLINK_NOFOLLOW) return FP_SLOW;
+  long rs = resolve(dirfd, path, (flags & AT_SYMLINK_NOFOLLOW) ? 0 : (1 | MAY_BE_UNSEEN), &r);
+  if (rs == 1) return -ENOENT;
+  if (rs == 0 && (flags & AT_SYMLINK_NOFOLLOW) && S_ISLNK(r.st.st_mode)) return -EOPNOTSUPP;
+  if (rs == 0 || rs == UNSEEN) return sc(SYS_fchmodat, AT_FDCWD, (long)r.host, mode, 0, 0);
   return rs;
 }
 int fchmodat(int dirfd, const char *path, mode_t mode, int flags) {

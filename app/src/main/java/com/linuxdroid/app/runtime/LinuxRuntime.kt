@@ -6,8 +6,10 @@ import android.os.Process
 import android.system.ErrnoException
 import android.system.Os
 import android.util.Log
+import com.linuxdroid.app.BuildConfig
 import com.linuxdroid.app.core.FileUtils
 import com.linuxdroid.app.session.SessionPrefs
+import com.linuxdroid.app.session.SessionState
 import java.io.File
 import java.io.FileOutputStream
 import java.nio.file.Files
@@ -17,12 +19,16 @@ object LinuxRuntime {
     const val DIR = "linuxfs"
     const val SESSION_SCRIPT = "/usr/local/bin/linuxdroid-session"
     const val GUEST_RUNTIME_DIR = "/run/linuxdroid"
+    private const val OVERLAY_STAMP_FILE = "overlay-version"
     private const val KGSL_DEVICE = "/dev/kgsl-3d0"
     private const val SYSTEM_FONTS = "/system/fonts"
     private const val GUEST_SYSTEM_FONTS = "/usr/local/share/fonts/android"
 
     @Volatile
     private var cachedBinds: List<String>? = null
+
+    @Volatile
+    private var stagedOverlaySignature: String? = null
 
     fun rootDir(context: Context): File = File(context.filesDir, DIR)
 
@@ -105,6 +111,33 @@ object LinuxRuntime {
         cachedBinds = null
     }
 
+    private fun currentApkOverlaySignature(context: Context, enableFastPath: Boolean): String {
+        val pkgUpdateTime = runCatching {
+            context.packageManager.getPackageInfo(context.packageName, 0).lastUpdateTime
+        }.getOrDefault(0L)
+        return "${BuildConfig.VERSION_CODE}:${BuildConfig.VERSION_NAME}:$pkgUpdateTime:$enableFastPath"
+    }
+
+    /**
+     * Ensures the bundled APK overlay (bridge scripts + preload .so files) matches the currently
+     * installed APK version and fastpath preference before any guest or RootSpawner process runs.
+     */
+    @Synchronized
+    fun ensureBundledOverlayCurrent(context: Context, enableFastPath: Boolean? = null) {
+        if (!hasRootfs(context)) return
+        val root = rootDir(context)
+        val effectiveFastPath = enableFastPath ?: (
+            !SessionPrefs.prootNoSeccomp(context) &&
+                !SessionState.state.value.compatibilityRetryUsed &&
+                SessionPrefs.prootFastPath(context)
+        )
+        val expected = currentApkOverlaySignature(context, effectiveFastPath)
+        val onDisk = FileUtils.readString(File(root, "etc/linuxdroid/$OVERLAY_STAMP_FILE"))?.trim()
+        if (stagedOverlaySignature != expected || onDisk != expected) {
+            stageBundledOverlay(context, enableFastPath = effectiveFastPath)
+        }
+    }
+
     /**
      * Stages all bundled bridge scripts, FEX launchers, D-Bus helpers, and LD_PRELOAD libraries
      * from assets/linuxfs/MANIFEST.txt into the active Linux rootfs before session launch.
@@ -113,6 +146,7 @@ object LinuxRuntime {
     fun stageBundledOverlay(context: Context, enableFastPath: Boolean) {
         val root = rootDir(context)
         if (!root.isDirectory) return
+        var stagedOk = false
         try {
             val manifest = context.assets.open("linuxfs/MANIFEST.txt").bufferedReader().readLines()
             val buf = ByteArray(64 * 1024)
@@ -124,8 +158,15 @@ object LinuxRuntime {
                 val octalMode = line.substring(0, space).trim().toIntOrNull(8) ?: 0b110_100_100
                 val relPath = line.substring(space + 1).trim()
                 val outFile = File(root, relPath)
-                outFile.parentFile?.mkdirs()
+                outFile.parentFile?.let { parent ->
+                    parent.mkdirs()
+                    if (!parent.canWrite()) FileUtils.chmod(parent, 0b111_101_101)
+                }
                 val tmp = File(outFile.parentFile, ".${outFile.name}.stage")
+                if (tmp.exists()) {
+                    FileUtils.chmod(tmp, 0b110_000_000)
+                    tmp.delete()
+                }
                 context.assets.open("linuxfs/$relPath").use { input ->
                     FileOutputStream(tmp).use { out ->
                         while (true) {
@@ -137,11 +178,15 @@ object LinuxRuntime {
                 }
                 FileUtils.chmod(tmp, octalMode)
                 if (!tmp.renameTo(outFile)) {
+                    if (outFile.exists() && !outFile.canWrite()) {
+                        FileUtils.chmod(outFile, 0b110_100_100)
+                    }
                     tmp.copyTo(outFile, overwrite = true)
                     tmp.delete()
                     FileUtils.chmod(outFile, octalMode)
                 }
             }
+            stagedOk = true
         } catch (e: Exception) {
             Log.e(TAG, "Failed staging assets/linuxfs overlay", e)
         }
@@ -163,6 +208,10 @@ object LinuxRuntime {
         FileUtils.writeString(
             File(etcLinuxDroid, "root-socket"),
             "${RootSpawner.socketName(context)}\n"
+        )
+        FileUtils.writeString(
+            File(etcLinuxDroid, "version"),
+            "${BuildConfig.VERSION_NAME}\n"
         )
 
         // Ensure hardcoded /usr/bin/{sudo,pkexec,su} invocations also use the LinuxDroid root bridge
@@ -199,6 +248,11 @@ object LinuxRuntime {
             }
         }
         FileUtils.writeString(File(root, "etc/ld.so.preload"), preloadLines)
+        if (stagedOk) {
+            val sig = currentApkOverlaySignature(context, enableFastPath)
+            FileUtils.writeString(File(etcLinuxDroid, OVERLAY_STAMP_FILE), "$sig\n")
+            stagedOverlaySignature = sig
+        }
     }
 
     /**

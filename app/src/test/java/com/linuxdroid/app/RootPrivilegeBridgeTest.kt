@@ -762,4 +762,150 @@ with tempfile.TemporaryDirectory() as dbus_tmp:
             sessionTerminalSrc.contains("BL_DESKTOP=1")
         )
     }
+
+    @Test
+    fun overlayStagedBeforeRootSpawnerStartAcrossAllEntryPoints() {
+        val srcRoot = listOf(
+            File("src/main/java/com/linuxdroid/app"),
+            File("app/src/main/java/com/linuxdroid/app"),
+        ).firstOrNull { it.isDirectory }
+        assertNotNull("Expected Kotlin source root", srcRoot)
+
+        val appSrc = File(srcRoot!!, "App.kt").readText()
+        val sessionServiceSrc = File(srcRoot, "session/SessionService.kt").readText()
+        val sessionTerminalSrc = File(srcRoot, "session/SessionTerminal.kt").readText()
+        val rootSpawnerSrc = File(srcRoot, "runtime/RootSpawner.kt").readText()
+
+        val appStageIdx = appSrc.indexOf("LinuxRuntime.ensureBundledOverlayCurrent")
+        val appSpawnerIdx = appSrc.indexOf("RootSpawner.start")
+        assertTrue("App.kt must call ensureBundledOverlayCurrent before RootSpawner.start", appStageIdx in 0 until appSpawnerIdx)
+
+        val svcStageIdx = sessionServiceSrc.indexOf("LinuxRuntime.stageBundledOverlay")
+        val svcSpawnerIdx = sessionServiceSrc.indexOf("RootSpawner.start")
+        assertTrue("SessionService.kt must stage bundled overlay before RootSpawner.start", svcStageIdx in 0 until svcSpawnerIdx)
+
+        val termStageIdx = sessionTerminalSrc.indexOf("LinuxRuntime.stageBundledOverlay")
+        val termSpawnerIdx = sessionTerminalSrc.indexOf("RootSpawner.start")
+        assertTrue("SessionTerminal.kt must stage bundled overlay before RootSpawner.start", termStageIdx in 0 until termSpawnerIdx)
+
+        assertTrue(
+            "RootSpawner.runRootProcess must verify overlay currency before spawning root commands",
+            rootSpawnerSrc.contains("LinuxRuntime.ensureBundledOverlayCurrent(context)")
+        )
+    }
+
+    @Test
+    fun linuxdroidAppsHealsBrokenDpkgWithZeroArgAptFixBrokenBeforeInstallingTarget() {
+        val assetsRoot = findAssetsLinuxfs().canonicalFile
+        val appsScript = File(assetsRoot, "usr/local/bin/linuxdroid-apps").canonicalPath
+
+        val pyTest = """
+import os
+import subprocess
+import sys
+import tempfile
+
+apps_script = sys.argv[1]
+
+with tempfile.TemporaryDirectory(prefix="ld-apps-heal-") as tmp:
+    mock_bin = os.path.join(tmp, "bin")
+    os.makedirs(mock_bin, exist_ok=True)
+    state_file = os.path.join(tmp, "dpkg_broken")
+    log_file = os.path.join(tmp, "calls.log")
+    with open(state_file, "w") as f:
+        f.write("broken")
+
+    def write_exec(name, body):
+        p = os.path.join(mock_bin, name)
+        with open(p, "w") as f:
+            f.write(body)
+        os.chmod(p, 0o755)
+
+    write_exec("sudo", '''#!/usr/bin/env python3
+import os, sys
+args = sys.argv[1:]
+if args and args[0] == "env":
+    args = args[1:]
+    while args and "=" in args[0] and not args[0].startswith("-"):
+        k, v = args[0].split("=", 1)
+        os.environ[k] = v
+        args = args[1:]
+os.execvp(args[0], args)
+''')
+
+    write_exec("dpkg", f'''#!/usr/bin/env python3
+import os, sys
+args = sys.argv[1:]
+with open({log_file!r}, "a") as lf:
+    lf.write("dpkg " + " ".join(args) + "\\n")
+if args and args[0] == "--audit":
+    if os.path.exists({state_file!r}):
+        print("The following packages have been unpacked but not yet configured: broken-pkg")
+    sys.exit(0)
+if args and args[0] == "--configure":
+    sys.exit(1 if os.path.exists({state_file!r}) else 0)
+sys.exit(0)
+''')
+
+    write_exec("apt-get", f'''#!/usr/bin/env python3
+import os, sys
+args = sys.argv[1:]
+with open({log_file!r}, "a") as lf:
+    lf.write("apt-get " + " ".join(args) + "\\n")
+has_update = "update" in args
+has_check = "check" in args
+has_install = "install" in args
+has_f = "-f" in args or "--fix-broken" in args
+has_confdef = any("--force-confdef" in a for a in args)
+has_confold = any("--force-confold" in a for a in args)
+extra_pkgs = [
+    a for a in args
+    if a not in ("update", "check", "install", "-y", "-f", "--fix-broken", "-o")
+    and not a.startswith("Dpkg::Options::=")
+]
+if has_update:
+    sys.exit(0)
+if has_check:
+    sys.exit(100 if os.path.exists({state_file!r}) else 0)
+if has_install and has_f:
+    if extra_pkgs:
+        sys.stderr.write("ERROR: apt-get install -f invoked with extra package args!\\n")
+        sys.exit(100)
+    if not (has_confdef and has_confold):
+        sys.stderr.write("ERROR: missing force-confdef/force-confold!\\n")
+        sys.exit(100)
+    if os.path.exists({state_file!r}):
+        os.remove({state_file!r})
+    sys.exit(0)
+if has_install:
+    if os.path.exists({state_file!r}):
+        sys.stderr.write("E: Unmet dependencies. Try 'apt --fix-broken install' with no packages\\n")
+        sys.exit(100)
+    sys.exit(0)
+sys.exit(0)
+''')
+
+    env = dict(os.environ)
+    env["PATH"] = mock_bin + ":" + env.get("PATH", "/usr/bin:/bin")
+    with open(apps_script, "r") as sf:
+        helper_src = "".join(sf.readlines()[:51])
+    runner = os.path.join(tmp, "run_test.sh")
+    with open(runner, "w") as rf:
+        rf.write(helper_src + "\napt_install code\n")
+    res = subprocess.run(["/bin/bash", "-euo", "pipefail", runner], env=env, capture_output=True, text=True, timeout=10)
+    assert res.returncode == 0, f"apt_install failed:\nSTDOUT:{res.stdout}\nSTDERR:{res.stderr}"
+    assert not os.path.exists(state_file), "Broken state file was not healed!"
+    calls = open(log_file).read().splitlines()
+    assert any("apt-get install -y -f" in c and "code" not in c for c in calls), f"Missing zero-arg apt-get install -y -f in {calls}"
+    assert any("apt-get install -y" in c and c.endswith(" code") for c in calls), f"Missing target install in {calls}"
+""".trimIndent()
+
+        val proc = ProcessBuilder("python3", "-B", "-c", pyTest, appsScript)
+            .redirectErrorStream(true)
+            .start()
+        val output = proc.inputStream.bufferedReader().readText()
+        val finished = proc.waitFor(15, TimeUnit.SECONDS)
+        assertTrue("linuxdroid-apps broken dpkg test timed out:\n$output", finished)
+        assertEquals("linuxdroid-apps broken dpkg test failed:\n$output", 0, proc.exitValue())
+    }
 }

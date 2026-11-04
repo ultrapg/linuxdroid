@@ -4,15 +4,48 @@ set -euo pipefail
 export FLATPAK_BWRAP="/usr/local/bin/bwrap"
 export DEBIAN_FRONTEND=noninteractive
 
-# Installs packages non-interactively; repairs any interrupted dpkg state first, and if dpkg reports an error
-# (for example a package script that expects systemd), finishes configuring packages and retries once.
+DPKG_FORCE_OPTS=(
+  -o Dpkg::Options::=--force-confdef
+  -o Dpkg::Options::=--force-confold
+)
+
+dpkg_needs_repair() {
+  local audit_out
+  audit_out="$(sudo env DEBIAN_FRONTEND=noninteractive dpkg --audit 2>/dev/null || true)"
+  if [ -n "$audit_out" ]; then
+    return 0
+  fi
+  if ! sudo env DEBIAN_FRONTEND=noninteractive apt-get check >/dev/null 2>&1; then
+    return 0
+  fi
+  return 1
+}
+
+repair_package_state() {
+  sudo env DEBIAN_FRONTEND=noninteractive dpkg --configure -a --force-confdef --force-confold || true
+  if dpkg_needs_repair; then
+    echo "==> Detected half-installed or broken package state; healing dpkg/apt..."
+    sudo env DEBIAN_FRONTEND=noninteractive apt-get install -y -f "${DPKG_FORCE_OPTS[@]}" || true
+    sudo env DEBIAN_FRONTEND=noninteractive dpkg --configure -a --force-confdef --force-confold || true
+    if dpkg_needs_repair; then
+      sudo env DEBIAN_FRONTEND=noninteractive apt-get install -y -f "${DPKG_FORCE_OPTS[@]}"
+      sudo env DEBIAN_FRONTEND=noninteractive dpkg --configure -a --force-confdef --force-confold || true
+    fi
+  fi
+}
+
+# Installs packages non-interactively; heals any interrupted or broken dpkg/apt state first (with zero extra package
+# arguments on apt-get install -f), and retries cleanly if a package maintainer script reports a transient error.
 apt_install() {
-  sudo env DEBIAN_FRONTEND=noninteractive dpkg --configure -a || true
+  sudo env DEBIAN_FRONTEND=noninteractive dpkg --configure -a --force-confdef --force-confold || true
   sudo env DEBIAN_FRONTEND=noninteractive apt-get update || true
-  if ! sudo env DEBIAN_FRONTEND=noninteractive apt-get install -y "$@"; then
+  repair_package_state
+  if ! sudo env DEBIAN_FRONTEND=noninteractive apt-get install -y "${DPKG_FORCE_OPTS[@]}" "$@"; then
     echo "==> Install reported errors; repairing package state and retrying..."
-    sudo env DEBIAN_FRONTEND=noninteractive dpkg --configure -a || true
-    sudo env DEBIAN_FRONTEND=noninteractive apt-get install -y -f "$@"
+    sudo env DEBIAN_FRONTEND=noninteractive dpkg --configure -a --force-confdef --force-confold || true
+    sudo env DEBIAN_FRONTEND=noninteractive apt-get install -y -f "${DPKG_FORCE_OPTS[@]}"
+    sudo env DEBIAN_FRONTEND=noninteractive dpkg --configure -a --force-confdef --force-confold || true
+    sudo env DEBIAN_FRONTEND=noninteractive apt-get install -y "${DPKG_FORCE_OPTS[@]}" "$@"
   fi
 }
 

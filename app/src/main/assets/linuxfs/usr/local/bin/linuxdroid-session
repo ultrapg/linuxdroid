@@ -137,8 +137,8 @@ else
   rm -f /tmp/.bl-zram 2>/dev/null || true
 fi
 
-# Clean stale X11/ICE/D-Bus locks & sockets from any interrupted prior session (preserving .linuxdroid-svc-v2-* cache)
-rm -rf /tmp/.ICE-unix /tmp/.X11-unix /tmp/.X*-lock /tmp/dbus-* 2>/dev/null || true
+# Clean stale X11/ICE/D-Bus locks & sockets from any interrupted prior session (preserving .linuxdroid-svc-v3-* cache)
+rm -rf /tmp/.ICE-unix /tmp/.X11-unix /tmp/.X*-lock /tmp/dbus-* /tmp/.linuxdroid-svc-v2-* 2>/dev/null || true
 mkdir -p /tmp/.X11-unix /tmp/.ICE-unix /dev/shm
 chmod 1777 /tmp/.X11-unix /tmp/.ICE-unix /dev/shm 2>/dev/null || true
 

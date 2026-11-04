@@ -14,7 +14,7 @@ OUT_DIR="${OUT_DIR:-$REPO_ROOT/dist}"
 WORK_DIR="${WORK_DIR:-/tmp/linuxdroid-rootfs-build}"
 CACHE_DIR="${CACHE_DIR:-$WORK_DIR/cache}"
 GITHUB_REPO="${GITHUB_REPO:-ultrapg/linuxdroid}"
-RELEASE_TAG="${RELEASE_TAG:-v1.0.21}"
+RELEASE_TAG="${RELEASE_TAG:-v1.0.22}"
 
 UBUNTU_BASE_URL="https://cdimage.ubuntu.com/ubuntu-base/releases/24.04/release/ubuntu-base-24.04.5-base-arm64.tar.gz"
 UBUNTU_BASE_SHA256="a91d5a93010193712d346d761372b7c9db6dfcf093893161c64ca107f05914f2"
@@ -318,6 +318,39 @@ CTRL
     dpkg -P linuxdroid-smoke-check >/dev/null
     rm -rf \"\$pkg_tmp\" \"\$deb_tmp\"
   "
+
+  log "Verifying unprivileged PRoot fake_id0 (-0) fchmodat2 & AT_SYMLINK_NOFOLLOW in $root..."
+  PROOT_NO_SECCOMP=1 "$CACHE_DIR/proot-host" \
+    --link2symlink \
+    --kill-on-exit \
+    -0 \
+    -q /usr/bin/qemu-aarch64-static \
+    -r "$root" \
+    -b /dev \
+    -b /proc \
+    -b /sys \
+    -b "$root/etc/ld.so.preload:/etc/ld.so.preload" \
+    -w /tmp \
+    /usr/bin/python3 -c '
+import ctypes, errno, os, stat, tempfile
+libc = ctypes.CDLL("libc.so.6", use_errno=True)
+AT_FDCWD, AT_SYMLINK_NOFOLLOW, SYS_fchmodat2 = -100, 0x100, 452
+with tempfile.TemporaryDirectory(dir="/tmp") as d:
+    ro = os.path.join(d, "ro0444")
+    open(ro, "w").close()
+    os.chmod(ro, 0o444)
+    assert stat.S_IMODE(os.stat(ro).st_mode) == 0o444
+    assert libc.syscall(ctypes.c_long(SYS_fchmodat2), AT_FDCWD, ro.encode(), 0o755, 0) == 0
+    assert stat.S_IMODE(os.stat(ro).st_mode) == 0o755
+    os.chmod(ro, 0o444)
+    sym = os.path.join(d, "sym")
+    os.symlink(ro, sym)
+    rc = libc.syscall(ctypes.c_long(SYS_fchmodat2), AT_FDCWD, sym.encode(), 0o755, AT_SYMLINK_NOFOLLOW)
+    assert rc == -1 and ctypes.get_errno() == errno.EOPNOTSUPP
+    assert stat.S_IMODE(os.stat(ro).st_mode) == 0o444
+    assert libc.syscall(ctypes.c_long(SYS_fchmodat2), AT_FDCWD, sym.encode(), 0o751, 0) == 0
+    assert stat.S_IMODE(os.stat(ro).st_mode) == 0o751
+'
 
   # Ensure zero DroidDeck / Steam / Vapor branding exists anywhere in /etc/skel or /usr/share/linuxdroid
   if sudo grep -rniE 'droiddeck|steamos|vapor' "$root/etc/skel" "$root/etc/linuxdroid" "$root/usr/local/bin" 2>/dev/null; then

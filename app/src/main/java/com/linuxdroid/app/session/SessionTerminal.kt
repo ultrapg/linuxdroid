@@ -18,7 +18,6 @@ object SessionTerminal {
         client: TerminalSessionClient,
     ): TerminalSession? {
         if (!LinuxRuntime.isReady(context)) return null
-        RootSpawner.start(context)
         val root = LinuxRuntime.rootDir(context)
 
         val useNoSeccomp = SessionPrefs.prootNoSeccomp(context) ||
@@ -26,7 +25,10 @@ object SessionTerminal {
         val enableFastPath = !useNoSeccomp && SessionPrefs.prootFastPath(context)
         if (!SessionState.isRunningOrPaused) {
             LinuxRuntime.stageBundledOverlay(context, enableFastPath = enableFastPath)
+        } else {
+            LinuxRuntime.ensureBundledOverlayCurrent(context, enableFastPath = enableFastPath)
         }
+        RootSpawner.start(context)
         val provisionedUser = UserProvisioner.provisionRootfs(
             root,
             SessionPrefs.username(context),

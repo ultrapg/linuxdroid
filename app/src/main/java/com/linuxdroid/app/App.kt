@@ -5,6 +5,7 @@ import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.os.Build
 import android.util.Log
+import com.linuxdroid.app.runtime.LinuxRuntime
 import com.linuxdroid.app.runtime.RootSpawner
 import java.io.File
 import java.io.PrintWriter
@@ -19,7 +20,13 @@ class App : Application() {
         instance = this
         installCrashLogger()
         createNotificationChannels()
-        RootSpawner.start(this)
+        Thread({
+            LinuxRuntime.ensureBundledOverlayCurrent(this)
+            RootSpawner.start(this)
+        }, "linuxdroid-overlay-init").apply {
+            isDaemon = true
+            start()
+        }
     }
 
     private fun installCrashLogger() {

@@ -39,7 +39,7 @@ static int svc_cache_name(const struct dl_phdr_info *info, char *path, size_t si
           id[2 * j + 1] = hex[b & 15];
         }
         id[2 * h.n_descsz] = 0;
-        int n = snprintf(path, size, "/tmp/.linuxdroid-svc-v2-%d-%s", svc_android_api, id);
+        int n = snprintf(path, size, "/tmp/.linuxdroid-svc-v3-%d-%s", svc_android_api, id);
         return n > 0 && (size_t)n < size;
       }
       at += name + desc;
@@ -57,7 +57,7 @@ static int svc_cache_read(const struct dl_phdr_info *info, const char *path) {
               st.st_uid == (uid_t)sc(SYS_getuid, 0, 0, 0, 0, 0) && !(st.st_mode & 0077) &&
               st.st_size == sizeof table && sc(SYS_read, fd, (long)&table, sizeof table, 0, 0) == sizeof table;
   sc(SYS_close, fd, 0, 0, 0, 0);
-  if (!valid || table.magic != 0x324356534444ULL || table.api != (unsigned)svc_android_api ||
+  if (!valid || table.magic != 0x334356534444ULL || table.api != (unsigned)svc_android_api ||
       !table.count || table.count > 256 || table.count > 256 - svc_planned) return 0;
   for (unsigned i = 0; i < table.count; i++) {
     uint64_t offset = table.offset[i];
@@ -75,7 +75,7 @@ static int svc_cache_read(const struct dl_phdr_info *info, const char *path) {
 
 static void svc_cache_write(const struct dl_phdr_info *info, const char *path, size_t first) {
   if (svc_planned == first || svc_planned == 256) return;
-  struct svc_cached_sites table = {.magic = 0x324356534444ULL, .api = svc_android_api, .count = svc_planned - first};
+  struct svc_cached_sites table = {.magic = 0x334356534444ULL, .api = svc_android_api, .count = svc_planned - first};
   for (unsigned i = 0; i < table.count; i++)
     table.offset[i] = (uintptr_t)svc_plan[first + i].site - info->dlpi_addr;
   char temporary[256];

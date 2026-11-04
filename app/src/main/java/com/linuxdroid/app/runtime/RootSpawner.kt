@@ -253,6 +253,7 @@ object RootSpawner {
         input: DataInputStream,
         out: DataOutputStream,
     ) {
+        LinuxRuntime.ensureBundledOverlayCurrent(context)
         val root = LinuxRuntime.rootDir(context)
         val argvJson = request.getJSONArray("argv")
         val argv = (0 until argvJson.length()).map { argvJson.getString(it) }

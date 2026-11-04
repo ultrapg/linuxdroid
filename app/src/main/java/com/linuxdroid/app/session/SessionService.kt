@@ -156,6 +156,11 @@ class SessionService : Service() {
         }
 
         acquireWakeLock()
+
+        val fastPathPref = !forceCompatRetry &&
+            SessionPrefs.prootFastPath(this) &&
+            !SessionPrefs.prootNoSeccomp(this)
+        LinuxRuntime.stageBundledOverlay(this, enableFastPath = fastPathPref)
         RootSpawner.start(this)
 
         val root = LinuxRuntime.rootDir(this)
@@ -206,11 +211,6 @@ class SessionService : Service() {
         }
         refreshNotification()
 
-        val fastPathPref = !forceCompatRetry &&
-            SessionPrefs.prootFastPath(this) &&
-            !SessionPrefs.prootNoSeccomp(this)
-
-        LinuxRuntime.stageBundledOverlay(this, enableFastPath = fastPathPref)
         val username = UserProvisioner.provisionRootfs(root, SessionPrefs.username(this), Process.myUid())
 
         val cpuTopology = CpuInfo.detect()
