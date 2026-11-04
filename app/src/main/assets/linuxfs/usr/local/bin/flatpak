@@ -1,6 +1,11 @@
-#!/usr/bin/env python3
+#!/usr/bin/python3 -BE
 import os
+import resource
+import shutil
+import socket
+import subprocess
 import sys
+import time
 
 REAL_FLATPAK = "/usr/bin/flatpak"
 _SELF_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -29,6 +34,101 @@ SYSTEM_MUTATING_CMDS = {
     "pin",
 }
 
+SYSTEM_BUS_CONF = """<!DOCTYPE busconfig PUBLIC "-//freedesktop//DTD D-Bus Bus Configuration 1.0//EN"
+ "http://www.freedesktop.org/standards/dbus/1.0/busconfig.dtd">
+<busconfig>
+  <type>system</type>
+  <listen>unix:path=/run/dbus/system_bus_socket</listen>
+  <auth>EXTERNAL</auth>
+  <policy context="default">
+    <allow user="*"/>
+    <allow own="*"/>
+    <allow send_destination="*"/>
+    <allow receive_sender="*"/>
+  </policy>
+</busconfig>
+"""
+
+
+def cap_nofile_soft_limit(max_soft=8192):
+    try:
+        soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
+        if soft == resource.RLIM_INFINITY or soft > max_soft:
+            target = max_soft if hard == resource.RLIM_INFINITY else min(max_soft, hard)
+            resource.setrlimit(resource.RLIMIT_NOFILE, (target, hard))
+    except (OSError, ValueError):
+        pass
+
+
+def is_unix_socket_live(path):
+    if not os.path.exists(path):
+        return False
+    s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    try:
+        s.settimeout(0.5)
+        s.connect(path)
+        return True
+    except OSError:
+        return False
+    finally:
+        s.close()
+
+
+def ensure_runtime_dirs():
+    uid = os.geteuid()
+    gid = os.getegid()
+    user_run = f"/run/user/{uid}"
+    need_root = False
+    for d, mode in (("/run/dbus", 0o777), ("/run/flatpak", 0o777), (user_run, 0o700)):
+        if not (os.path.isdir(d) and os.access(d, os.W_OK | os.X_OK)):
+            try:
+                os.makedirs(d, mode=mode, exist_ok=True)
+                os.chmod(d, mode)
+            except OSError:
+                need_root = True
+    if need_root and os.path.exists(LINUXDROID_ROOT):
+        subprocess.call(
+            [
+                LINUXDROID_ROOT,
+                "sh",
+                "-c",
+                f"mkdir -p -m 777 /run/dbus /run/flatpak && mkdir -p -m 700 {user_run} && chown {uid}:{gid} {user_run} && chmod 700 {user_run}",
+            ]
+        )
+
+
+def ensure_system_bus():
+    ensure_runtime_dirs()
+    sock = "/run/dbus/system_bus_socket"
+    if is_unix_socket_live(sock):
+        return
+    dbus_daemon = shutil.which("dbus-daemon")
+    if not dbus_daemon:
+        return
+    try:
+        os.makedirs("/tmp/linuxdroid-dbus", exist_ok=True)
+        conf_path = "/tmp/linuxdroid-dbus/system.conf"
+        with open(conf_path, "w", encoding="utf-8") as f:
+            f.write(SYSTEM_BUS_CONF)
+        if os.path.lexists(sock):
+            try:
+                os.unlink(sock)
+            except OSError:
+                subprocess.call([LINUXDROID_ROOT, "rm", "-f", sock])
+        subprocess.Popen(
+            [dbus_daemon, f"--config-file={conf_path}", "--nofork", "--nopidfile"],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            start_new_session=True,
+        )
+        for _ in range(40):
+            if is_unix_socket_live(sock):
+                break
+            time.sleep(0.05)
+    except OSError:
+        pass
+
 
 def find_subcommand_and_scope(args):
     subcmd = None
@@ -43,14 +143,35 @@ def find_subcommand_and_scope(args):
     return subcmd, explicit_user
 
 
+def inject_no_documents_portal_if_needed(args):
+    if os.access("/dev/fuse", os.R_OK | os.W_OK):
+        return args
+    for a in args:
+        if a == "--":
+            break
+        if a in ("--no-documents-portal", "-h", "--help"):
+            return args
+    out = list(args)
+    for idx, a in enumerate(out):
+        if a == "run":
+            out.insert(idx + 1, "--no-documents-portal")
+            break
+    return out
+
+
 def main(argv):
     if not os.path.exists(REAL_FLATPAK):
         print("flatpak: command not found (install with: sudo apt install flatpak)", file=sys.stderr)
         return 127
 
+    cap_nofile_soft_limit()
     os.environ.setdefault("FLATPAK_BWRAP", BWRAP_SHIM)
     args = argv[1:]
     subcmd, explicit_user = find_subcommand_and_scope(args)
+
+    if subcmd == "run":
+        ensure_system_bus()
+        args = inject_no_documents_portal_if_needed(args)
 
     if os.geteuid() != 0 and not explicit_user and subcmd in SYSTEM_MUTATING_CMDS:
         os.execv(LINUXDROID_ROOT, [LINUXDROID_ROOT, REAL_FLATPAK] + args)

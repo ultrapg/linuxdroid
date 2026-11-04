@@ -9,6 +9,9 @@ export SHELL=/bin/bash
 export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 export FLATPAK_BWRAP="/usr/local/bin/bwrap"
 export GLIBC_TUNABLES="${GLIBC_TUNABLES:-glibc.pthread.rseq=0:glibc.malloc.top_pad=16777216}"
+if [ "$(ulimit -Sn 2>/dev/null || echo 0)" -gt 16384 ] 2>/dev/null; then
+  ulimit -Sn 16384 2>/dev/null || true
+fi
 
 boot_step() {
   local step_num="$1"
@@ -221,8 +224,18 @@ start_system_bus() {
   </policy>
 </busconfig>
 BUSCONF
-  linuxdroid-root mkdir -p /run/dbus 2>/dev/null || mkdir -p /run/dbus 2>/dev/null || true
-  linuxdroid-root chmod 777 /run/dbus 2>/dev/null || chmod 777 /run/dbus 2>/dev/null || true
+  linuxdroid-root mkdir -p /run/dbus /run/flatpak 2>/dev/null || mkdir -p /run/dbus /run/flatpak 2>/dev/null || true
+  linuxdroid-root chmod 777 /run/dbus /run/flatpak 2>/dev/null || chmod 777 /run/dbus /run/flatpak 2>/dev/null || true
+  local uid_now gid_now
+  uid_now="$(id -u 2>/dev/null || echo 1000)"
+  gid_now="$(id -g 2>/dev/null || echo 1000)"
+  if [ ! -w "/run/user/$uid_now" ]; then
+    mkdir -p "/run/user/$uid_now" 2>/dev/null || {
+      linuxdroid-root mkdir -p "/run/user/$uid_now" 2>/dev/null || true
+      linuxdroid-root chown "$uid_now:$gid_now" "/run/user/$uid_now" 2>/dev/null || true
+      linuxdroid-root chmod 700 "/run/user/$uid_now" 2>/dev/null || true
+    }
+  fi
   rm -f /run/dbus/system_bus_socket 2>/dev/null || linuxdroid-root rm -f /run/dbus/system_bus_socket 2>/dev/null || true
   dbus-daemon --config-file=/tmp/linuxdroid-dbus/system.conf --nofork --nopidfile >/dev/null 2>&1 &
   for _ in $(seq 1 40); do

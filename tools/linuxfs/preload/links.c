@@ -1,4 +1,5 @@
 #define _GNU_SOURCE
+#include <dirent.h>
 #include <dlfcn.h>
 #include <errno.h>
 #include <fcntl.h>
@@ -6,9 +7,14 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
 #include <unistd.h>
 
 static int refused(int error) { return error == EPERM || error == EACCES; }
+
+static int is_l2s_entry(const char *name) {
+  return strncmp(name, ".l2s.", 5) == 0 || strncmp(name, ".proot.l2s.", 11) == 0;
+}
 
 static int moves_instead(void) {
   const char *v = getenv("LINUXDROID_LINK_RENAME");
@@ -94,4 +100,56 @@ int linkat(int olddirfd, const char *oldpath, int newdirfd, const char *newpath,
   }
   errno = saved_errno;
   return result;
+}
+
+struct dirent *readdir(DIR *dirp) {
+  static struct dirent *(*real_readdir)(DIR *);
+  if (real_readdir == NULL) real_readdir = dlsym(RTLD_NEXT, "readdir");
+  int saved_errno = errno;
+  for (;;) {
+    struct dirent *ent = real_readdir(dirp);
+    if (ent == NULL) return NULL;
+    if (is_l2s_entry(ent->d_name)) {
+      errno = saved_errno;
+      continue;
+    }
+    if (ent->d_type == DT_LNK) {
+      int dfd = dirfd(dirp);
+      if (dfd >= 0) {
+        struct stat st;
+        if (fstatat(dfd, ent->d_name, &st, AT_SYMLINK_NOFOLLOW) == 0) {
+          ent->d_type = IFTODT(st.st_mode);
+          ent->d_ino = st.st_ino;
+        }
+      }
+      errno = saved_errno;
+    }
+    return ent;
+  }
+}
+
+struct dirent64 *readdir64(DIR *dirp) {
+  static struct dirent64 *(*real_readdir64)(DIR *);
+  if (real_readdir64 == NULL) real_readdir64 = dlsym(RTLD_NEXT, "readdir64");
+  int saved_errno = errno;
+  for (;;) {
+    struct dirent64 *ent = real_readdir64(dirp);
+    if (ent == NULL) return NULL;
+    if (is_l2s_entry(ent->d_name)) {
+      errno = saved_errno;
+      continue;
+    }
+    if (ent->d_type == DT_LNK) {
+      int dfd = dirfd(dirp);
+      if (dfd >= 0) {
+        struct stat64 st;
+        if (fstatat64(dfd, ent->d_name, &st, AT_SYMLINK_NOFOLLOW) == 0) {
+          ent->d_type = IFTODT(st.st_mode);
+          ent->d_ino = st.st_ino;
+        }
+      }
+      errno = saved_errno;
+    }
+    return ent;
+  }
 }

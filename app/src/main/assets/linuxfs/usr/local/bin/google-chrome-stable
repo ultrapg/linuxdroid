@@ -6,7 +6,12 @@ IFS=: read -ra dirs <<< "$PATH"
 for d in "${dirs[@]}"; do
   [ "$d" = "/usr/local/bin" ] && continue
   if [ -x "$d/$name" ]; then
-    exec "$d/$name" --no-sandbox --disable-gpu-sandbox --disable-dev-shm-usage "$@"
+    for arg in "$@"; do
+      case "$arg" in
+        --version|-v|--help|-h) exec "$d/$name" "$@" ;;
+      esac
+    done
+    exec "$d/$name" --no-sandbox --no-zygote --disable-gpu-sandbox --disable-dev-shm-usage "$@"
   fi
 done
 echo "$name: command not found" >&2

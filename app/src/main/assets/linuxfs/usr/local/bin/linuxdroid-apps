@@ -4,9 +4,10 @@ set -euo pipefail
 export FLATPAK_BWRAP="/usr/local/bin/bwrap"
 export DEBIAN_FRONTEND=noninteractive
 
-# Installs packages non-interactively; if dpkg reports an error (for example a package script that expects
-# systemd), finish configuring the packages and retry once.
+# Installs packages non-interactively; repairs any interrupted dpkg state first, and if dpkg reports an error
+# (for example a package script that expects systemd), finishes configuring packages and retries once.
 apt_install() {
+  sudo env DEBIAN_FRONTEND=noninteractive dpkg --configure -a || true
   sudo env DEBIAN_FRONTEND=noninteractive apt-get update || true
   if ! sudo env DEBIAN_FRONTEND=noninteractive apt-get install -y "$@"; then
     echo "==> Install reported errors; repairing package state and retrying..."
@@ -45,12 +46,17 @@ is_installed() {
       }
       ;;
     fex-rootfs)
+      local xdg_data="${XDG_DATA_HOME:-${HOME:-/home/linux}/.local/share}"
+      compgen -G "${xdg_data}/fex-emu/RootFS/*Ubuntu*" >/dev/null 2>&1 || \
+      compgen -G "${xdg_data}/fex-emu/RootFS/*ubuntu*" >/dev/null 2>&1 || \
       compgen -G "${HOME:-/home/linux}/.fex-emu/RootFS/*Ubuntu*" >/dev/null 2>&1 || \
-      [ -f "${HOME:-/home/linux}/.fex-emu/Config.json" ]
+      compgen -G "${HOME:-/home/linux}/.fex-emu/RootFS/*ubuntu*" >/dev/null 2>&1
       ;;
     chromium)
       # /usr/local/bin/chromium is only a sandbox-disabling shim, so check for the real binary.
-      [ -x /usr/bin/chromium ] || [ -x /usr/lib/chromium/chromium ] || [ -x /usr/lib/chromium-browser/chromium-browser ] && ! grep -qs "snap" /usr/bin/chromium
+      { [ -x /usr/bin/chromium ] && ! grep -qs "snap" /usr/bin/chromium; } || \
+      [ -x /usr/lib/chromium/chromium ] || \
+      [ -x /usr/lib/chromium-browser/chromium-browser ]
       ;;
     vscode)
       command -v code >/dev/null 2>&1
@@ -150,28 +156,38 @@ install_fex_rootfs() {
   /usr/local/bin/linuxdroid-fex fetch-rootfs
 }
 
+ensure_repo_prereqs() {
+  if ! command -v curl >/dev/null 2>&1 || ! command -v gpg >/dev/null 2>&1 || [ ! -d /etc/ssl/certs ]; then
+    apt_install ca-certificates curl gnupg
+  fi
+}
+
 install_chromium() {
   echo "==> Installing Chromium (ARM64, non-Snap build from the xtradeb PPA)..."
-  apt_install ca-certificates curl gnupg
+  ensure_repo_prereqs
   sudo sh -c '
     set -e
     # Ubuntu ships chromium as a Snap stub that cannot run here, so add the xtradeb PPA by hand
     # (without software-properties-common, which needs systemd/dbus).
     curl -fsSL "https://keyserver.ubuntu.com/pks/lookup?op=get&search=0x5301FA4FD93244FBC6F6149982BB6851C64F6880" \
-      | gpg --dearmor > /usr/share/keyrings/xtradeb-apps.gpg
+      | gpg --dearmor --yes -o /usr/share/keyrings/xtradeb-apps.gpg
+    chmod 644 /usr/share/keyrings/xtradeb-apps.gpg
     echo "deb [arch=arm64 signed-by=/usr/share/keyrings/xtradeb-apps.gpg] https://ppa.launchpadcontent.net/xtradeb/apps/ubuntu noble main" \
       > /etc/apt/sources.list.d/xtradeb-apps.list
-    printf "%s\n" "Package: chromium*" "Pin: release o=LP-PPA-xtradeb-apps" "Pin-Priority: 1001" "" \
-      "Package: chromium-browser" "Pin: release *" "Pin-Priority: -1" > /etc/apt/preferences.d/linuxdroid-chromium
+    printf "%s\n" \
+      "Package: *" "Pin: release o=LP-PPA-xtradeb-apps" "Pin-Priority: 100" "" \
+      "Package: chromium*" "Pin: release o=LP-PPA-xtradeb-apps" "Pin-Priority: 1001" "" \
+      "Package: chromium-browser" "Pin: release *" "Pin-Priority: -1" \
+      > /etc/apt/preferences.d/linuxdroid-chromium
   '
   apt_install chromium
   sudo sh -c '
     mkdir -p /etc/chromium.d
-    printf "%s\n" "export CHROMIUM_FLAGS=\"\$CHROMIUM_FLAGS --no-sandbox --disable-gpu-sandbox --disable-dev-shm-usage --ozone-platform-hint=auto\"" \
+    printf "%s\n" "export CHROMIUM_FLAGS=\"\$CHROMIUM_FLAGS --no-sandbox --no-zygote --disable-gpu-sandbox --disable-dev-shm-usage --ozone-platform-hint=auto\"" \
       > /etc/chromium.d/linuxdroid
     f=/usr/share/applications/chromium.desktop
     if [ -f "$f" ] && ! grep -q -- "--no-sandbox" "$f"; then
-      sed -i "s#^Exec=\([^ ]*chromium[^ ]*\)#Exec=\1 --no-sandbox --disable-gpu-sandbox --disable-dev-shm-usage --ozone-platform-hint=auto#" "$f"
+      sed -i "s#^Exec=\([^ ]*chromium[^ ]*\)#Exec=\1 --no-sandbox --no-zygote --disable-gpu-sandbox --disable-dev-shm-usage --ozone-platform-hint=auto#" "$f"
     fi
   '
   echo "==> Chromium installed."
@@ -179,34 +195,46 @@ install_chromium() {
 
 install_vscodium() {
   echo "==> Installing VSCodium (ARM64)..."
+  ensure_repo_prereqs
   sudo sh -c '
     set -e
-    export DEBIAN_FRONTEND=noninteractive
     curl -fsSL https://gitlab.com/paulcarroty/vscodium-deb-rpm-repo/raw/master/pub.gpg \
-      | gpg --dearmor > /usr/share/keyrings/vscodium-archive-keyring.gpg
-    echo "deb [ signed-by=/usr/share/keyrings/vscodium-archive-keyring.gpg ] https://download.vscodium.com/debs vscodium main" \
+      | gpg --dearmor --yes -o /usr/share/keyrings/vscodium-archive-keyring.gpg
+    chmod 644 /usr/share/keyrings/vscodium-archive-keyring.gpg
+    echo "deb [arch=arm64 signed-by=/usr/share/keyrings/vscodium-archive-keyring.gpg] https://download.vscodium.com/debs vscodium main" \
       > /etc/apt/sources.list.d/vscodium.list
-    apt-get update && apt-get install -y codium
-    if [ -f /usr/share/applications/codium.desktop ]; then
-      sed -i "s|/usr/share/codium/codium |/usr/share/codium/codium --no-sandbox --disable-gpu-sandbox |g" /usr/share/applications/codium.desktop
-    fi
   '
+  apt_install codium
+  sudo sh -c '
+    for f in /usr/share/applications/codium.desktop /usr/share/applications/codium-url-handler.desktop; do
+      if [ -f "$f" ] && ! grep -q -- "--no-sandbox" "$f"; then
+        sed -i "s|/usr/share/codium/codium |/usr/share/codium/codium --no-sandbox --no-zygote --disable-gpu-sandbox --disable-dev-shm-usage |g" "$f"
+      fi
+    done
+  '
+  echo "==> VSCodium installed."
 }
 
 install_vscode() {
   echo "==> Installing Visual Studio Code (ARM64)..."
+  ensure_repo_prereqs
   sudo sh -c '
     set -e
-    export DEBIAN_FRONTEND=noninteractive
     curl -fsSL https://packages.microsoft.com/keys/microsoft.asc \
-      | gpg --dearmor > /usr/share/keyrings/packages.microsoft.gpg
+      | gpg --dearmor --yes -o /usr/share/keyrings/packages.microsoft.gpg
+    chmod 644 /usr/share/keyrings/packages.microsoft.gpg
     echo "deb [arch=arm64 signed-by=/usr/share/keyrings/packages.microsoft.gpg] https://packages.microsoft.com/repos/code stable main" \
       > /etc/apt/sources.list.d/vscode.list
-    apt-get update && apt-get install -y code
-    if [ -f /usr/share/applications/code.desktop ]; then
-      sed -i "s|/usr/share/code/code |/usr/share/code/code --no-sandbox --disable-gpu-sandbox |g" /usr/share/applications/code.desktop
-    fi
   '
+  apt_install code
+  sudo sh -c '
+    for f in /usr/share/applications/code.desktop /usr/share/applications/code-url-handler.desktop; do
+      if [ -f "$f" ] && ! grep -q -- "--no-sandbox" "$f"; then
+        sed -i "s|/usr/share/code/code |/usr/share/code/code --no-sandbox --no-zygote --disable-gpu-sandbox --disable-dev-shm-usage |g" "$f"
+      fi
+    done
+  '
+  echo "==> Visual Studio Code installed."
 }
 
 install_blender() {
@@ -339,7 +367,7 @@ if [ -n "${DISPLAY:-}${WAYLAND_DISPLAY:-}" ]; then
   if [ -n "${choice:-}" ]; then
     for term in konsole xfce4-terminal xterm; do
       if command -v "$term" >/dev/null 2>&1; then
-        exec "$term" -e bash -lc "/usr/local/bin/linuxdroid-apps '$choice'; echo; read -rp 'Done. Press Enter to close...'"
+        exec "$term" -e bash -lc "/usr/local/bin/linuxdroid-apps '$choice'; rc=\$?; echo; if [ \$rc -eq 0 ]; then echo '[SUCCESS] Installation finished.'; else echo \"[FAILED] Installation exited with status \$rc.\"; fi; read -rp 'Press Enter to close...'"
       fi
     done
     run_action "$choice"

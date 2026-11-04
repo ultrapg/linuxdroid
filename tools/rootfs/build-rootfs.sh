@@ -14,7 +14,7 @@ OUT_DIR="${OUT_DIR:-$REPO_ROOT/dist}"
 WORK_DIR="${WORK_DIR:-/tmp/linuxdroid-rootfs-build}"
 CACHE_DIR="${CACHE_DIR:-$WORK_DIR/cache}"
 GITHUB_REPO="${GITHUB_REPO:-ultrapg/linuxdroid}"
-RELEASE_TAG="${RELEASE_TAG:-v1.0.11}"
+RELEASE_TAG="${RELEASE_TAG:-v1.0.20}"
 
 UBUNTU_BASE_URL="https://cdimage.ubuntu.com/ubuntu-base/releases/24.04/release/ubuntu-base-24.04.5-base-arm64.tar.gz"
 UBUNTU_BASE_SHA256="a91d5a93010193712d346d761372b7c9db6dfcf093893161c64ca107f05914f2"
@@ -137,7 +137,8 @@ run_in_rootfs() {
   if [ -f "$root/etc/ld.so.preload" ]; then
     preload_bind=(-b "$root/etc/ld.so.preload:/etc/ld.so.preload")
   fi
-  sudo "$CACHE_DIR/proot-host" \
+  sudo PROOT_NO_SECCOMP=1 "$CACHE_DIR/proot-host" \
+    --kill-on-exit \
     -q /usr/bin/qemu-aarch64-static \
     -r "$root" \
     -b /dev \
@@ -288,6 +289,26 @@ smoke_test_rootfs() {
     free -h >/dev/null
     uptime >/dev/null
     fastfetch --pipe >/dev/null
+
+    pkg_tmp=\$(mktemp -d)
+    deb_tmp=\$(mktemp --suffix=.deb)
+    mkdir -p \"\$pkg_tmp/DEBIAN\" \"\$pkg_tmp/usr/share/linuxdroid-smoke\"
+    cat > \"\$pkg_tmp/DEBIAN/control\" <<'CTRL'
+Package: linuxdroid-smoke-check
+Version: 1.0
+Section: misc
+Priority: optional
+Architecture: all
+Maintainer: LinuxDroid <noreply@linuxdroid.local>
+Description: Ephemeral dpkg/tar/futimens smoke check
+CTRL
+    echo ok > \"\$pkg_tmp/usr/share/linuxdroid-smoke/probe\"
+    chmod 0755 \"\$pkg_tmp/DEBIAN\"
+    dpkg-deb --build \"\$pkg_tmp\" \"\$deb_tmp\" >/dev/null
+    dpkg -i \"\$deb_tmp\" >/dev/null
+    test -f /usr/share/linuxdroid-smoke/probe
+    dpkg -P linuxdroid-smoke-check >/dev/null
+    rm -rf \"\$pkg_tmp\" \"\$deb_tmp\"
   "
 
   # Ensure zero DroidDeck / Steam / Vapor branding exists anywhere in /etc/skel or /usr/share/linuxdroid

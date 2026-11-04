@@ -498,6 +498,20 @@ static long own_cwd(char *g) {
   return (long)strlen(g);
 }
 
+static int is_l2s_name(const char *p) {
+  const char *b = strrchr(p, '/');
+  b = b ? b + 1 : p;
+  return strncmp(b, ".l2s.", 5) == 0 || strncmp(b, ".proot.l2s.", 11) == 0;
+}
+
+static int is_l2s_host_symlink(const char *host) {
+  char target[PATH_MAX];
+  long t = sc(SYS_readlinkat, AT_FDCWD, (long)host, (long)target, sizeof target - 1, 0);
+  if (t <= 0 || t >= (long)sizeof target - 1) return 0;
+  target[t] = 0;
+  return is_l2s_name(target);
+}
+
 static char exe_text[PATH_MAX];
 static int exe_len;
 static long own_exe(char *g) {
@@ -509,6 +523,7 @@ static long own_exe(char *g) {
   long t = init_sys4(SYS_readlinkat, AT_FDCWD, (long)"/proc/self/exe", (long)g, PATH_MAX - 1);
   if (t <= 0 || t >= PATH_MAX - 1) return FP_SLOW;
   g[t] = 0;
+  if (is_l2s_name(g)) return FP_SLOW;
   static pthread_mutex_t exe_lock = PTHREAD_MUTEX_INITIALIZER;
   if (pthread_mutex_trylock(&exe_lock) == 0) {
     if (!exe_len) {
@@ -604,7 +619,7 @@ static long walk(struct res *r, const char *text, int follow, int last) {
     if (glen > 1) r->guest[glen++] = '/';
     memcpy(r->guest + glen, c, n);
     r->guest[glen + n] = 0;
-    if (reserved(r->guest)) return FP_SLOW;
+    if (reserved(r->guest) || is_l2s_name(r->guest)) return FP_SLOW;
     struct bind *through;
     if (to_host(r->guest, r->host, &through) < 0) return FP_SLOW;
     long s = sc(SYS_newfstatat, AT_FDCWD, (long)r->host, (long)&r->st, AT_SYMLINK_NOFOLLOW, 0);
@@ -636,6 +651,7 @@ static long walk(struct res *r, const char *text, int follow, int last) {
         t = sc(SYS_readlinkat, AT_FDCWD, (long)r->host, (long)target, sizeof target - 1, 0);
         if (t <= 0 || t >= (long)sizeof target - 1) return FP_SLOW;
         target[t] = 0;
+        if (is_l2s_name(target)) return FP_SLOW;
         if (detranslated(target, r->host) == FP_SLOW) return FP_SLOW;
         t = strlen(target);
       }
@@ -649,6 +665,7 @@ static long walk(struct res *r, const char *text, int follow, int last) {
       c = rest;
       continue;
     }
+    if (S_ISLNK(r->st.st_mode) && !under(r->guest, "/proc", 5) && is_l2s_host_symlink(r->host)) return FP_SLOW;
     if (!final && !S_ISDIR(r->st.st_mode)) return -ENOTDIR;
     stated = 1;
     c = e;
@@ -658,6 +675,7 @@ static long walk(struct res *r, const char *text, int follow, int last) {
     long s = sc(SYS_newfstatat, AT_FDCWD, (long)r->host, (long)&r->st, AT_SYMLINK_NOFOLLOW, 0);
     if (s < 0 && strcmp(r->guest, "/") != 0 && glue_above_binding(r->guest, strlen(r->guest))) return FP_SLOW;
     if (s < 0) return s == -ENOENT ? FP_SLOW : s;
+    if (S_ISLNK(r->st.st_mode) && !under(r->guest, "/proc", 5) && is_l2s_host_symlink(r->host)) return FP_SLOW;
   }
   r->exists = 1;
   return 0;
@@ -953,7 +971,8 @@ static long fp_statx(int dirfd, const char *path, int flags, unsigned mask, stru
 int statx(int dirfd, const char *path, int flags, unsigned mask, struct statx *out) {
   REAL(statx, int (*)(int, const char *, int, unsigned, struct statx *));
   ANSWER(fp_statx(dirfd, path, flags, mask, out), dirfd, path,
-         real_statx ? real_statx(dirfd, path, flags, mask, out) : ret(sc(SYS_statx, dirfd, (long)path, flags, mask, (long)out)));
+         real_statx ? real_statx(dirfd, path, flags, mask, out)
+                    : (int)syscall(SYS_statx, dirfd, path, flags, mask, out));
 }
 
 
@@ -1209,38 +1228,46 @@ int chmod(const char *path, mode_t mode) { return fchmodat(AT_FDCWD, path, mode,
 static long fp_utimens(int dirfd, const char *path, const struct timespec times[2], int flags) {
   struct res r;
   long rs;
-  if (!path && fp_ready()) {
-    rs = sc(SYS_utimensat, dirfd, 0, (long)times, flags, 0);
-  } else {
-    rs = flags & ~AT_SYMLINK_NOFOLLOW ? FP_SLOW : resolve(dirfd, path, (flags & AT_SYMLINK_NOFOLLOW ? 0 : 1) | MAY_BE_UNSEEN, &r);
-    if (rs == 1) rs = -ENOENT;
-    if (rs == 0 || rs == UNSEEN) rs = sc(SYS_utimensat, AT_FDCWD, (long)r.host, (long)times, flags, 0);
-  }
+  if (!path) return fp_ready() ? sc(SYS_utimensat, dirfd, 0, (long)times, flags, 0) : FP_SLOW;
+  rs = flags & ~AT_SYMLINK_NOFOLLOW ? FP_SLOW : resolve(dirfd, path, (flags & AT_SYMLINK_NOFOLLOW ? 0 : 1) | MAY_BE_UNSEEN, &r);
+  if (rs == 1) rs = -ENOENT;
+  if (rs == 0 || rs == UNSEEN) rs = sc(SYS_utimensat, AT_FDCWD, (long)r.host, (long)times, flags, 0);
   return rs;
 }
 static int utimens_common(int dirfd, const char *path, const struct timespec times[2], int flags) {
   REAL(utimensat, int (*)(int, const char *, const struct timespec[2], int));
+  if (!path) { missed(__func__, dirfd, NULL); return real_utimensat(dirfd, path, times, flags); }
   ANSWER(fp_utimens(dirfd, path, times, flags), dirfd, path, real_utimensat(dirfd, path, times, flags));
 }
 int utimensat(int dirfd, const char *path, const struct timespec times[2], int flags) {
   return utimens_common(dirfd, path, times, flags);
 }
-int futimens(int fd, const struct timespec times[2]) { return utimens_common(fd, NULL, times, 0); }
+int futimens(int fd, const struct timespec times[2]) {
+  REAL(futimens, int (*)(int, const struct timespec[2]));
+  ANSWER(fp_ready() ? sc(SYS_utimensat, fd, 0, (long)times, 0, 0) : FP_SLOW,
+         fd, NULL, real_futimens(fd, times));
+}
 
+static int tv_to_ts(const struct timeval tv[2], struct timespec ts[2]) {
+  for (int i = 0; i < 2; i++) {
+    if (tv[i].tv_usec < 0 || tv[i].tv_usec >= 1000000) { errno = EINVAL; return -1; }
+    ts[i].tv_sec = tv[i].tv_sec;
+    ts[i].tv_nsec = tv[i].tv_usec * 1000;
+  }
+  return 0;
+}
 static int utimes_common(int dirfd, const char *path, const struct timeval tv[2], int flags) {
   struct timespec ts[2];
-  if (tv) {
-    for (int i = 0; i < 2; i++) {
-      if (tv[i].tv_usec < 0 || tv[i].tv_usec >= 1000000) { errno = EINVAL; return -1; }
-      ts[i].tv_sec = tv[i].tv_sec;
-      ts[i].tv_nsec = tv[i].tv_usec * 1000;
-    }
-  }
+  if (tv && tv_to_ts(tv, ts) < 0) return -1;
   return utimens_common(dirfd, path, tv ? ts : NULL, flags);
 }
 int utimes(const char *path, const struct timeval tv[2]) { return utimes_common(AT_FDCWD, path, tv, 0); }
 int lutimes(const char *path, const struct timeval tv[2]) { return utimes_common(AT_FDCWD, path, tv, AT_SYMLINK_NOFOLLOW); }
-int futimes(int fd, const struct timeval tv[2]) { return utimes_common(fd, NULL, tv, 0); }
+int futimes(int fd, const struct timeval tv[2]) {
+  struct timespec ts[2];
+  if (tv && tv_to_ts(tv, ts) < 0) return -1;
+  return futimens(fd, tv ? ts : NULL);
+}
 int utime(const char *path, const struct utimbuf *times) {
   if (!times) return utimens_common(AT_FDCWD, path, NULL, 0);
   struct timespec ts[2] = { { times->actime, 0 }, { times->modtime, 0 } };

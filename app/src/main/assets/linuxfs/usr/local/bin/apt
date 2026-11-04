@@ -1,5 +1,6 @@
-#!/usr/bin/env python3
+#!/usr/bin/python3 -BE
 import os
+import resource
 import subprocess
 import sys
 
@@ -16,6 +17,27 @@ AUTO_UPDATE_CMDS = {
     "download",
     "source",
 }
+
+
+def cap_nofile_soft_limit(max_soft=8192):
+    try:
+        soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
+        if soft == resource.RLIM_INFINITY or soft > max_soft:
+            target = max_soft if hard == resource.RLIM_INFINITY else min(max_soft, hard)
+            resource.setrlimit(resource.RLIMIT_NOFILE, (target, hard))
+    except (OSError, ValueError):
+        pass
+
+
+def resolve_real_binary(primary):
+    distrib = primary + ".distrib"
+    try:
+        with open(primary, "rb") as f:
+            if f.read(2) == b"#!" and os.path.isfile(distrib):
+                return distrib
+    except OSError:
+        pass
+    return primary
 
 
 def ensure_sbin_path():
@@ -57,14 +79,17 @@ def find_subcommand(args):
 
 
 def main(argv):
+    cap_nofile_soft_limit()
     ensure_sbin_path()
+    real_apt = resolve_real_binary(REAL_APT)
+    real_apt_get = resolve_real_binary(REAL_APT_GET)
     subcmd = find_subcommand(argv[1:])
     if os.geteuid() == 0 and subcmd in AUTO_UPDATE_CMDS and not has_apt_lists():
-        apt_get = REAL_APT_GET if os.path.exists(REAL_APT_GET) else REAL_APT
+        apt_get = real_apt_get if os.path.exists(real_apt_get) else real_apt
         if os.path.exists(apt_get):
             print("LinuxDroid: APT package lists are empty; running 'apt-get update' first...", file=sys.stderr, flush=True)
             subprocess.call([apt_get, "update"])
-    os.execv(REAL_APT, [REAL_APT] + argv[1:])
+    os.execv(real_apt, [real_apt] + argv[1:])
 
 
 if __name__ == "__main__":

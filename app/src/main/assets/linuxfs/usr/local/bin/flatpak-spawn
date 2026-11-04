@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+#!/usr/bin/python3 -BE
 import os
 import sys
 
@@ -43,20 +43,39 @@ PRESERVE_KEYS = (
     "WAYLAND_DISPLAY",
     "DBUS_SESSION_BUS_ADDRESS",
     "FLATPAK_BWRAP",
+    "BL_HOST_DBUS_SESSION_BUS_ADDRESS",
+    "BL_HOST_XDG_RUNTIME_DIR",
+    "BL_HOST_WAYLAND_DISPLAY",
+    "BL_HOST_DISPLAY",
+)
+
+SANDBOX_ONLY_ENV_KEYS = (
+    "BL_FLATPAK_LD",
+    "BL_FLATPAK_LIBPATH",
+    "BL_FLATPAK_USR",
+    "BL_FLATPAK_APP",
+    "PYTHONHOME",
+    "GDK_PIXBUF_MODULE_FILE",
+    "GIO_EXTRA_MODULES",
 )
 
 
-def strip_sandbox_paths(key):
+def strip_sandbox_paths(key, keep_flatpak_exports=False):
     val = os.environ.get(key)
     if not val:
         return
-    cleaned = [
-        p
-        for p in val.split(":")
-        if p
-        and not p.startswith(("/app/", "/app", "/tmp/.bwrap-rt-lib", "/var/lib/flatpak/"))
-        and "/.local/share/flatpak/" not in p
-    ]
+    cleaned = []
+    for p in val.split(":"):
+        if not p:
+            continue
+        if keep_flatpak_exports and p.endswith("/flatpak/exports/share"):
+            cleaned.append(p)
+            continue
+        if p.startswith(("/app/", "/app", "/tmp/.bwrap-rt-lib", "/var/lib/flatpak/")):
+            continue
+        if "/.local/share/flatpak/" in p:
+            continue
+        cleaned.append(p)
     if cleaned:
         os.environ[key] = ":".join(cleaned)
     else:
@@ -137,8 +156,29 @@ def main(argv):
         os.environ.update(preserved)
 
     if is_host:
-        for k in ("LD_LIBRARY_PATH", "GI_TYPELIB_PATH", "PYTHONPATH"):
+        for k in SANDBOX_ONLY_ENV_KEYS:
+            os.environ.pop(k, None)
+        for k in (
+            "LD_LIBRARY_PATH",
+            "GI_TYPELIB_PATH",
+            "PYTHONPATH",
+            "LIBGL_DRIVERS_PATH",
+            "__EGL_VENDOR_LIBRARY_DIRS",
+            "GST_PLUGIN_SYSTEM_PATH_1_0",
+            "QT_PLUGIN_PATH",
+            "QML2_IMPORT_PATH",
+        ):
             strip_sandbox_paths(k)
+        strip_sandbox_paths("XDG_DATA_DIRS", keep_flatpak_exports=True)
+        for saved_k, real_k in (
+            ("BL_HOST_DBUS_SESSION_BUS_ADDRESS", "DBUS_SESSION_BUS_ADDRESS"),
+            ("BL_HOST_XDG_RUNTIME_DIR", "XDG_RUNTIME_DIR"),
+            ("BL_HOST_WAYLAND_DISPLAY", "WAYLAND_DISPLAY"),
+            ("BL_HOST_DISPLAY", "DISPLAY"),
+        ):
+            saved_val = os.environ.pop(saved_k, None)
+            if saved_val:
+                os.environ[real_k] = saved_val
 
     os.environ["PATH"] = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
     for k in env_unsets:

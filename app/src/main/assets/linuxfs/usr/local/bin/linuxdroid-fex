@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+#!/usr/bin/python3 -BE
 import json
 import os
 from pathlib import Path
@@ -31,20 +31,84 @@ def find_fex():
     return shutil.which("FEXInterpreter") or shutil.which("FEXLoader") or shutil.which("FEX")
 
 
+def _is_nonempty_dir(path: Path) -> bool:
+    try:
+        return path.is_dir() and any(path.iterdir())
+    except OSError:
+        return False
+
+
+def _fex_paths(home: Path):
+    env_home = os.environ.get("HOME")
+    use_xdg_env = bool(env_home and Path(env_home) == home)
+    xdg_data = Path(os.environ["XDG_DATA_HOME"]) if (use_xdg_env and os.environ.get("XDG_DATA_HOME")) else (home / ".local" / "share")
+    xdg_cfg = Path(os.environ["XDG_CONFIG_HOME"]) if (use_xdg_env and os.environ.get("XDG_CONFIG_HOME")) else (home / ".config")
+    return xdg_data / "fex-emu" / "RootFS", xdg_cfg / "fex-emu", home / ".fex-emu"
+
+
+def _locate_rootfs(home: Path):
+    xdg_rootfs_dir, _, legacy_dir = _fex_paths(home)
+    legacy_rootfs_dir = legacy_dir / "RootFS"
+    candidates = []
+    for d in (xdg_rootfs_dir, legacy_rootfs_dir):
+        if d not in candidates:
+            candidates.append(d)
+    for fex_dir in candidates:
+        if fex_dir.is_dir():
+            # Prefer extracted directories because Android lacks /dev/fuse for .ero/.sqsh mounts.
+            dirs = sorted([p for p in fex_dir.iterdir() if _is_nonempty_dir(p)])
+            if dirs:
+                return dirs[-1].name, fex_dir
+    for fex_dir in candidates:
+        if fex_dir.is_dir():
+            archives = sorted(
+                [p for p in fex_dir.iterdir() if p.is_file() and p.suffix in (".sqsh", ".ero") and p.stat().st_size > 0]
+            )
+            if archives:
+                return archives[-1].name, fex_dir
+    return None, None
+
+
 def find_rootfs(home: Path):
-    fex_dir = home / ".fex-emu" / "RootFS"
-    if fex_dir.is_dir():
-        entries = sorted([p for p in fex_dir.iterdir() if p.is_dir() or p.suffix in (".sqsh", ".ero")])
-        if entries:
-            return entries[-1].name
-    return None
+    name, _ = _locate_rootfs(home)
+    return name
+
+
+def _silence_x86_preload_warning(rootfs_dir: Path, rootfs_name: str):
+    if not rootfs_dir or not rootfs_name:
+        return
+    etc_dir = rootfs_dir / rootfs_name / "etc"
+    if etc_dir.is_dir():
+        preload = etc_dir / "ld.so.preload"
+        if not preload.exists():
+            try:
+                preload.touch(exist_ok=True)
+            except OSError:
+                pass
 
 
 def ensure_fex_config(home: Path):
-    cfg_dir = home / ".fex-emu"
-    cfg_dir.mkdir(parents=True, exist_ok=True)
-    cfg_file = cfg_dir / "Config.json"
-    rootfs = find_rootfs(home)
+    xdg_rootfs_dir, xdg_cfg_dir, legacy_dir = _fex_paths(home)
+    rootfs, rootfs_parent = _locate_rootfs(home)
+    _silence_x86_preload_warning(rootfs_parent, rootfs)
+
+    # FEX-Emu enters legacy mode whenever ~/.fex-emu exists, expecting RootFS under ~/.fex-emu/RootFS.
+    # Never create ~/.fex-emu from scratch when using XDG; if ~/.fex-emu already exists while RootFS
+    # was fetched into XDG (~/.local/share/fex-emu/RootFS), bridge ~/.fex-emu/RootFS via symlink.
+    cfg_targets = []
+    if legacy_dir.is_dir():
+        legacy_rfs = legacy_dir / "RootFS"
+        if rootfs_parent and rootfs_parent != legacy_rfs and not legacy_rfs.exists():
+            try:
+                legacy_rfs.symlink_to(rootfs_parent)
+            except OSError:
+                pass
+        cfg_targets.append(legacy_dir / "Config.json")
+        if xdg_cfg_dir.is_dir() or rootfs_parent == xdg_rootfs_dir:
+            cfg_targets.append(xdg_cfg_dir / "Config.json")
+    else:
+        cfg_targets.append(xdg_cfg_dir / "Config.json")
+
     host_thunks = next((p for p in (
         "/usr/lib/aarch64-linux-gnu/fex-emu/HostThunks",
         "/usr/lib/fex-emu/HostThunks",
@@ -55,23 +119,38 @@ def ensure_fex_config(home: Path):
         "/usr/local/share/fex-emu/GuestThunks",
     ) if os.path.isdir(p)), None)
 
-    data = {}
-    if cfg_file.is_file():
-        try:
-            data = json.loads(cfg_file.read_text(encoding="utf-8"))
-        except Exception:
-            data = {}
-    cfg = data.setdefault("Config", {})
-    if rootfs and not cfg.get("RootFS"):
-        cfg["RootFS"] = rootfs
-    if host_thunks and guest_thunks:
-        cfg.setdefault("ThunkHostLibs", host_thunks)
-        cfg.setdefault("ThunkGuestLibs", guest_thunks)
-        thunks = data.setdefault("ThunksDB", {})
-        thunks.setdefault("GL", 1)
-        thunks.setdefault("Vulkan", 1)
-        thunks.setdefault("WaylandClient", 1)
-    cfg_file.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+    for cfg_file in cfg_targets:
+        cfg_file.parent.mkdir(parents=True, exist_ok=True)
+        data = {}
+        if cfg_file.is_file():
+            try:
+                data = json.loads(cfg_file.read_text(encoding="utf-8"))
+            except Exception:
+                data = {}
+        cfg = data.setdefault("Config", {})
+        current = cfg.get("RootFS")
+        check_dir = rootfs_parent or (legacy_dir / "RootFS" if legacy_dir.is_dir() else xdg_rootfs_dir)
+        current_valid = bool(
+            current
+            and check_dir
+            and (
+                _is_nonempty_dir(check_dir / current)
+                or (
+                    not (rootfs and rootfs_parent and _is_nonempty_dir(rootfs_parent / rootfs))
+                    and (check_dir / current).is_file()
+                )
+            )
+        )
+        if rootfs and not current_valid:
+            cfg["RootFS"] = rootfs
+        if host_thunks and guest_thunks:
+            cfg.setdefault("ThunkHostLibs", host_thunks)
+            cfg.setdefault("ThunkGuestLibs", guest_thunks)
+            thunks = data.setdefault("ThunksDB", {})
+            thunks.setdefault("GL", 1)
+            thunks.setdefault("Vulkan", 1)
+            thunks.setdefault("WaylandClient", 1)
+        cfg_file.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
     return rootfs
 
 
@@ -103,15 +182,35 @@ def main(argv):
         return 0
 
     if cmd == "fetch-rootfs":
+        existing_name, existing_parent = _locate_rootfs(home)
+        if (
+            "--force" not in argv[1:]
+            and existing_name
+            and existing_parent
+            and _is_nonempty_dir(existing_parent / existing_name)
+        ):
+            ensure_fex_config(home)
+            print(f"FEX RootFS '{existing_name}' is already extracted and configured.")
+            return 0
         fetcher = shutil.which("FEXRootFSFetcher")
         if not fetcher:
             print("FEXRootFSFetcher is not installed in this rootfs.", file=sys.stderr)
             return 1
-        rc = subprocess.call([fetcher, "-y", "-x", "--distro-name=ubuntu", "--distro-version=24.04"])
-        if rc != 0:
-            rc = subprocess.call([fetcher])
-        ensure_fex_config(home)
-        return rc
+        rc = subprocess.call(
+            [
+                fetcher,
+                "-y",
+                "-x",
+                "--distro-name=ubuntu",
+                "--distro-version=24.04",
+                "--distro-list-first",
+                "--force-ui=tty",
+            ]
+        )
+        rootfs = ensure_fex_config(home)
+        if rc != 0 and not rootfs:
+            return rc
+        return 0 if rootfs else 1
 
     if cmd == "needs":
         target = argv[1] if len(argv) > 1 else ""

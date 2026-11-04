@@ -95,6 +95,8 @@ class RuntimeStabilityPerformanceTest {
         assertTrue("libblsession.so must export lseek() for live /proc refresh", funcs.contains("lseek"))
         assertTrue("libblsession.so must export fseek() for live /proc refresh", funcs.contains("fseek"))
         assertTrue("libblsession.so must export rewind() for live /proc refresh", funcs.contains("rewind"))
+        assertTrue("libblsession.so must export readdir() for PRoot .l2s hardlink hiding", funcs.contains("readdir"))
+        assertTrue("libblsession.so must export readdir64() for PRoot .l2s hardlink hiding", funcs.contains("readdir64"))
     }
 
     @Test
@@ -109,6 +111,12 @@ class RuntimeStabilityPerformanceTest {
             assertFalse("Unexpected droiddeck string in $rel", ascii.contains("droiddeck"))
             assertFalse("Unexpected vapor string in $rel", ascii.contains("vapor"))
         }
+
+        val fastpathFuncs = readDefinedElf64DynamicFunctions(File(assetsRoot, "usr/local/lib/libblfastpath.so"))
+        assertTrue("libblfastpath.so must export futimens()", fastpathFuncs.contains("futimens"))
+        assertTrue("libblfastpath.so must export futimes()", fastpathFuncs.contains("futimes"))
+        assertTrue("libblfastpath.so must export utimensat()", fastpathFuncs.contains("utimensat"))
+        assertTrue("libblfastpath.so must export statx()", fastpathFuncs.contains("statx"))
     }
 
     @Test

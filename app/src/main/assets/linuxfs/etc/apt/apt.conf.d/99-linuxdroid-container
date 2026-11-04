@@ -1,3 +1,5 @@
+APT::Install-Recommends "false";
+APT::Install-Suggests "false";
 APT::Sandbox::User "root";
 Acquire::Languages "none";
 Dpkg::Options {

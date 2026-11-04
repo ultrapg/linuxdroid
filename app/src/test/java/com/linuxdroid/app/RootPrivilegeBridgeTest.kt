@@ -455,4 +455,191 @@ finally:
         assertTrue("Python integration test timed out:\n$output", finished)
         assertEquals("Python integration test failed:\n$output", 0, proc.exitValue())
     }
+
+    @Test
+    fun flatpakBwrapFexAndContainerAptPoliciesHandleUnprivilegedEdgeCases() {
+        val assetsRoot = findAssetsLinuxfs().canonicalFile
+        val aptConf = File(assetsRoot, "etc/apt/apt.conf.d/99-linuxdroid-container").readText()
+        assertTrue(aptConf.contains("APT::Install-Recommends \"false\";"))
+        assertTrue(aptConf.contains("APT::Install-Suggests \"false\";"))
+
+        val binDir = File(assetsRoot, "usr/local/bin").canonicalPath
+        val pyTest = """
+import importlib.machinery
+import importlib.util
+import json
+import os
+from pathlib import Path
+import socket
+import subprocess
+import sys
+import tempfile
+
+sys.dont_write_bytecode = True
+bin_dir = sys.argv[1]
+
+def load_mod(name, filename):
+    p = os.path.join(bin_dir, filename)
+    loader = importlib.machinery.SourceFileLoader(name, p)
+    spec = importlib.util.spec_from_loader(name, loader)
+    mod = importlib.util.module_from_spec(spec)
+    loader.exec_module(mod)
+    return mod
+
+bw_mod = load_mod("bwrap_edge", "bwrap")
+fp_mod = load_mod("flatpak_edge", "flatpak")
+fex_mod = load_mod("fex_edge", "linuxdroid-fex")
+bwrap_bin = os.path.join(bin_dir, "bwrap")
+fp_spawn_bin = os.path.join(bin_dir, "flatpak-spawn")
+
+# 1. bwrap copy_fd_to_dest('/etc/ld.so.conf') stages to /tmp instead of clobbering host /etc/ld.so.conf
+r_fd, w_fd = os.pipe()
+os.write(w_fd, b"/app/lib\n/usr/lib/aarch64-linux-gnu\n")
+os.close(w_fd)
+staged = bw_mod.copy_fd_to_dest(str(r_fd), "/etc/ld.so.conf")
+assert staged is not None and staged.startswith("/tmp/.bwrap-ld-so-conf-")
+with open(staged, "rb") as f:
+    assert b"/app/lib" in f.read()
+os.unlink(staged)
+
+# 2. bwrap ldconfig invocation injects -f <staged_conf> and remaps ephemeral /run binds
+with tempfile.TemporaryDirectory() as tmp_cache_src:
+    conf_r, conf_w = os.pipe()
+    os.write(conf_w, b"/app/lib\n")
+    os.close(conf_w)
+    os.set_inheritable(conf_r, True)
+    fake_sbin = os.path.join(tmp_cache_src, "sbin")
+    os.makedirs(fake_sbin, exist_ok=True)
+    fake_ldconfig = os.path.join(fake_sbin, "ldconfig")
+    with open(fake_ldconfig, "w") as f:
+        f.write("#!/usr/bin/python3 -BE\nimport sys; print('ARGS=' + '|'.join(sys.argv[1:]))\n")
+    os.chmod(fake_ldconfig, 0o755)
+    env_ld = dict(os.environ)
+    env_ld["PATH"] = fake_sbin + ":" + env_ld.get("PATH", "")
+    r_ld = subprocess.run(
+        [
+            bwrap_bin,
+            "--ro-bind-data", str(conf_r), "/etc/ld.so.conf",
+            "--bind", tmp_cache_src, "/tmp/bwrap-ephemeral-cache-test",
+            "--",
+            fake_ldconfig, "-X", "-C", "/tmp/bwrap-ephemeral-cache-test/ld.so.cache",
+        ],
+        pass_fds=(conf_r,),
+        env=env_ld,
+        capture_output=True,
+        text=True,
+        timeout=5,
+    )
+    os.close(conf_r)
+    assert r_ld.returncode == 0, f"bwrap ldconfig failed: {r_ld.stderr}"
+    assert "ARGS=-f|/tmp/.bwrap-ld-so-conf-" in r_ld.stdout, f"Unexpected ldconfig args: {r_ld.stdout}"
+    assert f"{tmp_cache_src}/ld.so.cache" in r_ld.stdout, f"Expected remapped cache path in {r_ld.stdout}"
+    if os.path.islink("/tmp/bwrap-ephemeral-cache-test"):
+        os.unlink("/tmp/bwrap-ephemeral-cache-test")
+
+# 3. bwrap Flatpak runtime symlink resolution stays inside usr_src (never escapes /usr/bin/python3 to host)
+with tempfile.TemporaryDirectory() as fake_rt:
+    os.makedirs(os.path.join(fake_rt, "bin"), exist_ok=True)
+    os.makedirs(os.path.join(fake_rt, "lib", "aarch64-linux-gnu", "gdk-pixbuf-2.0", "2.10.0"), exist_ok=True)
+    fake_ld = os.path.join(fake_rt, "lib", "aarch64-linux-gnu", "ld-linux-aarch64.so.1")
+    with open(fake_ld, "wb") as f:
+        f.write(b"\x7fELF")
+    fake_py313 = os.path.join(fake_rt, "bin", "python3.13")
+    with open(fake_py313, "wb") as f:
+        f.write(b"\x7fELF")
+    os.symlink("python3.13", os.path.join(fake_rt, "bin", "python3"))
+    os.symlink("/usr/bin/python3", os.path.join(fake_rt, "bin", "python"))
+    loaders = os.path.join(fake_rt, "lib", "aarch64-linux-gnu", "gdk-pixbuf-2.0", "2.10.0", "loaders.cache")
+    with open(loaders, "w") as f:
+        f.write('"/usr/lib/aarch64-linux-gnu/gdk-pixbuf-2.0/2.10.0/loaders/libpixbufloader-svg.so"\n')
+
+    assert bw_mod.find_runtime_ld_linux(fake_rt) == fake_ld
+    resolved_py = bw_mod.resolve_sandbox_file("/usr/bin/python", None, fake_rt, [])
+    assert resolved_py == fake_py313, f"Expected {fake_py313}, got {resolved_py}"
+    relocated = bw_mod.prepare_relocated_pixbuf_cache(fake_rt)
+    assert relocated is not None and os.path.isfile(relocated)
+    with open(relocated) as f:
+        assert fake_rt in f.read()
+    os.unlink(relocated)
+
+# 4. flatpak is_unix_socket_live distinguishes live vs stale sockets
+with tempfile.TemporaryDirectory() as sock_dir:
+    sock_path = os.path.join(sock_dir, "bus.sock")
+    srv = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    srv.bind(sock_path)
+    srv.listen(1)
+    assert fp_mod.is_unix_socket_live(sock_path) is True
+    srv.close()
+    assert os.path.exists(sock_path)
+    assert fp_mod.is_unix_socket_live(sock_path) is False
+
+# 5. flatpak-spawn --host strips BL_FLATPAK_*, PYTHONHOME, and restores BL_HOST_* session vars
+env_sandbox = dict(os.environ)
+env_sandbox.update({
+    "BL_FLATPAK_LD": "/var/lib/flatpak/runtime/ld-linux.so",
+    "BL_FLATPAK_USR": "/var/lib/flatpak/runtime/files",
+    "PYTHONHOME": "/var/lib/flatpak/runtime/files",
+    "DBUS_SESSION_BUS_ADDRESS": "unix:path=/run/user/1000/bus",
+    "BL_HOST_DBUS_SESSION_BUS_ADDRESS": "unix:path=/tmp/real-host-bus",
+    "XDG_DATA_DIRS": "/app/share:/var/lib/flatpak/runtime/org.gnome.Platform/files/share:/var/lib/flatpak/exports/share:/usr/share",
+})
+r_host = subprocess.run(
+    [
+        fp_spawn_bin,
+        "--host",
+        "python3",
+        "-c",
+        "import json, os; print(json.dumps({'ld': os.environ.get('BL_FLATPAK_LD'), 'ph': os.environ.get('PYTHONHOME'), 'dbus': os.environ.get('DBUS_SESSION_BUS_ADDRESS'), 'xdg': os.environ.get('XDG_DATA_DIRS')}))",
+    ],
+    env=env_sandbox,
+    capture_output=True,
+    text=True,
+    timeout=5,
+)
+assert r_host.returncode == 0, f"flatpak-spawn --host failed: {r_host.stderr}"
+host_info = json.loads(r_host.stdout.strip())
+assert host_info["ld"] is None
+assert host_info["ph"] is None
+assert host_info["dbus"] == "unix:path=/tmp/real-host-bus"
+assert host_info["xdg"] == "/var/lib/flatpak/exports/share:/usr/share"
+
+# 6. linuxdroid-fex prefers extracted RootFS directories over .ero/.sqsh archives (since Android lacks /dev/fuse)
+with tempfile.TemporaryDirectory() as fake_home:
+    hp = Path(fake_home)
+    rdir = hp / ".fex-emu" / "RootFS"
+    rdir.mkdir(parents=True)
+    (rdir / "Ubuntu_24_04.ero").write_bytes(b"erofs")
+    (hp / ".fex-emu" / "Config.json").write_text(json.dumps({"Config": {"RootFS": "Ubuntu_24_04.ero"}}))
+    assert fex_mod.ensure_fex_config(hp) == "Ubuntu_24_04.ero"
+
+    extracted = rdir / "Ubuntu_24_04"
+    extracted.mkdir()
+    (extracted / "usr").mkdir()
+    (extracted / "etc").mkdir()
+    assert fex_mod.find_rootfs(hp) == "Ubuntu_24_04"
+    assert fex_mod.ensure_fex_config(hp) == "Ubuntu_24_04"
+    saved_cfg = json.loads((hp / ".fex-emu" / "Config.json").read_text())
+    assert saved_cfg["Config"]["RootFS"] == "Ubuntu_24_04"
+    assert (extracted / "etc" / "ld.so.preload").is_file()
+
+with tempfile.TemporaryDirectory() as fake_xdg_home:
+    xhp = Path(fake_xdg_home)
+    xrfs = xhp / ".local" / "share" / "fex-emu" / "RootFS" / "Ubuntu_24_04"
+    (xrfs / "etc").mkdir(parents=True)
+    assert fex_mod.find_rootfs(xhp) == "Ubuntu_24_04"
+    assert fex_mod.ensure_fex_config(xhp) == "Ubuntu_24_04"
+    assert not (xhp / ".fex-emu").exists()
+    xdg_saved = json.loads((xhp / ".config" / "fex-emu" / "Config.json").read_text())
+    assert xdg_saved["Config"]["RootFS"] == "Ubuntu_24_04"
+    assert (xrfs / "etc" / "ld.so.preload").is_file()
+""".trimIndent()
+
+        val proc = ProcessBuilder("python3", "-B", "-c", pyTest, binDir)
+            .redirectErrorStream(true)
+            .start()
+        val output = proc.inputStream.bufferedReader().readText()
+        val finished = proc.waitFor(20, TimeUnit.SECONDS)
+        assertTrue("Edge-case integration test timed out:\n$output", finished)
+        assertEquals("Edge-case integration test failed:\n$output", 0, proc.exitValue())
+    }
 }
