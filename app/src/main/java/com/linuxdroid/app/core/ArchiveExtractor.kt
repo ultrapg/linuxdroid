@@ -183,16 +183,21 @@ object ArchiveExtractor {
                 link.target.parentFile?.mkdirs()
                 if (link.hardLink) {
                     val src = File(destDir, link.linkDest)
-                    if (!src.exists()) continue
+                    if (!Files.exists(src.toPath(), LinkOption.NOFOLLOW_LINKS)) continue
                     try {
                         Os.link(src.absolutePath, link.target.absolutePath)
                     } catch (_: Exception) {
-                        // Fall back to relative symlink or file copy if hardlink not allowed
+                        // Fall back to symlink clone or file copy if hardlink is disallowed by Android SELinux
                         if (Files.isSymbolicLink(src.toPath())) {
                             Os.symlink(Os.readlink(src.absolutePath), link.target.absolutePath)
                         } else {
                             src.copyTo(link.target, overwrite = true)
-                            if (src.canExecute()) FileUtils.chmod(link.target, 0b111_101_101)
+                            val mode = try {
+                                Os.stat(src.absolutePath).st_mode and 0xFFF
+                            } catch (_: Exception) {
+                                if (src.canExecute()) 0b111_101_101 else 0b110_100_100
+                            }
+                            applyMode(link.target, mode, false)
                         }
                     }
                 } else {

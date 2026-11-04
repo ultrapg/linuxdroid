@@ -149,39 +149,64 @@ static long init_sys4(long nr, long a, long b, long c, long d) {
 
 static long init_sys(long nr, long a, long b, long c) { return init_sys4(nr, a, b, c, 0); }
 
+static long open_prog_or_path(const char *prog) {
+  if (strchr(prog, '/')) return init_sys(SYS_openat, AT_FDCWD, (long)prog, O_RDONLY | O_CLOEXEC);
+  const char *paths = getenv("PATH");
+  if (!paths || !*paths) paths = "/usr/local/bin:/usr/bin:/bin";
+  char full[PATH_MAX];
+  for (const char *p = paths;;) {
+    const char *end = strchrnul(p, ':');
+    int n = end > p ? snprintf(full, sizeof full, "%.*s/%s", (int)(end - p), p, prog)
+                    : snprintf(full, sizeof full, "%s", prog);
+    if (n > 0 && (size_t)n < sizeof full) {
+      long fd = init_sys(SYS_openat, AT_FDCWD, (long)full, O_RDONLY | O_CLOEXEC);
+      if (fd >= 0) return fd;
+    }
+    if (!*end) return -ENOENT;
+    p = end + 1;
+  }
+}
+
 static int program_32bit(const char *prog, int scripts) {
   char head[256];
-  long fd = init_sys(SYS_openat, AT_FDCWD, (long)prog, O_RDONLY | O_CLOEXEC);
-  if (fd < 0) return 1;
+  long fd = open_prog_or_path(prog);
+  if (fd < 0) return 0;
   long n = init_sys(SYS_read, fd, (long)head, sizeof head - 1);
   init_sys(SYS_close, fd, 0, 0);
-  if (n < 0) return 1;
+  if (n < 5) return 0;
   head[n] = 0;
-  if (n >= 2 && head[0] == '#' && head[1] == '!') {
-    if (scripts <= 0) return 1;
+  if (head[0] == '#' && head[1] == '!') {
+    if (scripts <= 0) return 0;
     char *p = head + 2;
     while (*p == ' ' || *p == '\t') p++;
     char *e = p;
     while (*e && *e != ' ' && *e != '\t' && *e != '\n' && *e != '\r') e++;
-    if (e == p || (!*e && n == (long)sizeof head - 1)) return 1;
+    if (e == p || (!*e && n == (long)sizeof head - 1)) return 0;
     *e = 0;
     return program_32bit(p, scripts - 1);
   }
-  return !(n >= 5 && memcmp(head, "\x7f" "ELF", 4) == 0 && head[4] == 2);
+  return memcmp(head, "\x7f" "ELF", 4) == 0 && head[4] == 1;
 }
 
 static int fex_runs_32bit(void) {
-  if (strcmp(program_invocation_short_name, "FEX") != 0 && strcmp(program_invocation_short_name, "FEXInterpreter") != 0)
+  if (strcmp(program_invocation_short_name, "FEX") != 0 &&
+      strcmp(program_invocation_short_name, "FEXInterpreter") != 0 &&
+      strcmp(program_invocation_short_name, "FEXLoader") != 0)
     return 0;
   char args[PATH_MAX + 64];
   long fd = init_sys(SYS_openat, AT_FDCWD, (long)"/proc/self/cmdline", O_RDONLY | O_CLOEXEC);
-  if (fd < 0) return 1;
+  if (fd < 0) return 0;
   long n = init_sys(SYS_read, fd, (long)args, sizeof args - 1);
   init_sys(SYS_close, fd, 0, 0);
-  if (n <= 0) return 1;
+  if (n <= 0) return 0;
   args[n] = 0;
   const char *prog = args + strlen(args) + 1;
-  if (prog >= args + n || !*prog) return 1;
+  while (prog < args + n && *prog == '-') {
+    int stop = strcmp(prog, "--") == 0;
+    prog += strlen(prog) + 1;
+    if (stop) break;
+  }
+  if (prog >= args + n || !*prog) return 0;
   return program_32bit(prog, 4);
 }
 
@@ -837,10 +862,37 @@ int creat(const char *path, mode_t mode) { return open(path, O_WRONLY | O_CREAT 
 int creat64(const char *path, mode_t mode) __attribute__((alias("creat")));
 
 
+static unsigned l2s_fd_nlink(int fd) {
+  if (fd < 0) return 0;
+  char link[40], target[PATH_MAX];
+  snprintf(link, sizeof link, "/proc/self/fd/%d", fd);
+  long n = sc(SYS_readlinkat, AT_FDCWD, (long)link, (long)target, sizeof target - 1, 0);
+  if (n <= 0 || n >= (long)sizeof target - 1) return 0;
+  target[n] = 0;
+  if (gone(target, (size_t)n)) return 0;
+  const char *base = strrchr(target, '/');
+  base = base ? base + 1 : target;
+  if (!is_l2s_name(base)) return 0;
+  size_t blen = strlen(base);
+  if (blen < 10 || base[blen - 5] != '.') return 0;
+  for (size_t i = 1; i <= 4; i++) {
+    char c = base[blen - i];
+    if (c < '0' || c > '9') return 0;
+  }
+  int cnt = atoi(base + blen - 4);
+  return cnt > 0 ? (unsigned)cnt : 0;
+}
+
 static long fp_stat(int dirfd, const char *path, int flags, struct stat *st) {
   struct res r;
-  if ((flags & AT_EMPTY_PATH) && path && !path[0] && fp_ready())
-    return sc(SYS_newfstatat, dirfd, (long)"", (long)st, flags, 0);
+  if ((flags & AT_EMPTY_PATH) && path && !path[0] && fp_ready()) {
+    long rs = sc(SYS_newfstatat, dirfd, (long)"", (long)st, flags, 0);
+    if (rs == 0 && st && S_ISREG(st->st_mode) && st->st_nlink == 1) {
+      unsigned nl = l2s_fd_nlink(dirfd);
+      if (nl) st->st_nlink = nl;
+    }
+    return rs;
+  }
   if (flags & ~(AT_SYMLINK_NOFOLLOW | AT_NO_AUTOMOUNT)) return FP_SLOW;
   long rs = resolve(dirfd, path, (flags & AT_SYMLINK_NOFOLLOW ? 0 : 1) | MAY_BE_UNSEEN, &r);
   if (rs < 0) return rs;
@@ -875,7 +927,12 @@ int fstat(int fd, struct stat *st) {
   REAL(fstat, int (*)(int, struct stat *));
   if (!fp_ready()) return real_fstat(fd, st);
   hits++;
-  return ret(sc(SYS_fstat, fd, (long)st, 0, 0, 0));
+  long rs = sc(SYS_fstat, fd, (long)st, 0, 0, 0);
+  if (rs == 0 && S_ISREG(st->st_mode) && st->st_nlink == 1) {
+    unsigned nl = l2s_fd_nlink(fd);
+    if (nl) st->st_nlink = nl;
+  }
+  return ret(rs);
 }
 int fstat64(int fd, struct stat64 *st) { return fstat(fd, (struct stat *)st); }
 
@@ -958,8 +1015,14 @@ static long fp_statx(int dirfd, const char *path, int flags, unsigned mask, stru
   if (mask & STATX__RESERVED) return -EINVAL;
   if (!out) return -EFAULT;
   if (!path) return flags & AT_EMPTY_PATH ? FP_SLOW : -EFAULT;
-  if ((flags & AT_EMPTY_PATH) && !path[0] && fp_ready())
-    return statx_call(dirfd, "", flags, mask, out);
+  if ((flags & AT_EMPTY_PATH) && !path[0] && fp_ready()) {
+    rs = statx_call(dirfd, "", flags, mask, out);
+    if (rs == 0 && (out->stx_mask & STATX_NLINK) && S_ISREG(out->stx_mode) && out->stx_nlink == 1) {
+      unsigned nl = l2s_fd_nlink(dirfd);
+      if (nl) out->stx_nlink = nl;
+    }
+    return rs;
+  }
   rs = (flags & ~(AT_SYMLINK_NOFOLLOW | AT_NO_AUTOMOUNT | AT_STATX_SYNC_TYPE)) ? FP_SLOW
        : resolve(dirfd, path, (flags & AT_SYMLINK_NOFOLLOW ? 0 : 1) | MAY_BE_UNSEEN, &r);
   if (rs == 1) rs = -ENOENT;

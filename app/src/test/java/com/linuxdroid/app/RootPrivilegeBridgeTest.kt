@@ -632,6 +632,96 @@ with tempfile.TemporaryDirectory() as fake_xdg_home:
     xdg_saved = json.loads((xhp / ".config" / "fex-emu" / "Config.json").read_text())
     assert xdg_saved["Config"]["RootFS"] == "Ubuntu_24_04"
     assert (xrfs / "etc" / "ld.so.preload").is_file()
+
+# 7. Regression: bwrap resolve_sandbox_file stops before PRoot .l2s. pseudo-hardlink targets
+with tempfile.TemporaryDirectory() as fake_l2s_rt:
+    obj_dir = os.path.join(fake_l2s_rt, "repo", "objects", "93")
+    bin_d = os.path.join(fake_l2s_rt, "runtime", "files", "bin")
+    os.makedirs(obj_dir, exist_ok=True)
+    os.makedirs(bin_d, exist_ok=True)
+    l2s_backing = os.path.join(obj_dir, ".l2s.252c8f1619c69eae475cfb2dcdfa6ec9f703d8a3b438d39320ff72db9c481c.file0001.0002")
+    with open(l2s_backing, "wb") as f:
+        f.write(b"\x7fELF")
+    py313_l2s = os.path.join(bin_d, "python3.13")
+    os.symlink(l2s_backing, py313_l2s)
+    os.symlink("python3.13", os.path.join(bin_d, "python3"))
+    rt_files = os.path.join(fake_l2s_rt, "runtime", "files")
+    resolved_l2s = bw_mod.resolve_sandbox_file("/usr/bin/python3", None, rt_files, [])
+    assert resolved_l2s == py313_l2s, f"Must stop at {py313_l2s} instead of chasing .l2s., got {resolved_l2s}"
+    assert os.path.basename(resolved_l2s).startswith("python3")
+
+# 8. Regression: bwrap PATH ordering & nested bwrap --ro-bind /usr /usr --clearenv inheritance
+with tempfile.TemporaryDirectory() as fake_fp_root:
+    fake_usr = os.path.join(fake_fp_root, "usr_files")
+    fake_app = os.path.join(fake_fp_root, "app_files")
+    os.makedirs(os.path.join(fake_usr, "bin"), exist_ok=True)
+    os.makedirs(os.path.join(fake_app, "bin"), exist_ok=True)
+    env_nested = dict(os.environ)
+    env_nested["BL_DESKTOP"] = "1"
+    env_nested["BL_FLATPAK_USR"] = fake_usr
+    env_nested["BL_FLATPAK_APP"] = fake_app
+    r_nested = subprocess.run(
+        [
+            bwrap_bin,
+            "--ro-bind", "/usr", "/usr",
+            "--ro-bind", "/app", "/app",
+            "--clearenv",
+            "--",
+            "python3", "-c",
+            "import json, os; print(json.dumps({'path': os.environ.get('PATH', ''), 'desktop': os.environ.get('BL_DESKTOP')}))",
+        ],
+        env=env_nested,
+        capture_output=True,
+        text=True,
+        timeout=5,
+    )
+    assert r_nested.returncode == 0, f"Nested bwrap failed: {r_nested.stderr}"
+    nested_info = json.loads(r_nested.stdout.strip())
+    path_parts = nested_info["path"].split(":")
+    assert nested_info["desktop"] == "1"
+    assert path_parts.index(os.path.join(fake_app, "bin")) < path_parts.index("/usr/bin"), f"app/bin must precede /usr/bin: {path_parts}"
+    assert path_parts.index(os.path.join(fake_usr, "bin")) < path_parts.index("/usr/bin"), f"usr/bin must precede host /usr/bin: {path_parts}"
+
+# 9. Regression: flatpak-spawn preserves BL_DESKTOP on --host --clear-env, and preserves BL_FLATPAK_* when --host is omitted
+env_fps2 = dict(os.environ)
+env_fps2.update({
+    "BL_DESKTOP": "1",
+    "BL_FLATPAK_USR": "/tmp/fake-fp-usr",
+    "PATH": "/tmp/fake-fp-app/bin:/tmp/fake-fp-usr/bin:/usr/bin",
+})
+r_fps_host = subprocess.run(
+    [fp_spawn_bin, "--host", "--clear-env", "python3", "-c", "import json, os; print(json.dumps({'d': os.environ.get('BL_DESKTOP'), 'u': os.environ.get('BL_FLATPAK_USR')}))"],
+    env=env_fps2,
+    capture_output=True,
+    text=True,
+    timeout=5,
+)
+assert r_fps_host.returncode == 0
+fps_host_data = json.loads(r_fps_host.stdout.strip())
+assert fps_host_data == {"d": "1", "u": None}
+
+r_fps_sub = subprocess.run(
+    [fp_spawn_bin, "--clear-env", "python3", "-c", "import json, os; print(json.dumps({'d': os.environ.get('BL_DESKTOP'), 'u': os.environ.get('BL_FLATPAK_USR'), 'p': os.environ.get('PATH')}))"],
+    env=env_fps2,
+    capture_output=True,
+    text=True,
+    timeout=5,
+)
+assert r_fps_sub.returncode == 0
+fps_sub_data = json.loads(r_fps_sub.stdout.strip())
+assert fps_sub_data["d"] == "1"
+assert fps_sub_data["u"] == "/tmp/fake-fp-usr"
+assert fps_sub_data["p"].startswith("/tmp/fake-fp-app/bin:")
+
+# 10. Regression: flatpak is_dbus_address_live supports unix:path= and unix:abstract=
+with tempfile.TemporaryDirectory() as dbus_tmp:
+    p_sock = os.path.join(dbus_tmp, "sess.sock")
+    s1 = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    s1.bind(p_sock)
+    s1.listen(1)
+    assert fp_mod.is_dbus_address_live(f"unix:path={p_sock},guid=0123456789abcdef") is True
+    s1.close()
+    assert fp_mod.is_dbus_address_live(f"unix:path={p_sock},guid=0123456789abcdef") is False
 """.trimIndent()
 
         val proc = ProcessBuilder("python3", "-B", "-c", pyTest, binDir)
@@ -641,5 +731,35 @@ with tempfile.TemporaryDirectory() as fake_xdg_home:
         val finished = proc.waitFor(20, TimeUnit.SECONDS)
         assertTrue("Edge-case integration test timed out:\n$output", finished)
         assertEquals("Edge-case integration test failed:\n$output", 0, proc.exitValue())
+    }
+
+    @Test
+    fun unifiedLink2SymlinkAndDesktopEnvAcrossRuntimeSpawners() {
+        val srcRoot = listOf(
+            File("src/main/java/com/linuxdroid/app"),
+            File("app/src/main/java/com/linuxdroid/app"),
+        ).firstOrNull { it.isDirectory }
+        assertNotNull("Expected Kotlin source root", srcRoot)
+
+        val linuxRuntimeSrc = File(srcRoot!!, "runtime/LinuxRuntime.kt").readText()
+        val rootSpawnerSrc = File(srcRoot, "runtime/RootSpawner.kt").readText()
+        val sessionTerminalSrc = File(srcRoot, "session/SessionTerminal.kt").readText()
+
+        assertTrue(
+            "LinuxRuntime.prootPrefix must enable --link2symlink globally so user sessions and RootSpawner share hardlink semantics",
+            linuxRuntimeSrc.contains("cmd.add(\"--link2symlink\")")
+        )
+        assertFalse(
+            "RootSpawner must not duplicate --link2symlink on top of LinuxRuntime.prootPrefix",
+            rootSpawnerSrc.contains("--link2symlink")
+        )
+        assertFalse(
+            "SessionTerminal must not gate --link2symlink on asRoot",
+            sessionTerminalSrc.contains("--link2symlink")
+        )
+        assertTrue(
+            "SessionTerminal must export BL_DESKTOP=1 so transparent x86_64 execution works in standalone terminals",
+            sessionTerminalSrc.contains("BL_DESKTOP=1")
+        )
     }
 }

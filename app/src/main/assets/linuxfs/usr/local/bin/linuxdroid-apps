@@ -206,9 +206,13 @@ install_vscodium() {
   '
   apt_install codium
   sudo sh -c '
-    for f in /usr/share/applications/codium.desktop /usr/share/applications/codium-url-handler.desktop; do
-      if [ -f "$f" ] && ! grep -q -- "--no-sandbox" "$f"; then
-        sed -i "s|/usr/share/codium/codium |/usr/share/codium/codium --no-sandbox --no-zygote --disable-gpu-sandbox --disable-dev-shm-usage |g" "$f"
+    for f in $(dpkg -L codium 2>/dev/null | grep "^/usr/share/applications/.*\\.desktop$" || true) \
+             /usr/share/applications/codium.desktop \
+             /usr/share/applications/codium-url-handler.desktop \
+             /usr/share/applications/com.visualstudio.CodeOSS.desktop \
+             /usr/share/applications/com.visualstudio.CodeOSS.UrlHandler.desktop; do
+      if [ -f "$f" ]; then
+        sed -i -E "/--no-sandbox/! s#^Exec=/usr/share/codium/codium([[:space:]]|\$)#Exec=/usr/share/codium/codium --no-sandbox --no-zygote --disable-gpu-sandbox --disable-dev-shm-usage \\1#" "$f"
       fi
     done
   '
@@ -228,9 +232,13 @@ install_vscode() {
   '
   apt_install code
   sudo sh -c '
-    for f in /usr/share/applications/code.desktop /usr/share/applications/code-url-handler.desktop; do
-      if [ -f "$f" ] && ! grep -q -- "--no-sandbox" "$f"; then
-        sed -i "s|/usr/share/code/code |/usr/share/code/code --no-sandbox --no-zygote --disable-gpu-sandbox --disable-dev-shm-usage |g" "$f"
+    for f in $(dpkg -L code 2>/dev/null | grep "^/usr/share/applications/.*\\.desktop$" || true) \
+             /usr/share/applications/code.desktop \
+             /usr/share/applications/code-url-handler.desktop \
+             /usr/share/applications/com.microsoft.VSCode.desktop \
+             /usr/share/applications/com.microsoft.VSCode.UrlHandler.desktop; do
+      if [ -f "$f" ]; then
+        sed -i -E "/--no-sandbox/! s#^Exec=/usr/share/code/code([[:space:]]|\$)#Exec=/usr/share/code/code --no-sandbox --no-zygote --disable-gpu-sandbox --disable-dev-shm-usage \\1#" "$f"
       fi
     done
   '

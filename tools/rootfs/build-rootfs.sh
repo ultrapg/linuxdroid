@@ -14,7 +14,7 @@ OUT_DIR="${OUT_DIR:-$REPO_ROOT/dist}"
 WORK_DIR="${WORK_DIR:-/tmp/linuxdroid-rootfs-build}"
 CACHE_DIR="${CACHE_DIR:-$WORK_DIR/cache}"
 GITHUB_REPO="${GITHUB_REPO:-ultrapg/linuxdroid}"
-RELEASE_TAG="${RELEASE_TAG:-v1.0.20}"
+RELEASE_TAG="${RELEASE_TAG:-v1.0.21}"
 
 UBUNTU_BASE_URL="https://cdimage.ubuntu.com/ubuntu-base/releases/24.04/release/ubuntu-base-24.04.5-base-arm64.tar.gz"
 UBUNTU_BASE_SHA256="a91d5a93010193712d346d761372b7c9db6dfcf093893161c64ca107f05914f2"
@@ -289,6 +289,14 @@ smoke_test_rootfs() {
     free -h >/dev/null
     uptime >/dev/null
     fastfetch --pipe >/dev/null
+    mpv --version >/dev/null
+    firefox --version >/dev/null
+    bwrap --version | grep -q 'bubblewrap'
+    /usr/bin/bwrap --version | grep -q 'bubblewrap'
+    flatpak-spawn --version | grep -q 'flatpak-spawn'
+    /usr/bin/flatpak-spawn --version | grep -q 'flatpak-spawn'
+    bwrap --ro-bind /usr /usr --clearenv -- /usr/bin/true
+    linuxdroid-apps --list >/dev/null
 
     pkg_tmp=\$(mktemp -d)
     deb_tmp=\$(mktemp --suffix=.deb)

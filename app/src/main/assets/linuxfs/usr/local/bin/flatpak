@@ -50,6 +50,22 @@ SYSTEM_BUS_CONF = """<!DOCTYPE busconfig PUBLIC "-//freedesktop//DTD D-Bus Bus C
 """
 
 
+SESSION_BUS_CONF_TMPL = """<!DOCTYPE busconfig PUBLIC "-//freedesktop//DTD D-Bus Bus Configuration 1.0//EN"
+ "http://www.freedesktop.org/standards/dbus/1.0/busconfig.dtd">
+<busconfig>
+  <type>session</type>
+  <listen>unix:path={sock_path}</listen>
+  <auth>EXTERNAL</auth>
+  <policy context="default">
+    <allow user="*"/>
+    <allow own="*"/>
+    <allow send_destination="*"/>
+    <allow receive_sender="*"/>
+  </policy>
+</busconfig>
+"""
+
+
 def cap_nofile_soft_limit(max_soft=8192):
     try:
         soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
@@ -72,6 +88,30 @@ def is_unix_socket_live(path):
         return False
     finally:
         s.close()
+
+
+def is_dbus_address_live(addr):
+    if not addr or not addr.startswith("unix:"):
+        return False
+    spec = addr[5:].split(";", 1)[0]
+    kv = {}
+    for part in spec.split(","):
+        if "=" in part:
+            k, v = part.split("=", 1)
+            kv[k] = v
+    if "path" in kv:
+        return is_unix_socket_live(kv["path"])
+    if "abstract" in kv:
+        s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        try:
+            s.settimeout(0.5)
+            s.connect("\0" + kv["abstract"])
+            return True
+        except OSError:
+            return False
+        finally:
+            s.close()
+    return False
 
 
 def ensure_runtime_dirs():
@@ -130,6 +170,64 @@ def ensure_system_bus():
         pass
 
 
+def ensure_session_bus():
+    ensure_runtime_dirs()
+    uid = os.geteuid()
+    xdg_run = os.environ.get("XDG_RUNTIME_DIR") or f"/run/user/{uid}"
+    os.environ["XDG_RUNTIME_DIR"] = xdg_run
+
+    cur_addr = os.environ.get("DBUS_SESSION_BUS_ADDRESS", "")
+    if is_dbus_address_live(cur_addr):
+        return
+
+    bus_addr_file = os.path.join(xdg_run, "bus-address")
+    if os.path.isfile(bus_addr_file):
+        try:
+            with open(bus_addr_file, "r", encoding="utf-8") as f:
+                saved_addr = f.read().strip()
+            if is_dbus_address_live(saved_addr):
+                os.environ["DBUS_SESSION_BUS_ADDRESS"] = saved_addr
+                return
+        except OSError:
+            pass
+
+    std_bus = os.path.join(xdg_run, "bus")
+    if is_unix_socket_live(std_bus):
+        os.environ["DBUS_SESSION_BUS_ADDRESS"] = f"unix:path={std_bus}"
+        return
+
+    dbus_daemon = shutil.which("dbus-daemon")
+    if not dbus_daemon:
+        return
+    try:
+        os.makedirs("/tmp/linuxdroid-dbus", exist_ok=True)
+        sock = f"/tmp/linuxdroid-dbus/session-{uid}.sock"
+        if not is_unix_socket_live(sock):
+            conf_path = f"/tmp/linuxdroid-dbus/session-{uid}.conf"
+            with open(conf_path, "w", encoding="utf-8") as f:
+                f.write(SESSION_BUS_CONF_TMPL.format(sock_path=sock))
+            if os.path.lexists(sock):
+                try:
+                    os.unlink(sock)
+                except OSError:
+                    pass
+            subprocess.Popen(
+                [dbus_daemon, f"--config-file={conf_path}", "--nofork", "--nopidfile"],
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                start_new_session=True,
+            )
+            for _ in range(40):
+                if is_unix_socket_live(sock):
+                    break
+                time.sleep(0.05)
+        if is_unix_socket_live(sock):
+            os.environ["DBUS_SESSION_BUS_ADDRESS"] = f"unix:path={sock}"
+    except OSError:
+        pass
+
+
 def find_subcommand_and_scope(args):
     subcmd = None
     explicit_user = False
@@ -171,6 +269,7 @@ def main(argv):
 
     if subcmd == "run":
         ensure_system_bus()
+        ensure_session_bus()
         args = inject_no_documents_portal_if_needed(args)
 
     if os.geteuid() != 0 and not explicit_user and subcmd in SYSTEM_MUTATING_CMDS:

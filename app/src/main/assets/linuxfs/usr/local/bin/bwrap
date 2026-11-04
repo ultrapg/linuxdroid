@@ -258,6 +258,10 @@ def find_runtime_ld_linux(usr_src):
 def map_sandbox_virtual_path(vpath, app_src, usr_src, runtime_ext_dirs):
     if not vpath:
         return vpath
+    if vpath in ("/usr/bin/bwrap", "/bin/bwrap") and os.path.exists("/usr/local/bin/bwrap"):
+        return "/usr/local/bin/bwrap"
+    if vpath in ("/usr/bin/flatpak-spawn", "/bin/flatpak-spawn") and os.path.exists("/usr/local/bin/flatpak-spawn"):
+        return "/usr/local/bin/flatpak-spawn"
     for dst_prefix, src_prefix in sorted(runtime_ext_dirs, key=lambda kv: len(kv[0]), reverse=True):
         if vpath == dst_prefix:
             return src_prefix
@@ -271,6 +275,10 @@ def map_sandbox_virtual_path(vpath, app_src, usr_src, runtime_ext_dirs):
         cand = os.path.join(usr_src, "bin", vpath[5:])
         if os.path.lexists(cand):
             return cand
+    if usr_src and vpath.startswith("/sbin/"):
+        cand = os.path.join(usr_src, "sbin", vpath[6:])
+        if os.path.lexists(cand):
+            return cand
     return vpath
 
 
@@ -279,7 +287,9 @@ def resolve_sandbox_file(raw_path, app_src, usr_src, runtime_ext_dirs):
         return None
     cand = None
     if "/" not in raw_path:
-        if raw_path == "flatpak-spawn" and os.path.exists("/usr/local/bin/flatpak-spawn"):
+        if raw_path == "bwrap" and os.path.exists("/usr/local/bin/bwrap"):
+            cand = "/usr/local/bin/bwrap"
+        elif raw_path == "flatpak-spawn" and os.path.exists("/usr/local/bin/flatpak-spawn"):
             cand = "/usr/local/bin/flatpak-spawn"
         if cand is None and app_src:
             p = os.path.join(app_src, "bin", raw_path)
@@ -305,6 +315,9 @@ def resolve_sandbox_file(raw_path, app_src, usr_src, runtime_ext_dirs):
             target = os.readlink(cand)
         except OSError:
             break
+        target_base = os.path.basename(target)
+        if target_base.startswith(".l2s.") or target_base.startswith(".proot.l2s."):
+            break
         if target.startswith("/"):
             mapped = map_sandbox_virtual_path(target, app_src, usr_src, runtime_ext_dirs)
             cand = mapped if os.path.lexists(mapped) else target
@@ -316,13 +329,22 @@ def resolve_sandbox_file(raw_path, app_src, usr_src, runtime_ext_dirs):
 def build_runtime_library_path(app_src, usr_src, runtime_ext_dirs):
     raw_dirs = []
     if app_src:
-        raw_dirs.extend(
-            [
-                os.path.join(app_src, "lib", "aarch64-linux-gnu"),
-                os.path.join(app_src, "lib64"),
-                os.path.join(app_src, "lib"),
-            ]
+        app_bases = (
+            os.path.join(app_src, "lib", "aarch64-linux-gnu"),
+            os.path.join(app_src, "lib64"),
+            os.path.join(app_src, "lib"),
         )
+        raw_dirs.extend(app_bases)
+        for base in app_bases:
+            if not os.path.isdir(base):
+                continue
+            try:
+                for entry in sorted(os.listdir(base)):
+                    sub = os.path.join(base, entry)
+                    if os.path.isdir(sub) and not entry.startswith("python"):
+                        raw_dirs.append(sub)
+            except OSError:
+                pass
     for conf_file in sorted(glob.glob("/run/flatpak/ld.so.conf.d/*.conf")):
         try:
             with open(conf_file, "r", encoding="utf-8", errors="ignore") as f:
@@ -342,13 +364,15 @@ def build_runtime_library_path(app_src, usr_src, runtime_ext_dirs):
             ]
         )
     if usr_src:
-        raw_dirs.extend(
-            [
-                os.path.join(usr_src, "lib", "aarch64-linux-gnu"),
-                os.path.join(usr_src, "lib64"),
-                os.path.join(usr_src, "lib"),
-            ]
+        usr_bases = (
+            os.path.join(usr_src, "lib", "aarch64-linux-gnu"),
+            os.path.join(usr_src, "lib64"),
+            os.path.join(usr_src, "lib"),
         )
+        raw_dirs.extend(usr_bases)
+        for base in usr_bases:
+            for priv in ("pulseaudio", "gvfs", "tinysparql-3.0", "gjs", "webkitgtk-6.0", "webkit2gtk-4.1"):
+                raw_dirs.append(os.path.join(base, priv))
     seen = set()
     out = []
     for d in raw_dirs:
@@ -412,6 +436,9 @@ def main(argv):
             return 0
 
     keep_root_sock = os.environ.get("LINUXDROID_ROOT_SOCKET")
+    keep_desktop = os.environ.get("BL_DESKTOP")
+    prev_fp_usr = os.environ.get("BL_FLATPAK_USR")
+    prev_fp_app = os.environ.get("BL_FLATPAK_APP")
     saved_host_env = {}
     for real_k, saved_k in (
         ("DBUS_SESSION_BUS_ADDRESS", "BL_HOST_DBUS_SESSION_BUS_ADDRESS"),
@@ -450,6 +477,8 @@ def main(argv):
                     os.environ["LD_PRELOAD"] = keep_preload
                 if keep_root_sock:
                     os.environ["LINUXDROID_ROOT_SOCKET"] = keep_root_sock
+                if keep_desktop:
+                    os.environ["BL_DESKTOP"] = keep_desktop
             i += 1
         elif a in FLAGS_1 and i + 1 < len(args):
             val = args[i + 1]
@@ -481,10 +510,16 @@ def main(argv):
                 if v2 == "/etc/ld.so.conf" and out_path:
                     staged_ld_conf = out_path
             elif a in ("--bind", "--bind-try", "--ro-bind", "--ro-bind-try", "--dev-bind", "--dev-bind-try"):
-                if v2 == "/app" and v1 != "/app" and os.path.isdir(v1):
-                    app_src = v1
-                elif v2 == "/usr" and v1 != "/usr" and os.path.isdir(v1):
-                    usr_src = v1
+                if v2 == "/app":
+                    if v1 != "/app" and os.path.isdir(v1):
+                        app_src = v1
+                    elif v1 == "/app" and prev_fp_app and os.path.isdir(prev_fp_app):
+                        app_src = prev_fp_app
+                elif v2 == "/usr":
+                    if v1 != "/usr" and os.path.isdir(v1):
+                        usr_src = v1
+                    elif v1 == "/usr" and prev_fp_usr and os.path.isdir(prev_fp_usr):
+                        usr_src = prev_fp_usr
                 elif v2.startswith(("/usr/", "/app/")) and v1 != v2 and os.path.isdir(v1):
                     runtime_ext_dirs.append((v2.rstrip("/"), v1.rstrip("/")))
                 elif v2.startswith(("/tmp/", "/run/", "/var/tmp/")) and v1 != v2 and os.path.exists(v1):
@@ -524,6 +559,11 @@ def main(argv):
         print("bwrap: No command specified", file=sys.stderr)
         return 1
 
+    if not usr_src and prev_fp_usr and os.path.isdir(prev_fp_usr):
+        usr_src = prev_fp_usr
+    if not app_src and prev_fp_app and os.path.isdir(prev_fp_app):
+        app_src = prev_fp_app
+
     if ephemeral_binds:
         remapped_cmd = []
         for token in cmd:
@@ -552,17 +592,43 @@ def main(argv):
     for saved_k, saved_v in saved_host_env.items():
         os.environ.setdefault(saved_k, saved_v)
 
-    prepend_env_path("PATH", ["/usr/local/bin", "/usr/sbin", "/usr/bin", "/sbin", "/bin"])
+    append_env_path("PATH", ["/usr/local/sbin", "/usr/sbin", "/usr/bin", "/sbin", "/bin"])
+    priority_bins = ["/usr/local/bin"]
+    if app_src:
+        priority_bins.append(os.path.join(app_src, "bin"))
+    for _, ext_src in runtime_ext_dirs:
+        priority_bins.append(os.path.join(ext_src, "bin"))
+    if usr_src and not is_ldconfig:
+        priority_bins.append(os.path.join(usr_src, "bin"))
+    prepend_env_path("PATH", priority_bins)
 
     if app_src:
+        already_linked = False
         try:
-            if os.path.islink("/app") or not os.path.exists("/app"):
-                if os.path.islink("/app"):
-                    os.unlink("/app")
-                os.symlink(app_src, "/app")
+            already_linked = os.path.islink("/app") and os.readlink("/app") == app_src
         except OSError:
-            subprocess.call(["/usr/local/bin/linuxdroid-root", "ln", "-sfn", app_src, "/app"])
-        prepend_env_path("PATH", [os.path.join(app_src, "bin"), "/usr/local/bin"])
+            pass
+        if not already_linked:
+            try:
+                if os.path.islink("/app") or not os.path.exists("/app"):
+                    if os.path.islink("/app"):
+                        os.unlink("/app")
+                    os.symlink(app_src, "/app")
+            except OSError:
+                root_helper = os.path.join(os.path.dirname(os.path.abspath(__file__)), "linuxdroid-root")
+                if not os.path.exists(root_helper):
+                    root_helper = "/usr/local/bin/linuxdroid-root"
+                if os.path.exists(root_helper) and (
+                    os.environ.get("LINUXDROID_ROOT_SOCKET") or os.path.exists("/etc/linuxdroid/root-socket")
+                ):
+                    try:
+                        subprocess.call(
+                            [root_helper, "ln", "-sfn", app_src, "/app"],
+                            stdout=subprocess.DEVNULL,
+                            stderr=subprocess.DEVNULL,
+                        )
+                    except OSError:
+                        pass
         prepend_env_path(
             "XDG_DATA_DIRS",
             [os.path.join(app_src, "share")],
@@ -590,7 +656,6 @@ def main(argv):
     rt_lib_path = ""
 
     if usr_src and not is_ldconfig:
-        append_env_path("PATH", [os.path.join(usr_src, "bin")])
         prepend_env_path(
             "XDG_DATA_DIRS",
             ([os.path.join(app_src, "share")] if app_src else []) + [os.path.join(usr_src, "share")],

@@ -48,13 +48,13 @@ object SessionTerminal {
         }
 
         val cmd = LinuxRuntime.prootPrefix(context, root, home, fakeRoot = asRoot)
-        if (asRoot) cmd.add(1, "--link2symlink")
         for (spec in binds) {
             cmd.add("-b")
             cmd.add(spec)
         }
         cmd.add("/usr/bin/env")
         cmd.add("-i")
+        cmd.add("BL_DESKTOP=1")
         cmd.add("HOME=$home")
         cmd.add("USER=$user")
         cmd.add("LOGNAME=$user")

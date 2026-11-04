@@ -1,5 +1,8 @@
 #define _GNU_SOURCE
 #include <errno.h>
+#include <fcntl.h>
+#include <limits.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
@@ -89,17 +92,64 @@ static int is_chromium_prog(const char *name) {
          strcmp(name, "google-chrome-stable") == 0;
 }
 
-static int env_has_truthy(char *const envp[], const char *key) {
+static const char *env_lookup(char *const envp[], const char *key) {
   char *const *list = envp ? envp : environ;
-  if (!list || !key) return 0;
+  if (!list || !key) return NULL;
   size_t klen = strlen(key);
   const char *found = NULL;
   for (size_t i = 0; list[i]; i++) {
     if (strncmp(list[i], key, klen) == 0 && list[i][klen] == '=') {
       found = list[i] + klen + 1;
+      break;
     }
   }
+  return found;
+}
+
+static int env_has_truthy(char *const envp[], const char *key) {
+  const char *found = env_lookup(envp, key);
   return found != NULL && found[0] != '\0' && strcmp(found, "0") != 0;
+}
+
+static int check_elf_magic(const char *file_path) {
+  int fd = open(file_path, O_RDONLY | O_CLOEXEC);
+  if (fd < 0) return -1;
+  unsigned char head[4];
+  ssize_t n = read(fd, head, sizeof(head));
+  close(fd);
+  return (n == 4 && memcmp(head, "\x7f" "ELF", 4) == 0) ? 1 : 0;
+}
+
+static int is_elf_target(const char *path, char *const envp[]) {
+  if (!path || !path[0]) return 0;
+  if (strchr(path, '/')) {
+    return check_elf_magic(path) == 1;
+  }
+  const char *paths = env_lookup(envp, "PATH");
+  if (!paths || !paths[0]) paths = "/usr/local/bin:/usr/bin:/bin";
+  char full[PATH_MAX];
+  for (const char *p = paths;;) {
+    const char *end = strchrnul(p, ':');
+    int n = end > p ? snprintf(full, sizeof(full), "%.*s/%s", (int)(end - p), p, path)
+                    : snprintf(full, sizeof(full), "%s", path);
+    if (n > 0 && (size_t)n < sizeof(full) && access(full, X_OK) == 0) {
+      return check_elf_magic(full) == 1;
+    }
+    if (!*end) return 0;
+    p = end + 1;
+  }
+}
+
+static int extra_defines_key(const char *const *extra, const char *entry) {
+  const char *eq = strchr(entry, '=');
+  if (!eq) return 0;
+  size_t klen = (size_t)(eq - entry);
+  for (size_t j = 0; extra[j]; j++) {
+    if (strncmp(extra[j], entry, klen) == 0 && extra[j][klen] == '=') {
+      return 1;
+    }
+  }
+  return 0;
 }
 
 __attribute__((constructor)) static void webhelper_init(void) {
@@ -121,16 +171,15 @@ __attribute__((constructor)) static void webhelper_init(void) {
 
 __attribute__((visibility("hidden"))) char *const *bl_webhelper_argv(const char *path, char *const argv[], char *const envp[]) {
   if (is_firefox_prog(path) || (argv && argv[0] && is_firefox_prog(argv[0]))) {
-    apply_firefox_env();
     return argv;
   }
   int is_elec = is_electron_prog(path) || (argv && argv[0] && is_electron_prog(argv[0]));
   int is_chrom = !is_elec && (is_chromium_prog(path) || (argv && argv[0] && is_chromium_prog(argv[0])));
   if (is_elec || is_chrom) {
-    apply_electron_env();
     if (!argv || !argv[0]) return argv;
-    if (is_elec && env_has_truthy(envp, "ELECTRON_RUN_AS_NODE")) {
-      return argv;
+    if (is_elec) {
+      if (env_has_truthy(envp, "ELECTRON_RUN_AS_NODE")) return argv;
+      if (!is_elf_target(path, envp)) return argv;
     }
     size_t argc = 0;
     int has_no_sandbox = 0;
@@ -175,30 +224,41 @@ __attribute__((visibility("hidden"))) char *const *bl_webhelper_argv(const char 
 __attribute__((visibility("hidden"))) char *const *bl_webhelper_envp(const char *path, char *const argv[], char *const envp[]) {
   const char *const *extra = NULL;
   if (is_firefox_prog(path) || (argv && argv[0] && is_firefox_prog(argv[0]))) {
-    apply_firefox_env();
     extra = kFirefoxEnvVars;
   } else if (is_electron_prog(path) || (argv && argv[0] && is_electron_prog(argv[0])) ||
              is_chromium_prog(path) || (argv && argv[0] && is_chromium_prog(argv[0]))) {
-    apply_electron_env();
     extra = kElectronEnvVars;
   } else {
-    return envp;
+    return envp ? envp : environ;
   }
-  if (!envp || envp == environ) {
-    return environ;
-  }
+  char *const *src = envp ? envp : environ;
   size_t env_count = 0;
-  while (envp[env_count]) env_count++;
+  while (src && src[env_count]) env_count++;
   size_t extra_count = 0;
   while (extra[extra_count]) extra_count++;
   char **merged = calloc(env_count + extra_count + 1, sizeof(char *));
-  if (!merged) return envp;
-  for (size_t i = 0; i < env_count; i++) {
-    merged[i] = envp[i];
-  }
+  if (!merged) return src;
+  size_t out_idx = 0;
   for (size_t j = 0; j < extra_count; j++) {
-    merged[env_count + j] = (char *)extra[j];
+    merged[out_idx++] = (char *)extra[j];
   }
-  merged[env_count + extra_count] = NULL;
+  for (size_t i = 0; i < env_count; i++) {
+    if (!extra_defines_key(extra, src[i])) {
+      merged[out_idx++] = src[i];
+    }
+  }
+  merged[out_idx] = NULL;
   return merged;
+}
+
+__attribute__((visibility("hidden"))) void bl_webhelper_free(char *const *argv, char *const *argv_in,
+                                                             char *const *envp, char *const *envp_in) {
+  int saved = errno;
+  if (argv && argv != argv_in) {
+    free((void *)argv);
+  }
+  if (envp && envp != envp_in && envp != environ) {
+    free((void *)envp);
+  }
+  errno = saved;
 }

@@ -35,9 +35,14 @@ FLAGS_1 = {
 PRESERVE_KEYS = (
     "LD_PRELOAD",
     "LINUXDROID_ROOT_SOCKET",
+    "BL_DESKTOP",
     "HOME",
     "USER",
     "LOGNAME",
+    "LANG",
+    "LC_ALL",
+    "TERM",
+    "PULSE_SERVER",
     "XDG_RUNTIME_DIR",
     "DISPLAY",
     "WAYLAND_DISPLAY",
@@ -151,7 +156,11 @@ def main(argv):
         return 1
 
     if clear_env:
-        preserved = {k: os.environ[k] for k in PRESERVE_KEYS if k in os.environ}
+        keep_keys = list(PRESERVE_KEYS)
+        if not is_host:
+            keep_keys.extend(SANDBOX_ONLY_ENV_KEYS)
+            keep_keys.append("PATH")
+        preserved = {k: os.environ[k] for k in keep_keys if k in os.environ}
         os.environ.clear()
         os.environ.update(preserved)
 
@@ -179,8 +188,10 @@ def main(argv):
             saved_val = os.environ.pop(saved_k, None)
             if saved_val:
                 os.environ[real_k] = saved_val
+        os.environ["PATH"] = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+    elif "PATH" not in os.environ:
+        os.environ["PATH"] = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 
-    os.environ["PATH"] = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
     for k in env_unsets:
         if k != "LINUXDROID_ROOT_SOCKET":
             os.environ.pop(k, None)

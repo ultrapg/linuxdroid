@@ -102,6 +102,16 @@ int linkat(int olddirfd, const char *oldpath, int newdirfd, const char *newpath,
   return result;
 }
 
+static int is_real_symlink_at(int dfd, const char *name) {
+  char target[PATH_MAX];
+  ssize_t n = readlinkat(dfd, name, target, sizeof(target) - 1);
+  if (n <= 0) return 0;
+  target[n] = '\0';
+  const char *base = strrchr(target, '/');
+  base = base ? base + 1 : target;
+  return !is_l2s_entry(base);
+}
+
 struct dirent *readdir(DIR *dirp) {
   static struct dirent *(*real_readdir)(DIR *);
   if (real_readdir == NULL) real_readdir = dlsym(RTLD_NEXT, "readdir");
@@ -115,7 +125,7 @@ struct dirent *readdir(DIR *dirp) {
     }
     if (ent->d_type == DT_LNK) {
       int dfd = dirfd(dirp);
-      if (dfd >= 0) {
+      if (dfd >= 0 && !is_real_symlink_at(dfd, ent->d_name)) {
         struct stat st;
         if (fstatat(dfd, ent->d_name, &st, AT_SYMLINK_NOFOLLOW) == 0) {
           ent->d_type = IFTODT(st.st_mode);
@@ -141,7 +151,7 @@ struct dirent64 *readdir64(DIR *dirp) {
     }
     if (ent->d_type == DT_LNK) {
       int dfd = dirfd(dirp);
-      if (dfd >= 0) {
+      if (dfd >= 0 && !is_real_symlink_at(dfd, ent->d_name)) {
         struct stat64 st;
         if (fstatat64(dfd, ent->d_name, &st, AT_SYMLINK_NOFOLLOW) == 0) {
           ent->d_type = IFTODT(st.st_mode);

@@ -215,6 +215,7 @@ object LinuxRuntime {
     ): MutableList<String> {
         val cmd = ArrayList<String>()
         cmd.add(prootBinary(context).absolutePath)
+        cmd.add("--link2symlink")
         cmd.add("--kill-on-exit")
         cmd.add("--kernel-release=${guestUtsname("linuxdroid")}")
         val uid = Process.myUid()

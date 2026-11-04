@@ -268,7 +268,6 @@ object RootSpawner {
 
         try {
             val cmd = LinuxRuntime.prootPrefix(context, root, cwd, fakeRoot = true)
-            cmd.add(1, "--link2symlink")
             for (spec in LinuxRuntime.lastBinds(context)) {
                 if (!spec.startsWith("/proc/self/fd/")) {
                     cmd.add("-b")
