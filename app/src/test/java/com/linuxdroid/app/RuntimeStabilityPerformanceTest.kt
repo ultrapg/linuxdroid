@@ -254,5 +254,19 @@ class RuntimeStabilityPerformanceTest {
 
         val appsSh = File(assetsRoot, "usr/local/bin/linuxdroid-apps").readText()
         assertTrue(appsSh.contains("flatpak --user install -y --or-update flathub io.github.flattool.Warehouse"))
+
+        val desktopSh = File(assetsRoot, "usr/local/bin/linuxdroid-desktop").readText()
+        assertTrue(
+            "KDE taskbar default pins must be Settings, Dolphin, and Firefox only",
+            desktopSh.contains("applications:systemsettings.desktop,applications:org.kde.dolphin.desktop,applications:firefox.desktop"),
+        )
+        assertFalse(
+            "KDE taskbar default pins must not include preferred:// or Discover",
+            desktopSh.contains("applications:systemsettings.desktop,applications:org.kde.discover.desktop,preferred://filemanager,preferred://browser"),
+        )
+        assertTrue(
+            "XFCE taskbar default pins must be Settings, Thunar, and Firefox only",
+            desktopSh.contains("[\"xfce-settings-manager.desktop\", \"thunar.desktop\", \"firefox.desktop\"]"),
+        )
     }
 }

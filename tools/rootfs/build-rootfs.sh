@@ -604,6 +604,10 @@ MOZLIST
     '
   fi
   stage_linuxfs_overlay "$WORK_DIR/kde" "Ubuntu 24.04 LTS — KDE Plasma (Wayland)"
+  sudo sed -i -E 's#<default>[^<]*systemsettings\.desktop[^<]*</default>#<default>applications:systemsettings.desktop,applications:org.kde.dolphin.desktop,applications:firefox.desktop</default>#g' \
+    "$WORK_DIR/kde/usr/share/plasma/plasmoids/org.kde.plasma.taskmanager/contents/config/main.xml" || true
+  sudo sed -i 's#panel\.addWidget("org\.kde\.plasma\.icontasks")#var icontasks = panel.addWidget("org.kde.plasma.icontasks"); icontasks.currentConfigGroup = ["General"]; icontasks.writeConfig("launchers", "applications:systemsettings.desktop,applications:org.kde.dolphin.desktop,applications:firefox.desktop");#' \
+    "$WORK_DIR/kde/usr/share/plasma/layout-templates/org.kde.plasma.desktop.defaultPanel/contents/layout.js" || true
   smoke_test_rootfs "$WORK_DIR/kde" "/usr/bin/startplasma-wayland"
   local kde_archive="$OUT_DIR/linuxdroid-ubuntu-kde-arm64.tar.zst"
   clean_and_pack_rootfs "$WORK_DIR/kde" "$kde_archive"

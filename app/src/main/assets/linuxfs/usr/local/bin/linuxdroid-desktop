@@ -97,23 +97,40 @@ start_x11_helpers() {
   ) &
 }
 
-# Remove task manager launchers whose .desktop file is not installed (Plasma's default pins Discover,
-# which would show up as a blank icon). Handles existing configs on disk and the live shell config.
+# Configure default taskbar pinned launchers to strictly Settings, Dolphin (File Explorer), and Firefox,
+# while preserving all standard panel/taskbar widgets and removing missing Discover entries.
 prune_missing_launchers() {
+  local default_launchers="applications:systemsettings.desktop,applications:org.kde.dolphin.desktop,applications:firefox.desktop"
   local rc="$HOME/.config/plasma-org.kde.plasma.desktop-appletsrc"
-  local stamp="$HOME/.local/share/linuxdroid/launchers-v2" first=1
+  local stamp="$HOME/.local/share/linuxdroid/launchers-v3" first=1
   [ -e "$stamp" ] && first=0
+
+  local tm_xml="/usr/share/plasma/plasmoids/org.kde.plasma.taskmanager/contents/config/main.xml"
+  local panel_js="/usr/share/plasma/layout-templates/org.kde.plasma.desktop.defaultPanel/contents/layout.js"
+  if [ -f "$tm_xml" ] && grep -q -E "org\.kde\.discover\.desktop|preferred://" "$tm_xml" 2>/dev/null; then
+    sed -i -E "s#<default>[^<]*systemsettings\.desktop[^<]*</default>#<default>${default_launchers}</default>#g" "$tm_xml" 2>/dev/null || \
+      linuxdroid-root sed -i -E "s#<default>[^<]*systemsettings\.desktop[^<]*</default>#<default>${default_launchers}</default>#g" "$tm_xml" 2>/dev/null || true
+  fi
+  if [ -f "$panel_js" ] && ! grep -q 'writeConfig("launchers"' "$panel_js" 2>/dev/null; then
+    sed -i "s#panel\.addWidget(\"org\.kde\.plasma\.icontasks\")#var icontasks = panel.addWidget(\"org.kde.plasma.icontasks\"); icontasks.currentConfigGroup = [\"General\"]; icontasks.writeConfig(\"launchers\", \"${default_launchers}\");#" "$panel_js" 2>/dev/null || \
+      linuxdroid-root sed -i "s#panel\.addWidget(\"org\.kde\.plasma\.icontasks\")#var icontasks = panel.addWidget(\"org.kde.plasma.icontasks\"); icontasks.currentConfigGroup = [\"General\"]; icontasks.writeConfig(\"launchers\", \"${default_launchers}\");#" "$panel_js" 2>/dev/null || true
+  fi
+
   if [ -f "$rc" ]; then
-    if [ ! -e /usr/share/applications/org.kde.discover.desktop ]; then
-      sed -i -E '/^launchers=/ { s#,applications:org\.kde\.discover\.desktop##g; s#=applications:org\.kde\.discover\.desktop,?#=#; }' "$rc" 2>/dev/null || true
+    if [ "$first" = 1 ]; then
+      sed -i -E "s#^launchers=.*#launchers=${default_launchers}#" "$rc" 2>/dev/null || true
+    else
+      if [ ! -e /usr/share/applications/org.kde.discover.desktop ]; then
+        sed -i -E '/^launchers=/ { s#,applications:org\.kde\.discover\.desktop##g; s#=applications:org\.kde\.discover\.desktop,?#=#; }' "$rc" 2>/dev/null || true
+      fi
+      # An empty launchers list hides every pinned icon; drop it so Plasma falls back to its defaults.
+      sed -i '/^launchers=$/d' "$rc" 2>/dev/null || true
     fi
-    # An empty launchers list hides every pinned icon; drop it so Plasma falls back to its defaults.
-    sed -i '/^launchers=$/d' "$rc" 2>/dev/null || true
   fi
   local js='
-    var defaults = "applications:systemsettings.desktop,applications:org.kde.discover.desktop,preferred://filemanager,preferred://browser";
+    var defaults = "'"$default_launchers"'";
+    var forceReset = '"$([ "$first" = 1 ] && echo true || echo false)"';
     var dropDiscover = '"$([ -e /usr/share/applications/org.kde.discover.desktop ] && echo false || echo true)"';
-    var repairEmpty = '"$([ "$first" = 1 ] && echo true || echo false)"';
     var ps = panels();
     for (var i = 0; i < ps.length; i++) {
       var ws = ps[i].widgets();
@@ -121,14 +138,23 @@ prune_missing_launchers() {
         var w = ws[j];
         if (w.type == "org.kde.plasma.icontasks" || w.type == "org.kde.plasma.taskmanager") {
           w.currentConfigGroup = ["General"];
+          if (forceReset) {
+            w.writeConfig("launchers", defaults);
+            continue;
+          }
           var cur = String(w.readConfig("launchers", defaults));
-          if (cur.length == 0 && repairEmpty) { cur = defaults; }
-          if (cur.length == 0) { continue; }
+          if (cur.length == 0 || cur.indexOf("preferred://") >= 0) {
+            w.writeConfig("launchers", defaults);
+            continue;
+          }
           var keep = cur.split(",").filter(function (l) {
             return l.length > 0 && !(dropDiscover && l.indexOf("org.kde.discover.desktop") >= 0);
           });
-          if (keep.length > 0 && keep.join(",") != cur) { w.writeConfig("launchers", keep.join(",")); }
-          else if (keep.length > 0 && String(w.readConfig("launchers", "")).length == 0) { w.writeConfig("launchers", keep.join(",")); }
+          if (keep.length == 0) {
+            w.writeConfig("launchers", defaults);
+          } else if (keep.join(",") != cur || String(w.readConfig("launchers", "")).length == 0) {
+            w.writeConfig("launchers", keep.join(","));
+          }
         }
       }
     }'
@@ -245,7 +271,7 @@ ENTRY
           dbus-send --session --dest=org.kde.KWin --type=method_call /VirtualKeyboard org.freedesktop.DBus.Properties.Set string:"org.kde.kwin.VirtualKeyboard" string:"enabled" variant:boolean:true >/dev/null 2>&1 || true
           sleep 0.2
           prune_missing_launchers
-          mkdir -p "$HOME/.local/share/linuxdroid" && : > "$HOME/.local/share/linuxdroid/launchers-v2"
+          mkdir -p "$HOME/.local/share/linuxdroid" && : > "$HOME/.local/share/linuxdroid/launchers-v3"
           write_status "READY|KDE Plasma desktop ready" "== [BOOT READY] KDE Plasma desktop ready"
           break
         fi
@@ -337,6 +363,51 @@ set_prop(gen_grp, "use_compositing", "bool", "false")
 set_prop(gen_grp, "vblank_mode", "string", "off")
 set_prop(gen_grp, "theme", "string", wm_theme)
 xfwm_tree.write(xfwm_target, encoding="UTF-8", xml_declaration=True)
+
+# 3. xfce4-panel.xml default pinned launchers: Settings, File Explorer (Thunar), and Firefox only
+home_dir = os.path.expanduser("~")
+xfce_stamp = os.path.join(home_dir, ".local", "share", "linuxdroid", "xfce-launchers-v3")
+panel_target = os.path.join(conf_dir, "xfce4-panel.xml")
+if not os.path.exists(xfce_stamp) or not os.path.isfile(panel_target):
+    _, panel_tree, panel_root = load_channel(
+        "xfce4-panel.xml",
+        "xfce4-panel",
+        "/etc/xdg/xfce4/panel/default.xml",
+    )
+    pinned_desktops = ["xfce-settings-manager.desktop", "thunar.desktop", "firefox.desktop"]
+    plugins_el = None
+    panels_el = None
+    for child in panel_root.findall("property"):
+        if child.get("name") == "plugins":
+            plugins_el = child
+        elif child.get("name") == "panels":
+            panels_el = child
+    if plugins_el is not None:
+        launcher_props = [
+            p for p in plugins_el.findall("property") if p.get("value") == "launcher"
+        ]
+        removed_ids = set()
+        for idx, lp in enumerate(launcher_props):
+            if idx < len(pinned_desktops):
+                for sub in list(lp):
+                    lp.remove(sub)
+                items_el = ET.SubElement(lp, "property", {"name": "items", "type": "array"})
+                ET.SubElement(items_el, "value", {"type": "string", "value": pinned_desktops[idx]})
+            else:
+                pname = lp.get("name", "")
+                if pname.startswith("plugin-"):
+                    removed_ids.add(pname[len("plugin-") :])
+                plugins_el.remove(lp)
+        if removed_ids and panels_el is not None:
+            for p_el in panels_el.findall("property"):
+                for prop in p_el.findall("property"):
+                    if prop.get("name") == "plugin-ids":
+                        for val_el in list(prop.findall("value")):
+                            if val_el.get("value") in removed_ids:
+                                prop.remove(val_el)
+        panel_tree.write(panel_target, encoding="UTF-8", xml_declaration=True)
+        os.makedirs(os.path.dirname(xfce_stamp), exist_ok=True)
+        open(xfce_stamp, "w").close()
 PY
 }
 
