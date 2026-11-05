@@ -414,14 +414,18 @@ object SessionPrefs {
         val safeH = (pixelHeight and 1.inv()).coerceAtLeast(480)
         val scale = computeEffectiveScaleForExplicit(explicitScale, safeW, safeH)
         return if (usesWaylandLogicalScale && scale > 1.01f) {
-            val logicalW = ((safeW / scale).roundToInt() and 1.inv()).coerceAtLeast(480)
-            val logicalH = ((safeH / scale).roundToInt() and 1.inv()).coerceAtLeast(320)
+            // Nested KWin 5.27 mishandles fractional output scales (wl_output scale is ceil'd while its
+            // buffer is multiplied by the fractional value), which draws a second scaled desktop. Use a
+            // whole-number Wayland scale and compensate the remainder with font DPI in the session.
+            val wlScale = scale.roundToInt().coerceAtLeast(1).toFloat()
+            val logicalW = ((safeW / wlScale).roundToInt() and 1.inv()).coerceAtLeast(480)
+            val logicalH = ((safeH / wlScale).roundToInt() and 1.inv()).coerceAtLeast(320)
             CompositorGeometry(
                 pixelWidth = safeW,
                 pixelHeight = safeH,
                 compositorWidth = logicalW,
                 compositorHeight = logicalH,
-                compositorScale = scale,
+                compositorScale = wlScale,
                 effectiveScale = scale,
             )
         } else {

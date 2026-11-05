@@ -187,6 +187,8 @@ class SessionService : Service() {
         } else {
             "%.2f".format(java.util.Locale.US, scale).trimEnd('0').trimEnd('.')
         }
+        val wlScale = geom.compositorScale
+        val wlScaleText = if (wlScale % 1.0f == 0f) wlScale.toInt().toString() else "%.2f".format(java.util.Locale.US, wlScale)
         val scalePct = (scale * 100f).roundToInt()
         val resolutionSummary = "${geom.pixelWidth}×${geom.pixelHeight} (${scalePct}%) @ ${refreshHz.toInt()}Hz"
 
@@ -346,7 +348,8 @@ class SessionService : Service() {
             put("BL_PIXEL_HEIGHT", geom.pixelHeight.toString())
             put("BL_WIDTH", geom.compositorWidth.toString())
             put("BL_HEIGHT", geom.compositorHeight.toString())
-            put("BL_SCALE", scaleText)
+            put("BL_SCALE", if (SessionPrefs.usesWaylandLogicalScale(this@SessionService)) wlScaleText else scaleText)
+            put("BL_UI_SCALE", scaleText)
             put("BL_REFRESH", refreshHz.toInt().toString())
             put("BL_CPU_COUNT", effectiveCpuCores.toString())
             if (affinityCores.isNotEmpty()) {

@@ -55,8 +55,9 @@ class ScalingAndImeBridgeTest {
         assertEquals(1.75f, geom.effectiveScale, 0.001f)
         assertEquals(0, geom.compositorWidth % 2)
         assertEquals(0, geom.compositorHeight % 2)
-        assertTrue(geom.compositorWidth in 1780..1784)
-        assertTrue(geom.compositorHeight in 822..824)
+        assertEquals(2.0f, geom.compositorScale, 0.001f)
+        assertEquals(1560, geom.compositorWidth)
+        assertEquals(720, geom.compositorHeight)
     }
 
     @Test

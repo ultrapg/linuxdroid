@@ -617,7 +617,9 @@ ENTRY
     "$KWRITECONFIG" --file kdeglobals --group KDE --key AnimationDurationFactor 0 2>/dev/null || true
     # KWin Wayland applies native --scale $SCALE directly to Wayland outputs, so forceFontDPI must stay 0
     # to avoid double-multiplying font sizes.
-    "$KWRITECONFIG" --file kcmfonts --group General --key forceFontDPI 0 2>/dev/null || true
+    # The Wayland output uses a whole-number scale; the remaining fractional UI scale is applied as font DPI.
+    font_dpi=$(python3 -c "s=float('$SCALE'); u=float('${BL_UI_SCALE:-$SCALE}'); print(int(round(96*u/s)) if abs(u-s)>0.01 else 0)" 2>/dev/null || echo 0)
+    "$KWRITECONFIG" --file kcmfonts --group General --key forceFontDPI "$font_dpi" 2>/dev/null || true
     # One-time desktop-style defaults (applied once so later user changes are kept): double-click to open
     # files, and a snappy hardware keyboard repeat rate for external keyboards.
     tuned_stamp="$HOME/.local/share/linuxdroid/desktop-tuned-v1"
