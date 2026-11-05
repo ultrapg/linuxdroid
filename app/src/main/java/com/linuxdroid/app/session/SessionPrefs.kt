@@ -127,6 +127,7 @@ data class SessionConfigSignature(
     val username: String,
     val micEnabled: Boolean,
     val gpuApps: Boolean,
+    val gpuDesktop: Boolean,
     val customMountsHash: Int,
 )
 
@@ -260,7 +261,7 @@ object SessionPrefs {
     }
 
     fun resolutionPreset(context: Context): ResolutionPreset =
-        ResolutionPreset.fromId(prefs(context).getString("resolution_preset", ResolutionPreset.BALANCED_900P.id))
+        ResolutionPreset.fromId(prefs(context).getString("resolution_preset", ResolutionPreset.NATIVE.id))
 
     fun setResolutionPreset(context: Context, preset: ResolutionPreset) {
         prefs(context).edit().putString("resolution_preset", preset.id).apply()
@@ -316,6 +317,20 @@ object SessionPrefs {
 
     fun setGpuApps(context: Context, enabled: Boolean) {
         prefs(context).edit().putBoolean("gpu_apps", enabled).apply()
+    }
+
+    /** GPU compositing for the KDE desktop itself (KWin OpenGL + GPU Qt Quick). Falls back to software on failure. */
+    fun gpuDesktop(context: Context): Boolean =
+        prefs(context).getBoolean("gpu_desktop", true)
+
+    fun setGpuDesktop(context: Context, enabled: Boolean) {
+        prefs(context).edit().putBoolean("gpu_desktop", enabled).apply()
+        // Re-enabling clears a previous automatic software fallback so the GPU desktop is tried again.
+        if (enabled) {
+            runCatching {
+                File(LinuxRuntime.rootDir(context), "home/${username(context)}/.cache/linuxdroid/gpu-desktop-failed").delete()
+            }
+        }
     }
 
     fun prootFastPath(context: Context): Boolean =
@@ -442,6 +457,7 @@ object SessionPrefs {
         username = username(context),
         micEnabled = micEnabled(context),
         gpuApps = gpuApps(context),
+        gpuDesktop = gpuDesktop(context),
         customMountsHash = customMounts(context).hashCode(),
     )
 }

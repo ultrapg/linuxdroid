@@ -221,6 +221,7 @@ private fun DashboardScreen(
     var touchMode by remember { mutableStateOf(SessionPrefs.touchInputMode(context)) }
     var showFloatingControls by remember { mutableStateOf(SessionPrefs.showFloatingControls(context)) }
     var micEnabled by remember { mutableStateOf(SessionPrefs.micEnabled(context)) }
+    var gpuDesktopEnabled by remember { mutableStateOf(SessionPrefs.gpuDesktop(context)) }
     var gpuAppsEnabled by remember { mutableStateOf(SessionPrefs.gpuApps(context)) }
     var fastPathEnabled by remember { mutableStateOf(SessionPrefs.prootFastPath(context)) }
     var noSeccompEnabled by remember { mutableStateOf(SessionPrefs.prootNoSeccomp(context)) }
@@ -256,6 +257,7 @@ private fun DashboardScreen(
         gpuMode,
         fastPathEnabled,
         gpuAppsEnabled,
+        gpuDesktopEnabled,
         noSeccompEnabled,
         username,
         micEnabled,
@@ -527,6 +529,11 @@ private fun DashboardScreen(
                             onSelectGpuMode = { mode ->
                                 gpuMode = mode
                                 SessionPrefs.setGpuMode(context, mode)
+                            },
+                            gpuDesktopEnabled = gpuDesktopEnabled,
+                            onToggleGpuDesktop = {
+                                gpuDesktopEnabled = it
+                                SessionPrefs.setGpuDesktop(context, it)
                             },
                             gpuAppsEnabled = gpuAppsEnabled,
                             onToggleGpuApps = {
@@ -1116,6 +1123,8 @@ private fun HardwareTabContent(
     gpuMode: GpuDriverMode,
     resolvedGpuSummary: String,
     onSelectGpuMode: (GpuDriverMode) -> Unit,
+    gpuDesktopEnabled: Boolean,
+    onToggleGpuDesktop: (Boolean) -> Unit,
     gpuAppsEnabled: Boolean,
     onToggleGpuApps: (Boolean) -> Unit,
     fastPathEnabled: Boolean,
@@ -1408,6 +1417,13 @@ private fun HardwareTabContent(
     // 3. Execution Engine Tuning Card
     SectionCard {
         SectionHeader("Execution Engine")
+        SettingToggleRow(
+            title = "GPU Desktop Compositing",
+            subtitle = "Draw the desktop, panels and window UIs on the GPU for smoother scrolling and animations. If it fails to start, LinuxDroid falls back to software automatically.",
+            checked = gpuDesktopEnabled,
+            onCheckedChange = onToggleGpuDesktop,
+        )
+        HorizontalDivider(modifier = Modifier.padding(vertical = 8.dp))
         SettingToggleRow(
             title = "GPU Acceleration for Apps",
             subtitle = "Run Firefox, video players, Blender, Krita, GIMP, Kdenlive, OBS and games on the GPU. Apps that fail to start fall back to software automatically. The desktop shell itself stays software-composited.",

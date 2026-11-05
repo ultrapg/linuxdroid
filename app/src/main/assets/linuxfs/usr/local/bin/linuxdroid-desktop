@@ -531,8 +531,11 @@ if [ "$desktop_choice" = "kde" ]; then
   # reliably across Snapdragon KGSL, MediaTek, and Exynos without requiring DRM/GBM modesetting.
   # Native SoC Vulkan (Turnip / Venus / PanVK) remains active via VK_ICD_FILENAMES, and full
   # hardware OpenGL is available anytime via `linuxdroid-gpu <program>`.
-  export KWIN_COMPOSE=Q
-  export QT_QUICK_BACKEND=software
+  gpu_fail="${XDG_CACHE_HOME:-$HOME/.cache}/linuxdroid/gpu-desktop-failed"
+  gpu_desktop=0
+  if [ "${BL_GPU_DESKTOP:-0}" = "1" ] && [ ! -e "$gpu_fail" ]; then
+    gpu_desktop=1
+  fi
   unset GALLIUM_THREAD
   export LP_NUM_THREADS="${BL_CPU_COUNT:-4}"
   export QSG_RENDER_LOOP=basic
@@ -540,9 +543,24 @@ if [ "$desktop_choice" = "kde" ]; then
   export KWIN_EFFECTS_FORCE_ANIMATIONS=0
   export KWIN_WAYLAND_NO_PERMISSION_CHECKS=1
   export KWIN_SCREENSHOT_NO_PERMISSION_CHECKS=1
-  unset MESA_NO_ERROR MESA_LOADER_DRIVER_OVERRIDE LIBGL_KOPPER_DRI2 MESA_GL_VERSION_OVERRIDE MESA_GLSL_VERSION_OVERRIDE
-  export LIBGL_ALWAYS_SOFTWARE=1
-  export GALLIUM_DRIVER=llvmpipe
+  unset MESA_NO_ERROR
+  if [ "$gpu_desktop" = 1 ]; then
+    # GPU desktop: KWin composites with OpenGL (Zink/Turnip or Venus/VirGL from gpu.env) and Plasma's
+    # Qt Quick scene graph renders on the GPU. KWin falls back to QPainter by itself if OpenGL fails to
+    # initialise, and an early crash re-launches the desktop in software mode (see below).
+    unset KWIN_COMPOSE QT_QUICK_BACKEND LIBGL_ALWAYS_SOFTWARE
+    "$KWRITECONFIG" --file kwinrc --group Compositing --key Backend OpenGL 2>/dev/null || true
+    echo "== linuxdroid-desktop: GPU desktop compositing enabled (${LINUXDROID_GPU_ACTIVE:-gpu})"
+  else
+    # Software desktop: nested KWin uses QPainter wl_shm into LinuxDroid's Vulkan compositor so it
+    # starts reliably on any device without DRM/GBM modesetting.
+    export KWIN_COMPOSE=Q
+    export QT_QUICK_BACKEND=software
+    unset MESA_LOADER_DRIVER_OVERRIDE LIBGL_KOPPER_DRI2 MESA_GL_VERSION_OVERRIDE MESA_GLSL_VERSION_OVERRIDE
+    export LIBGL_ALWAYS_SOFTWARE=1
+    export GALLIUM_DRIVER=llvmpipe
+    "$KWRITECONFIG" --file kwinrc --group Compositing --key Backend QPainter 2>/dev/null || true
+  fi
 
   mkdir -p "$HOME/.local/share/applications" "$HOME/.config"
   cat > "$HOME/.local/share/applications/linuxdroid-ime.desktop" <<'ENTRY'
@@ -636,6 +654,11 @@ ENTRY
   '
   rc=$?
   echo "== linuxdroid-desktop: KDE Plasma Wayland exited (code=$rc)"
+  if [ "$gpu_desktop" = 1 ] && [ "$SECONDS" -lt 45 ]; then
+    echo "== linuxdroid-desktop: GPU desktop exited early; falling back to software compositing"
+    mkdir -p "${gpu_fail%/*}" && : > "$gpu_fail"
+    exec "$0" "$@"
+  fi
   exit "$rc"
 fi
 

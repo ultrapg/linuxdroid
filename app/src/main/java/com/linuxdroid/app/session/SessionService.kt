@@ -357,6 +357,7 @@ class SessionService : Service() {
             put("BL_LOG", sessionLogFile.absolutePath)
             put("BL_BOOT_STATUS", bootStatusFile.absolutePath)
             put("BL_GPU_APPS", if (SessionPrefs.gpuApps(this@SessionService) && gpuConfig.activeBackend != "software") "1" else "0")
+            put("BL_GPU_DESKTOP", if (SessionPrefs.gpuDesktop(this@SessionService) && gpuConfig.activeBackend != "software") "1" else "0")
             put("LINUXDROID_DESKTOP", SessionPrefs.desktopEnvironment(this@SessionService))
             put("LINUXDROID_ROOT_SOCKET", RootSpawner.socketName(this@SessionService))
             put("FLATPAK_BWRAP", "/usr/local/bin/bwrap")
