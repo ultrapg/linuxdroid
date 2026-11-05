@@ -126,6 +126,7 @@ data class SessionConfigSignature(
     val noSeccomp: Boolean,
     val username: String,
     val micEnabled: Boolean,
+    val gpuApps: Boolean,
     val customMountsHash: Int,
 )
 
@@ -309,6 +310,14 @@ object SessionPrefs {
         prefs(context).edit().putBoolean("mic_enabled", enabled).apply()
     }
 
+    /** GPU acceleration for apps that support it (browser, video, creative tools). The desktop shell stays software-composited. */
+    fun gpuApps(context: Context): Boolean =
+        prefs(context).getBoolean("gpu_apps", true)
+
+    fun setGpuApps(context: Context, enabled: Boolean) {
+        prefs(context).edit().putBoolean("gpu_apps", enabled).apply()
+    }
+
     fun prootFastPath(context: Context): Boolean =
         prefs(context).getBoolean("proot_fast_path", true)
 
@@ -432,6 +441,7 @@ object SessionPrefs {
         noSeccomp = prootNoSeccomp(context),
         username = username(context),
         micEnabled = micEnabled(context),
+        gpuApps = gpuApps(context),
         customMountsHash = customMounts(context).hashCode(),
     )
 }

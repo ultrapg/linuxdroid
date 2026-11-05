@@ -221,6 +221,7 @@ private fun DashboardScreen(
     var touchMode by remember { mutableStateOf(SessionPrefs.touchInputMode(context)) }
     var showFloatingControls by remember { mutableStateOf(SessionPrefs.showFloatingControls(context)) }
     var micEnabled by remember { mutableStateOf(SessionPrefs.micEnabled(context)) }
+    var gpuAppsEnabled by remember { mutableStateOf(SessionPrefs.gpuApps(context)) }
     var fastPathEnabled by remember { mutableStateOf(SessionPrefs.prootFastPath(context)) }
     var noSeccompEnabled by remember { mutableStateOf(SessionPrefs.prootNoSeccomp(context)) }
     var username by remember { mutableStateOf(SessionPrefs.username(context)) }
@@ -254,6 +255,7 @@ private fun DashboardScreen(
         selectedCpuSpec,
         gpuMode,
         fastPathEnabled,
+        gpuAppsEnabled,
         noSeccompEnabled,
         username,
         micEnabled,
@@ -525,6 +527,11 @@ private fun DashboardScreen(
                             onSelectGpuMode = { mode ->
                                 gpuMode = mode
                                 SessionPrefs.setGpuMode(context, mode)
+                            },
+                            gpuAppsEnabled = gpuAppsEnabled,
+                            onToggleGpuApps = {
+                                gpuAppsEnabled = it
+                                SessionPrefs.setGpuApps(context, it)
                             },
                             fastPathEnabled = fastPathEnabled,
                             onToggleFastPath = {
@@ -1109,6 +1116,8 @@ private fun HardwareTabContent(
     gpuMode: GpuDriverMode,
     resolvedGpuSummary: String,
     onSelectGpuMode: (GpuDriverMode) -> Unit,
+    gpuAppsEnabled: Boolean,
+    onToggleGpuApps: (Boolean) -> Unit,
     fastPathEnabled: Boolean,
     onToggleFastPath: (Boolean) -> Unit,
     noSeccompEnabled: Boolean,
@@ -1399,6 +1408,13 @@ private fun HardwareTabContent(
     // 3. Execution Engine Tuning Card
     SectionCard {
         SectionHeader("Execution Engine")
+        SettingToggleRow(
+            title = "GPU Acceleration for Apps",
+            subtitle = "Run Firefox, video players, Blender, Krita, GIMP, Kdenlive, OBS and games on the GPU. Apps that fail to start fall back to software automatically. The desktop shell itself stays software-composited.",
+            checked = gpuAppsEnabled,
+            onCheckedChange = onToggleGpuApps,
+        )
+        HorizontalDivider(modifier = Modifier.padding(vertical = 8.dp))
         SettingToggleRow(
             title = "Fast-Path Syscall Acceleration",
             subtitle = "Accelerates ARM64 filesystem syscalls in-process for faster app startup, browsing, and compilation.",

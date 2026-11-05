@@ -1,0 +1,48 @@
+#!/bin/bash
+# LinuxDroid: launch an app with GPU acceleration (Zink/Turnip or Venus/VirGL) when enabled in Settings.
+# If the hardware launch fails right away, the app is restarted with software rendering and
+# remembered so later launches skip the GPU. Usage: linuxdroid-gpu-launch NAME_OR_PATH [ARGS...]
+set -u
+target="${1:-}"
+[ -n "$target" ] || { echo "usage: linuxdroid-gpu-launch PROGRAM [ARGS...]" >&2; exit 2; }
+shift
+
+resolve() {
+  case "$1" in
+    /*) [ -x "$1" ] && echo "$1" ;;
+    *)
+      local dirs d
+      IFS=: read -ra dirs <<< "$PATH"
+      for d in "${dirs[@]}"; do
+        [ "$d" = "/usr/local/bin" ] && continue
+        [ -x "$d/$1" ] && { echo "$d/$1"; return; }
+      done
+      ;;
+  esac
+}
+
+real="$(resolve "$target")"
+[ -n "$real" ] || { echo "$target: command not found" >&2; exit 127; }
+name="$(basename "$target")"
+mark="${XDG_CACHE_HOME:-$HOME/.cache}/linuxdroid/gpu-fallback"
+
+run_software() {
+  export LIBGL_ALWAYS_SOFTWARE=1 GALLIUM_DRIVER=llvmpipe
+  unset MESA_LOADER_DRIVER_OVERRIDE LIBGL_KOPPER_DRI2 MESA_GL_VERSION_OVERRIDE MESA_GLSL_VERSION_OVERRIDE ZINK_DESCRIPTORS
+  exec "$real" "$@"
+}
+
+if [ "${BL_GPU_APPS:-0}" != "1" ] || [ -e "$mark/$name" ]; then
+  run_software "$@"
+fi
+
+start="$(date +%s)"
+/usr/local/bin/linuxdroid-gpu "$real" "$@"
+rc=$?
+elapsed=$(( $(date +%s) - start ))
+if [ "$rc" -ne 0 ] && [ "$rc" -ne 130 ] && [ "$rc" -ne 143 ] && [ "$elapsed" -lt 6 ]; then
+  mkdir -p "$mark" 2>/dev/null && : > "$mark/$name" 2>/dev/null
+  echo "linuxdroid-gpu-launch: GPU start failed for $name (exit $rc); using software rendering." >&2
+  run_software "$@"
+fi
+exit "$rc"
