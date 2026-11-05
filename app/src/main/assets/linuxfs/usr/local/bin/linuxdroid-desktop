@@ -99,44 +99,174 @@ start_x11_helpers() {
 
 # Configure default taskbar pinned launchers to strictly Settings, Dolphin (File Explorer), and Firefox,
 # while preserving all standard panel/taskbar widgets and removing missing Discover entries.
-prune_missing_launchers() {
+configure_kde_default_launchers() {
   local default_launchers="applications:systemsettings.desktop,applications:org.kde.dolphin.desktop,applications:firefox.desktop"
-  local rc="$HOME/.config/plasma-org.kde.plasma.desktop-appletsrc"
-  local stamp="$HOME/.local/share/linuxdroid/launchers-v3" first=1
-  [ -e "$stamp" ] && first=0
-
+  local stamp="$HOME/.local/share/linuxdroid/launchers-v4"
   local tm_xml="/usr/share/plasma/plasmoids/org.kde.plasma.taskmanager/contents/config/main.xml"
   local panel_js="/usr/share/plasma/layout-templates/org.kde.plasma.desktop.defaultPanel/contents/layout.js"
-  if [ -f "$tm_xml" ] && grep -q -E "org\.kde\.discover\.desktop|preferred://" "$tm_xml" 2>/dev/null; then
-    sed -i -E "s#<default>[^<]*systemsettings\.desktop[^<]*</default>#<default>${default_launchers}</default>#g" "$tm_xml" 2>/dev/null || \
-      linuxdroid-root sed -i -E "s#<default>[^<]*systemsettings\.desktop[^<]*</default>#<default>${default_launchers}</default>#g" "$tm_xml" 2>/dev/null || true
+
+  local need_sys_patch=0
+  if [ -f "$tm_xml" ] && ! grep -q "<default>${default_launchers}</default>" "$tm_xml" 2>/dev/null; then
+    need_sys_patch=1
   fi
   if [ -f "$panel_js" ] && ! grep -q 'writeConfig("launchers"' "$panel_js" 2>/dev/null; then
-    sed -i "s#panel\.addWidget(\"org\.kde\.plasma\.icontasks\")#var icontasks = panel.addWidget(\"org.kde.plasma.icontasks\"); icontasks.currentConfigGroup = [\"General\"]; icontasks.writeConfig(\"launchers\", \"${default_launchers}\");#" "$panel_js" 2>/dev/null || \
-      linuxdroid-root sed -i "s#panel\.addWidget(\"org\.kde\.plasma\.icontasks\")#var icontasks = panel.addWidget(\"org.kde.plasma.icontasks\"); icontasks.currentConfigGroup = [\"General\"]; icontasks.writeConfig(\"launchers\", \"${default_launchers}\");#" "$panel_js" 2>/dev/null || true
+    need_sys_patch=1
+  fi
+  if [ "$need_sys_patch" = 1 ]; then
+    local sys_py='
+import os, re, sys
+defaults, tm_xml, panel_js = sys.argv[1], sys.argv[2], sys.argv[3]
+if os.path.isfile(tm_xml):
+    txt = open(tm_xml, "r", encoding="utf-8").read()
+    new_txt = re.sub(
+        r"(<entry\s+name=\"launchers\"[^>]*>.*?<default>)[^<]*(</default>)",
+        lambda m: m.group(1) + defaults + m.group(2),
+        txt,
+        flags=re.S,
+    )
+    if new_txt != txt:
+        open(tm_xml, "w", encoding="utf-8").write(new_txt)
+if os.path.isfile(panel_js):
+    txt = open(panel_js, "r", encoding="utf-8").read()
+    if "writeConfig(\"launchers\"" not in txt and "panel.addWidget(\"org.kde.plasma.icontasks\")" in txt:
+        repl = (
+            "var icontasks = panel.addWidget(\"org.kde.plasma.icontasks\");\n"
+            "icontasks.currentConfigGroup = [\"General\"];\n"
+            f"icontasks.writeConfig(\"launchers\", \"{defaults}\");"
+        )
+        new_txt = txt.replace("panel.addWidget(\"org.kde.plasma.icontasks\")", repl, 1)
+        open(panel_js, "w", encoding="utf-8").write(new_txt)
+'
+    python3 -B -c "$sys_py" "$default_launchers" "$tm_xml" "$panel_js" 2>/dev/null || \
+      linuxdroid-root python3 -B -c "$sys_py" "$default_launchers" "$tm_xml" "$panel_js" 2>/dev/null || true
   fi
 
-  if [ -f "$rc" ]; then
-    if [ "$first" = 1 ]; then
-      sed -i -E "s#^launchers=.*#launchers=${default_launchers}#" "$rc" 2>/dev/null || true
-    else
-      if [ ! -e /usr/share/applications/org.kde.discover.desktop ]; then
-        sed -i -E '/^launchers=/ { s#,applications:org\.kde\.discover\.desktop##g; s#=applications:org\.kde\.discover\.desktop,?#=#; }' "$rc" 2>/dev/null || true
-      fi
-      # An empty launchers list hides every pinned icon; drop it so Plasma falls back to its defaults.
-      sed -i '/^launchers=$/d' "$rc" 2>/dev/null || true
-    fi
-  fi
+  mkdir -p "$HOME/.config"
+  python3 -B - "$HOME/.config/plasma-org.kde.plasma.desktop-appletsrc" "$stamp" "$default_launchers" <<'PY' 2>/dev/null || true
+import os
+import re
+import sys
+
+rc_path, stamp_path, defaults = sys.argv[1], sys.argv[2], sys.argv[3]
+if not os.path.isfile(rc_path):
+    raise SystemExit(0)
+
+first_run = not os.path.exists(stamp_path)
+drop_discover = not os.path.exists("/usr/share/applications/org.kde.discover.desktop")
+
+with open(rc_path, "r", encoding="utf-8", errors="surrogateescape") as f:
+    raw_lines = f.readlines()
+
+sections = []
+cur_hdr = ""
+cur_lines = []
+for line in raw_lines:
+    stripped = line.strip()
+    if stripped.startswith("[") and stripped.endswith("]"):
+        sections.append([cur_hdr, cur_lines])
+        cur_hdr = stripped
+        cur_lines = []
+    else:
+        cur_lines.append(line)
+sections.append([cur_hdr, cur_lines])
+
+applet_re = re.compile(r"^\[Containments\]\[\d+\]\[Applets\]\[\d+\]$")
+task_prefixes = []
+for hdr, body in sections:
+    if applet_re.match(hdr):
+        for ln in body:
+            s = ln.strip()
+            if s in ("plugin=org.kde.plasma.icontasks", "plugin=org.kde.plasma.taskmanager"):
+                task_prefixes.append(hdr)
+                break
+
+changed = False
+if first_run and task_prefixes:
+    for prefix in task_prefixes:
+        cfg_hdr = prefix + "[Configuration][General]"
+        for hdr, body in sections:
+            if hdr.startswith(prefix + "[") and hdr != cfg_hdr:
+                new_body = [ln for ln in body if not ln.startswith("launchers=")]
+                if new_body != body:
+                    body[:] = new_body
+                    changed = True
+        cfg_idx = next((i for i, (h, _) in enumerate(sections) if h == cfg_hdr), None)
+        target_line = f"launchers={defaults}\n"
+        if cfg_idx is not None:
+            body = sections[cfg_idx][1]
+            found_key = False
+            new_body = []
+            for ln in body:
+                if ln.startswith("launchers="):
+                    if not found_key:
+                        if ln != target_line:
+                            changed = True
+                        new_body.append(target_line)
+                        found_key = True
+                    else:
+                        changed = True
+                else:
+                    new_body.append(ln)
+            if not found_key:
+                insert_at = len(new_body)
+                while insert_at > 0 and new_body[insert_at - 1].strip() == "":
+                    insert_at -= 1
+                new_body.insert(insert_at, target_line)
+                changed = True
+            body[:] = new_body
+        else:
+            parent_idx = next(i for i, (h, _) in enumerate(sections) if h == prefix)
+            if sections[parent_idx][1] and sections[parent_idx][1][-1].strip() != "":
+                sections[parent_idx][1].append("\n")
+            sections.insert(parent_idx + 1, [cfg_hdr, [target_line, "\n"]])
+            changed = True
+else:
+    for hdr, body in sections:
+        new_body = []
+        for ln in body:
+            if ln.startswith("launchers="):
+                val = ln[len("launchers="):].strip()
+                items = [
+                    x for x in val.split(",")
+                    if x and not (drop_discover and "org.kde.discover.desktop" in x)
+                ]
+                new_ln = f"launchers={','.join(items) if items else defaults}\n"
+                if new_ln != ln:
+                    changed = True
+                new_body.append(new_ln)
+            else:
+                new_body.append(ln)
+        body[:] = new_body
+
+if changed:
+    out = []
+    for hdr, body in sections:
+        if hdr:
+            out.append(hdr + "\n")
+        out.extend(body)
+    tmp_path = rc_path + ".tmp"
+    with open(tmp_path, "w", encoding="utf-8", errors="surrogateescape") as f:
+        f.writelines(out)
+    os.replace(tmp_path, rc_path)
+PY
+}
+
+sync_live_kde_launchers() {
+  local default_launchers="applications:systemsettings.desktop,applications:org.kde.dolphin.desktop,applications:firefox.desktop"
+  local stamp="$HOME/.local/share/linuxdroid/launchers-v4" first=1
+  [ -e "$stamp" ] && first=0
   local js='
     var defaults = "'"$default_launchers"'";
     var forceReset = '"$([ "$first" = 1 ] && echo true || echo false)"';
     var dropDiscover = '"$([ -e /usr/share/applications/org.kde.discover.desktop ] && echo false || echo true)"';
     var ps = panels();
+    var matched = 0;
     for (var i = 0; i < ps.length; i++) {
       var ws = ps[i].widgets();
       for (var j = 0; j < ws.length; j++) {
         var w = ws[j];
         if (w.type == "org.kde.plasma.icontasks" || w.type == "org.kde.plasma.taskmanager") {
+          matched++;
           w.currentConfigGroup = ["General"];
           if (forceReset) {
             w.writeConfig("launchers", defaults);
@@ -157,9 +287,21 @@ prune_missing_launchers() {
           }
         }
       }
-    }'
-  dbus-send --session --dest=org.kde.plasmashell --type=method_call /PlasmaShell \
-    org.kde.PlasmaShell.evaluateScript string:"$js" >/dev/null 2>&1 || true
+    }
+    if (matched > 0) { print("LAUNCHERS_READY:" + matched); }'
+  local reply
+  reply="$(dbus-send --session --dest=org.kde.plasmashell --type=method_call --print-reply /PlasmaShell \
+    org.kde.PlasmaShell.evaluateScript string:"$js" 2>/dev/null || true)"
+  if printf '%s' "$reply" | grep -q "LAUNCHERS_READY:"; then
+    mkdir -p "$HOME/.local/share/linuxdroid" && : > "$stamp"
+    return 0
+  fi
+  return 1
+}
+
+prune_missing_launchers() {
+  configure_kde_default_launchers
+  sync_live_kde_launchers || true
 }
 
 if [ "$desktop_choice" = "kde" ]; then
@@ -236,7 +378,7 @@ ENTRY
   fi
 
   echo "== linuxdroid-desktop: starting KDE Plasma Wayland (logical=${WIDTH}x${HEIGHT}, pixel=${PIXEL_WIDTH}x${PIXEL_HEIGHT}, scale=${SCALE}, KWIN_COMPOSE=${KWIN_COMPOSE})"
-  export -f start_x11_helpers prune_missing_launchers
+  export -f start_x11_helpers configure_kde_default_launchers sync_live_kde_launchers prune_missing_launchers
   dbus-run-session -- /bin/bash -c '
     if [ -n "${XDG_RUNTIME_DIR:-}" ] && [ -n "${DBUS_SESSION_BUS_ADDRESS:-}" ]; then
       printf "%s\n" "$DBUS_SESSION_BUS_ADDRESS" > "$XDG_RUNTIME_DIR/bus-address" 2>/dev/null || true
@@ -255,6 +397,7 @@ ENTRY
     (
       for _ in $(seq 1 150); do
         if [ -S "$XDG_RUNTIME_DIR/wayland-1" ]; then
+          WAYLAND_DISPLAY=wayland-1 dbus-update-activation-environment WAYLAND_DISPLAY >/dev/null 2>&1 || true
           for kamd in /usr/lib/*/libexec/kactivitymanagerd /usr/lib/kactivitymanagerd /usr/libexec/kactivitymanagerd; do
             if [ -x "$kamd" ]; then
               WAYLAND_DISPLAY=wayland-1 "$kamd" >/dev/null 2>&1 &
@@ -269,10 +412,13 @@ ENTRY
       for _ in $(seq 1 300); do
         if dbus-send --session --dest=org.kde.plasmashell --type=method_call --print-reply /PlasmaShell org.freedesktop.DBus.Introspectable.Introspect 2>/dev/null | grep -q "org.kde.PlasmaShell"; then
           dbus-send --session --dest=org.kde.KWin --type=method_call /VirtualKeyboard org.freedesktop.DBus.Properties.Set string:"org.kde.kwin.VirtualKeyboard" string:"enabled" variant:boolean:true >/dev/null 2>&1 || true
-          sleep 0.2
-          prune_missing_launchers
-          mkdir -p "$HOME/.local/share/linuxdroid" && : > "$HOME/.local/share/linuxdroid/launchers-v3"
           write_status "READY|KDE Plasma desktop ready" "== [BOOT READY] KDE Plasma desktop ready"
+          for _ in $(seq 1 60); do
+            if sync_live_kde_launchers; then
+              break
+            fi
+            sleep 0.25
+          done
           break
         fi
         sleep 0.2
@@ -292,6 +438,7 @@ configure_xfce_scaling() {
   mkdir -p "$HOME/.config/xfce4/xfconf/xfce-perchannel-xml"
   python3 - "$HOME/.config/xfce4/xfconf/xfce-perchannel-xml" "$scale_val" <<'PY' 2>/dev/null || true
 import os
+import shutil
 import sys
 import xml.etree.ElementTree as ET
 
@@ -366,7 +513,7 @@ xfwm_tree.write(xfwm_target, encoding="UTF-8", xml_declaration=True)
 
 # 3. xfce4-panel.xml default pinned launchers: Settings, File Explorer (Thunar), and Firefox only
 home_dir = os.path.expanduser("~")
-xfce_stamp = os.path.join(home_dir, ".local", "share", "linuxdroid", "xfce-launchers-v3")
+xfce_stamp = os.path.join(home_dir, ".local", "share", "linuxdroid", "xfce-launchers-v4")
 panel_target = os.path.join(conf_dir, "xfce4-panel.xml")
 if not os.path.exists(xfce_stamp) or not os.path.isfile(panel_target):
     _, panel_tree, panel_root = load_channel(
@@ -383,28 +530,65 @@ if not os.path.exists(xfce_stamp) or not os.path.isfile(panel_target):
         elif child.get("name") == "panels":
             panels_el = child
     if plugins_el is not None:
+        used_ids = set()
+        for p in plugins_el.findall("property"):
+            pname = p.get("name", "")
+            if pname.startswith("plugin-") and pname[7:].isdigit():
+                used_ids.add(int(pname[7:]))
         launcher_props = [
             p for p in plugins_el.findall("property") if p.get("value") == "launcher"
         ]
+        kept_ids = []
         removed_ids = set()
         for idx, lp in enumerate(launcher_props):
+            pname = lp.get("name", "")
+            pid_str = pname[len("plugin-") :] if pname.startswith("plugin-") else ""
             if idx < len(pinned_desktops):
                 for sub in list(lp):
                     lp.remove(sub)
                 items_el = ET.SubElement(lp, "property", {"name": "items", "type": "array"})
                 ET.SubElement(items_el, "value", {"type": "string", "value": pinned_desktops[idx]})
+                if pid_str:
+                    kept_ids.append(pid_str)
             else:
-                pname = lp.get("name", "")
-                if pname.startswith("plugin-"):
-                    removed_ids.add(pname[len("plugin-") :])
+                if pid_str:
+                    removed_ids.add(pid_str)
                 plugins_el.remove(lp)
-        if removed_ids and panels_el is not None:
-            for p_el in panels_el.findall("property"):
+        added_ids = []
+        next_id = max(used_ids, default=0) + 1
+        for idx in range(len(launcher_props), len(pinned_desktops)):
+            while next_id in used_ids:
+                next_id += 1
+            used_ids.add(next_id)
+            pid_str = str(next_id)
+            lp = ET.SubElement(plugins_el, "property", {"name": f"plugin-{pid_str}", "type": "string", "value": "launcher"})
+            items_el = ET.SubElement(lp, "property", {"name": "items", "type": "array"})
+            ET.SubElement(items_el, "value", {"type": "string", "value": pinned_desktops[idx]})
+            added_ids.append(pid_str)
+            kept_ids.append(pid_str)
+        if panels_el is not None:
+            all_panel_props = panels_el.findall("property")
+            for p_idx, p_el in enumerate(all_panel_props):
                 for prop in p_el.findall("property"):
                     if prop.get("name") == "plugin-ids":
                         for val_el in list(prop.findall("value")):
                             if val_el.get("value") in removed_ids:
                                 prop.remove(val_el)
+                        if added_ids and p_idx == 0:
+                            vals = list(prop.findall("value"))
+                            insert_pos = 1 if vals else 0
+                            for vi, v in enumerate(vals):
+                                if v.get("value") in kept_ids:
+                                    insert_pos = vi + 1
+                            for new_pid in added_ids:
+                                new_val = ET.Element("value", {"type": "int", "value": new_pid})
+                                prop.insert(insert_pos, new_val)
+                                insert_pos += 1
+        panel_launcher_dir = os.path.join(home_dir, ".config", "xfce4", "panel")
+        if os.path.isdir(panel_launcher_dir):
+            for entry in os.listdir(panel_launcher_dir):
+                if entry.startswith("launcher-"):
+                    shutil.rmtree(os.path.join(panel_launcher_dir, entry), ignore_errors=True)
         panel_tree.write(panel_target, encoding="UTF-8", xml_declaration=True)
         os.makedirs(os.path.dirname(xfce_stamp), exist_ok=True)
         open(xfce_stamp, "w").close()

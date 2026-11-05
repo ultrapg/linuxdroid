@@ -254,11 +254,26 @@ class RuntimeStabilityPerformanceTest {
 
         val appsSh = File(assetsRoot, "usr/local/bin/linuxdroid-apps").readText()
         assertTrue(appsSh.contains("flatpak --user install -y --or-update flathub io.github.flattool.Warehouse"))
+        assertTrue(appsSh.contains("lfdevs/blender-linux-arm64/releases/latest"))
+        assertTrue(appsSh.contains("ubuntuhandbook1/gimp-3/ubuntu"))
+        assertTrue(appsSh.contains("ubuntuhandbook1/krita/ubuntu"))
+        assertTrue(appsSh.contains("libreoffice/ppa/ubuntu"))
+        assertTrue(appsSh.contains("flathub org.kde.kdenlive"))
+        assertTrue(appsSh.contains("noble-backports obs-studio"))
+        assertTrue(appsSh.contains("deb.nodesource.com/node_22.x"))
+        assertTrue(appsSh.contains("https://sh.rustup.rs"))
+        assertTrue(appsSh.contains("https://go.dev/dl/?mode=json"))
+        assertTrue(appsSh.contains("openjdk-25-jdk"))
+        assertTrue(appsSh.contains("docker-ce-cli"))
 
         val desktopSh = File(assetsRoot, "usr/local/bin/linuxdroid-desktop").readText()
         assertTrue(
             "KDE taskbar default pins must be Settings, Dolphin, and Firefox only",
             desktopSh.contains("applications:systemsettings.desktop,applications:org.kde.dolphin.desktop,applications:firefox.desktop"),
+        )
+        assertTrue(
+            "KDE taskbar migration must use launchers-v4 stamp after live panel sync",
+            desktopSh.contains("launchers-v4") && desktopSh.contains("LAUNCHERS_READY:"),
         )
         assertFalse(
             "KDE taskbar default pins must not include preferred:// or Discover",
@@ -268,5 +283,130 @@ class RuntimeStabilityPerformanceTest {
             "XFCE taskbar default pins must be Settings, Thunar, and Firefox only",
             desktopSh.contains("[\"xfce-settings-manager.desktop\", \"thunar.desktop\", \"firefox.desktop\"]"),
         )
+        assertTrue(
+            "XFCE taskbar migration must use xfce-launchers-v4 stamp",
+            desktopSh.contains("xfce-launchers-v4"),
+        )
+    }
+
+    @Test
+    fun kdeAndXfceTaskbarMigrationDeterministicallyPinsSettingsFileExplorerAndFirefox() {
+        val assetsRoot = findAssetsLinuxfs().canonicalFile
+        val desktopScript = File(assetsRoot, "usr/local/bin/linuxdroid-desktop").canonicalPath
+
+        val pyTest = """
+import os
+import subprocess
+import sys
+import tempfile
+import xml.etree.ElementTree as ET
+
+desktop_script = sys.argv[1]
+expected_kde = "applications:systemsettings.desktop,applications:org.kde.dolphin.desktop,applications:firefox.desktop"
+
+with tempfile.TemporaryDirectory(prefix="ld-taskbar-test-") as tmp:
+    # 1. KDE appletsrc with NO [Configuration][General] section (exact v1.0.24 bug)
+    home1 = os.path.join(tmp, "home_no_cfg")
+    os.makedirs(os.path.join(home1, ".config"), exist_ok=True)
+    os.makedirs(os.path.join(home1, ".local/share/linuxdroid"), exist_ok=True)
+    open(os.path.join(home1, ".local/share/linuxdroid/launchers-v3"), "w").close()
+    rc1 = os.path.join(home1, ".config/plasma-org.kde.plasma.desktop-appletsrc")
+    with open(rc1, "w") as f:
+        f.write(
+            "[Containments][2]\nplugin=org.kde.panel\n\n"
+            "[Containments][2][Applets][3]\nplugin=org.kde.plasma.kickoff\n\n"
+            "[Containments][2][Applets][5]\nimmutability=1\nplugin=org.kde.plasma.icontasks\n\n"
+            "[Containments][2][Applets][7]\nplugin=org.kde.plasma.systemtray\n"
+        )
+
+    env1 = dict(os.environ, HOME=home1)
+    r1 = subprocess.run(
+        ["/bin/bash", "-c", f'source <(sed -n "/^configure_kde_default_launchers()/,/^sync_live_kde_launchers()/p" {desktop_script!r} | sed "${'$'}d"); configure_kde_default_launchers'],
+        env=env1, capture_output=True, text=True, timeout=5,
+    )
+    assert r1.returncode == 0, r1.stderr
+    txt1 = open(rc1).read()
+    assert "[Containments][2][Applets][5][Configuration][General]\nlaunchers=" + expected_kde in txt1, f"Missing created section in:\n{txt1}"
+
+    # 2. KDE appletsrc with old preferred://browser & Discover -> overwritten on first v4 run, then user pin preserved once v4 stamp exists
+    home2 = os.path.join(tmp, "home_old_cfg")
+    os.makedirs(os.path.join(home2, ".config"), exist_ok=True)
+    rc2 = os.path.join(home2, ".config/plasma-org.kde.plasma.desktop-appletsrc")
+    with open(rc2, "w") as f:
+        f.write(
+            "[Containments][2][Applets][5]\nplugin=org.kde.plasma.icontasks\n\n"
+            "[Containments][2][Applets][5][Configuration][General]\n"
+            "groupingStrategy=0\n"
+            "launchers=applications:systemsettings.desktop,applications:org.kde.discover.desktop,preferred://filemanager,preferred://browser\n"
+        )
+    env2 = dict(os.environ, HOME=home2)
+    subprocess.run(
+        ["/bin/bash", "-c", f'source <(sed -n "/^configure_kde_default_launchers()/,/^sync_live_kde_launchers()/p" {desktop_script!r} | sed "${'$'}d"); configure_kde_default_launchers'],
+        env=env2, check=True, timeout=5,
+    )
+    txt2 = open(rc2).read()
+    assert f"launchers={expected_kde}\n" in txt2 and "groupingStrategy=0\n" in txt2, txt2
+    assert "preferred://" not in txt2 and "discover" not in txt2, txt2
+
+    # Stamp v4 and add custom user pin (blender.desktop) -> must be preserved!
+    stamp2 = os.path.join(home2, ".local/share/linuxdroid/launchers-v4")
+    os.makedirs(os.path.dirname(stamp2), exist_ok=True)
+    open(stamp2, "w").close()
+    custom = expected_kde + ",applications:blender.desktop"
+    open(rc2, "w").write(txt2.replace(expected_kde, custom))
+    subprocess.run(
+        ["/bin/bash", "-c", f'source <(sed -n "/^configure_kde_default_launchers()/,/^sync_live_kde_launchers()/p" {desktop_script!r} | sed "${'$'}d"); configure_kde_default_launchers'],
+        env=env2, check=True, timeout=5,
+    )
+    assert f"launchers={custom}\n" in open(rc2).read()
+
+    # 3. XFCE panel with only 1 initial launcher -> expands cleanly to all 3 pinned launchers
+    home3 = os.path.join(tmp, "home_xfce")
+    xfconf_dir = os.path.join(home3, ".config/xfce4/xfconf/xfce-perchannel-xml")
+    os.makedirs(xfconf_dir, exist_ok=True)
+    with open(os.path.join(xfconf_dir, "xfce4-panel.xml"), "w") as f:
+        f.write('''<?xml version="1.0" encoding="UTF-8"?>
+<channel name="xfce4-panel" version="1.0">
+  <property name="panels" type="empty">
+    <property name="panel-1" type="empty">
+      <property name="plugin-ids" type="array">
+        <value type="int" value="1"/>
+        <value type="int" value="2"/>
+        <value type="int" value="3"/>
+      </property>
+    </property>
+  </property>
+  <property name="plugins" type="empty">
+    <property name="plugin-1" type="string" value="whiskermenu"/>
+    <property name="plugin-2" type="string" value="launcher">
+      <property name="items" type="array">
+        <value type="string" value="exo-terminal-emulator.desktop"/>
+      </property>
+    </property>
+    <property name="plugin-3" type="string" value="tasklist"/>
+  </property>
+</channel>''')
+    env3 = dict(os.environ, HOME=home3)
+    subprocess.run(
+        ["/bin/bash", "-c", f'source <(sed -n "/^configure_xfce_scaling()/,/^run_xwayland_desktop()/p" {desktop_script!r} | sed "${'$'}d"); configure_xfce_scaling 1.5'],
+        env=env3, check=True, timeout=5,
+    )
+    tree = ET.parse(os.path.join(xfconf_dir, "xfce4-panel.xml"))
+    plugins = tree.getroot().find("./property[@name='plugins']")
+    launchers = [
+        lp.find("./property[@name='items']/value").get("value")
+        for lp in plugins.findall("property")
+        if lp.get("value") == "launcher"
+    ]
+    assert launchers == ["xfce-settings-manager.desktop", "thunar.desktop", "firefox.desktop"], f"Unexpected XFCE launchers: {launchers}"
+""".trimIndent()
+
+        val proc = ProcessBuilder("python3", "-B", "-c", pyTest, desktopScript)
+            .redirectErrorStream(true)
+            .start()
+        val output = proc.inputStream.bufferedReader().readText()
+        val finished = proc.waitFor(15, java.util.concurrent.TimeUnit.SECONDS)
+        assertTrue("Taskbar migration test timed out:\n$output", finished)
+        assertEquals("Taskbar migration test failed:\n$output", 0, proc.exitValue())
     }
 }

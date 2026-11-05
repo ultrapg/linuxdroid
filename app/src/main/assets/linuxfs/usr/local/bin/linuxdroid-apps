@@ -84,23 +84,42 @@ pkg_not_broken() {
   esac
 }
 
+pkg_version_ge() {
+  local pkg="$1" min_ver="$2" cur_ver st
+  if ! command -v dpkg-query >/dev/null 2>&1 || ! command -v dpkg >/dev/null 2>&1; then
+    return 1
+  fi
+  st="$(dpkg-query -W -f='${db:Status-Status} ${db:Status-Eflag}' "$pkg" 2>/dev/null || true)"
+  [ "$st" = "installed ok" ] || return 1
+  cur_ver="$(dpkg-query -W -f='${Version}' "$pkg" 2>/dev/null || true)"
+  [ -n "$cur_ver" ] && dpkg --compare-versions "$cur_ver" ge "$min_ver"
+}
+
+flatpak_app_installed() {
+  local app_id="$1"
+  [ -d "${HOME:-/home/linux}/.local/share/flatpak/app/${app_id}" ] || \
+  { [ -n "${SUDO_USER:-}" ] && [ -d "/home/${SUDO_USER}/.local/share/flatpak/app/${app_id}" ]; } || \
+  [ -d "/home/linux/.local/share/flatpak/app/${app_id}" ] || \
+  [ -d "/var/lib/flatpak/app/${app_id}" ]
+}
+
 ALL_ITEMS=(
   "warehouse|Warehouse (Flatpak Store) — Flatpak + Flathub + Warehouse GUI"
   "fex-rootfs|FEX-Emu Ubuntu 24.04 x86_64 RootFS (Run x86_64 Linux Apps)"
-  "chromium|Chromium (Web Browser, ARM64)"
-  "vscode|Visual Studio Code (Official ARM64)"
-  "vscodium|VSCodium (Open-Source ARM64)"
-  "blender|Blender (3D Creation Suite)"
-  "krita|Krita (Digital Painting Studio)"
-  "obs-studio|OBS Studio (Screen Recording & Streaming)"
-  "kdenlive|Kdenlive (Non-Linear Video Editor)"
-  "libreoffice|LibreOffice Suite (Writer, Calc, Impress)"
-  "gimp|GIMP (Image Editor)"
-  "devtools|C/C++, CMake, Python & Node.js Toolchain"
-  "rust|Rust Toolchain (rustc, cargo)"
-  "golang|Go Toolchain (golang-go)"
-  "openjdk|OpenJDK 21 SDK (Java Development Kit)"
-  "docker-cli|Docker CLI (docker.io, buildx, compose)"
+  "chromium|Chromium (Latest Web Browser, ARM64)"
+  "vscode|Visual Studio Code (Latest Official ARM64)"
+  "vscodium|VSCodium (Latest Open-Source ARM64)"
+  "blender|Blender 5.x (Latest 3D Creation Suite, ARM64)"
+  "krita|Krita 5.3+ (Latest Digital Painting Studio, ARM64)"
+  "obs-studio|OBS Studio (Latest Screen Recording & Streaming)"
+  "kdenlive|Kdenlive 26.x (Latest Non-Linear Video Editor, Flathub ARM64)"
+  "libreoffice|LibreOffice Fresh 26.x (Latest Writer, Calc, Impress)"
+  "gimp|GIMP 3.x (Latest Image Editor, ARM64)"
+  "devtools|C/C++, CMake, Python & Node.js 22 LTS Toolchain"
+  "rust|Rust Toolchain (Latest Stable via rustup)"
+  "golang|Go Toolchain (Latest Official go.dev ARM64)"
+  "openjdk|OpenJDK 25 LTS SDK (Latest Java Development Kit)"
+  "docker-cli|Docker CLI (Latest Official docker-ce-cli, buildx, compose)"
   "podman|Podman (Rootless Container Engine)"
 )
 
@@ -108,11 +127,7 @@ is_installed() {
   local id="$1"
   case "$id" in
     warehouse)
-      pkg_not_broken flatpak && [ -x /usr/bin/flatpak ] && {
-        [ -d "${HOME:-/home/linux}/.local/share/flatpak/app/io.github.flattool.Warehouse" ] || \
-        { [ -n "${SUDO_USER:-}" ] && [ -d "/home/${SUDO_USER}/.local/share/flatpak/app/io.github.flattool.Warehouse" ]; } || \
-        [ -d /var/lib/flatpak/app/io.github.flattool.Warehouse ]
-      }
+      pkg_not_broken flatpak && [ -x /usr/bin/flatpak ] && flatpak_app_installed "io.github.flattool.Warehouse"
       ;;
     fex-rootfs)
       local xdg_data="${XDG_DATA_HOME:-${HOME:-/home/linux}/.local/share}"
@@ -136,39 +151,40 @@ is_installed() {
       pkg_not_broken codium && command -v codium >/dev/null 2>&1
       ;;
     blender)
-      pkg_not_broken blender && command -v blender >/dev/null 2>&1
+      [ -x /opt/blender/blender ] && command -v blender >/dev/null 2>&1
       ;;
     krita)
-      pkg_not_broken krita && command -v krita >/dev/null 2>&1
+      pkg_version_ge krita "1:5.3" && command -v krita >/dev/null 2>&1
       ;;
     obs-studio)
-      pkg_not_broken obs-studio && command -v obs >/dev/null 2>&1
+      pkg_version_ge obs-studio "30.2" && command -v obs >/dev/null 2>&1
       ;;
     kdenlive)
-      pkg_not_broken kdenlive && command -v kdenlive >/dev/null 2>&1
+      pkg_not_broken flatpak && [ -x /usr/bin/flatpak ] && flatpak_app_installed "org.kde.kdenlive"
       ;;
     libreoffice)
-      pkg_not_broken libreoffice && command -v libreoffice >/dev/null 2>&1
+      pkg_version_ge libreoffice "4:25.0" && command -v libreoffice >/dev/null 2>&1
       ;;
     gimp)
-      pkg_not_broken gimp && command -v gimp >/dev/null 2>&1
+      pkg_version_ge gimp "3.0" && command -v gimp >/dev/null 2>&1
       ;;
     devtools)
-      pkg_not_broken build-essential && pkg_not_broken cmake && pkg_not_broken nodejs && \
+      pkg_not_broken build-essential && pkg_not_broken cmake && pkg_version_ge nodejs "22." && \
       command -v gcc >/dev/null 2>&1 && command -v cmake >/dev/null 2>&1 && command -v node >/dev/null 2>&1
       ;;
     rust)
-      pkg_not_broken rustc && pkg_not_broken cargo && \
+      [ -x /usr/local/cargo/bin/rustc ] && [ -x /usr/local/cargo/bin/cargo ] && \
       command -v rustc >/dev/null 2>&1 && command -v cargo >/dev/null 2>&1
       ;;
     golang)
-      pkg_not_broken golang-go && command -v go >/dev/null 2>&1
+      [ -x /usr/local/go/bin/go ] && command -v go >/dev/null 2>&1
       ;;
     openjdk)
-      pkg_not_broken openjdk-21-jdk && command -v javac >/dev/null 2>&1
+      { pkg_version_ge openjdk-25-jdk "25" || [ -d /usr/lib/jvm/java-25-openjdk-arm64 ]; } && \
+      pkg_not_broken openjdk-25-jdk && command -v javac >/dev/null 2>&1
       ;;
     docker-cli)
-      pkg_not_broken docker.io && command -v docker >/dev/null 2>&1
+      pkg_version_ge docker-ce-cli "5:27" && command -v docker >/dev/null 2>&1
       ;;
     podman)
       pkg_not_broken podman && command -v podman >/dev/null 2>&1
@@ -187,8 +203,43 @@ status_tag() {
   fi
 }
 
-install_warehouse() {
-  echo "==> Installing Flatpak, Flathub repository, and Warehouse (Flatpak Store)..."
+ensure_repo_prereqs() {
+  if ! command -v curl >/dev/null 2>&1 || ! command -v gpg >/dev/null 2>&1 || [ ! -d /etc/ssl/certs ]; then
+    apt_install ca-certificates curl gnupg
+  fi
+}
+
+install_ppa_keyring() {
+  local keyring_path="$1"
+  shift
+  ensure_repo_prereqs
+  local tmp_armored
+  tmp_armored="$(mktemp)"
+  for fpr in "$@"; do
+    curl -fsSL --retry 3 "https://keyserver.ubuntu.com/pks/lookup?op=get&search=${fpr}" >> "$tmp_armored"
+    printf '\n' >> "$tmp_armored"
+  done
+  sudo mkdir -p "$(dirname "$keyring_path")"
+  sudo gpg --dearmor --yes -o "$keyring_path" < "$tmp_armored"
+  sudo chmod 644 "$keyring_path"
+  rm -f "$tmp_armored"
+}
+
+resolve_flatpak_target_user() {
+  FP_USER=""
+  FP_HOME="${HOME:-/home/linux}"
+  if [ "$(id -u)" -eq 0 ]; then
+    if [ -n "${SUDO_USER:-}" ] && [ "${SUDO_USER}" != "root" ] && id "${SUDO_USER}" >/dev/null 2>&1; then
+      FP_USER="${SUDO_USER}"
+      FP_HOME="$(getent passwd "${SUDO_USER}" | cut -d: -f6)"
+    elif id linux >/dev/null 2>&1; then
+      FP_USER="linux"
+      FP_HOME="/home/linux"
+    fi
+  fi
+}
+
+ensure_flatpak_flathub_ready() {
   apt_install \
     flatpak \
     xdg-dbus-proxy \
@@ -221,31 +272,27 @@ install_warehouse() {
     fi
   fi
 
-  local fp_user=""
-  local fp_home="${HOME:-/home/linux}"
-  if [ "$(id -u)" -eq 0 ]; then
-    if [ -n "${SUDO_USER:-}" ] && [ "${SUDO_USER}" != "root" ] && id "${SUDO_USER}" >/dev/null 2>&1; then
-      fp_user="${SUDO_USER}"
-      fp_home="$(getent passwd "${SUDO_USER}" | cut -d: -f6)"
-    elif id linux >/dev/null 2>&1; then
-      fp_user="linux"
-      fp_home="/home/linux"
-    fi
-  fi
-
+  resolve_flatpak_target_user
   echo "==> Configuring unprivileged user Flathub remote (https://dl.flathub.org/repo/flathub.flatpakrepo)..."
-  if [ -n "$fp_user" ]; then
-    su - "$fp_user" -c "FLATPAK_BWRAP=/usr/local/bin/bwrap /usr/local/bin/flatpak --user remote-add --if-not-exists flathub https://dl.flathub.org/repo/flathub.flatpakrepo"
-    echo "==> Installing Warehouse (io.github.flattool.Warehouse) from Flathub..."
-    su - "$fp_user" -c "FLATPAK_BWRAP=/usr/local/bin/bwrap /usr/local/bin/flatpak --user install -y --or-update flathub io.github.flattool.Warehouse"
+  if [ -n "$FP_USER" ]; then
+    su - "$FP_USER" -c "FLATPAK_BWRAP=/usr/local/bin/bwrap /usr/local/bin/flatpak --user remote-add --if-not-exists flathub https://dl.flathub.org/repo/flathub.flatpakrepo"
   else
     /usr/local/bin/flatpak --user remote-add --if-not-exists flathub https://dl.flathub.org/repo/flathub.flatpakrepo
-    echo "==> Installing Warehouse (io.github.flattool.Warehouse) from Flathub..."
+  fi
+}
+
+install_warehouse() {
+  echo "==> Installing Flatpak, Flathub repository, and Warehouse (Flatpak Store)..."
+  ensure_flatpak_flathub_ready
+  echo "==> Installing Warehouse (io.github.flattool.Warehouse) from Flathub..."
+  if [ -n "$FP_USER" ]; then
+    su - "$FP_USER" -c "FLATPAK_BWRAP=/usr/local/bin/bwrap /usr/local/bin/flatpak --user install -y --or-update flathub io.github.flattool.Warehouse"
+  else
     /usr/local/bin/flatpak --user install -y --or-update flathub io.github.flattool.Warehouse
   fi
 
   local wh_icon="system-software-install"
-  local wh_svg="${fp_home}/.local/share/flatpak/exports/share/icons/hicolor/scalable/apps/io.github.flattool.Warehouse.svg"
+  local wh_svg="${FP_HOME}/.local/share/flatpak/exports/share/icons/hicolor/scalable/apps/io.github.flattool.Warehouse.svg"
   if [ -f "$wh_svg" ]; then
     sudo mkdir -p /usr/share/icons/hicolor/scalable/apps
     sudo cp -f "$wh_svg" /usr/share/icons/hicolor/scalable/apps/io.github.flattool.Warehouse.svg
@@ -275,22 +322,11 @@ install_fex_rootfs() {
   /usr/local/bin/linuxdroid-fex fetch-rootfs
 }
 
-ensure_repo_prereqs() {
-  if ! command -v curl >/dev/null 2>&1 || ! command -v gpg >/dev/null 2>&1 || [ ! -d /etc/ssl/certs ]; then
-    apt_install ca-certificates curl gnupg
-  fi
-}
-
 install_chromium() {
-  echo "==> Installing Chromium (ARM64, non-Snap build from the xtradeb PPA)..."
-  ensure_repo_prereqs
+  echo "==> Installing Chromium (Latest ARM64 build from the xtradeb PPA)..."
+  install_ppa_keyring "/usr/share/keyrings/xtradeb-apps.gpg" "0x5301FA4FD93244FBC6F6149982BB6851C64F6880"
   sudo sh -c '
     set -e
-    # Ubuntu ships chromium as a Snap stub that cannot run here, so add the xtradeb PPA by hand
-    # (without software-properties-common, which needs systemd/dbus).
-    curl -fsSL "https://keyserver.ubuntu.com/pks/lookup?op=get&search=0x5301FA4FD93244FBC6F6149982BB6851C64F6880" \
-      | gpg --dearmor --yes -o /usr/share/keyrings/xtradeb-apps.gpg
-    chmod 644 /usr/share/keyrings/xtradeb-apps.gpg
     echo "deb [arch=arm64 signed-by=/usr/share/keyrings/xtradeb-apps.gpg] https://ppa.launchpadcontent.net/xtradeb/apps/ubuntu noble main" \
       > /etc/apt/sources.list.d/xtradeb-apps.list
     printf "%s\n" \
@@ -313,7 +349,7 @@ install_chromium() {
 }
 
 install_vscodium() {
-  echo "==> Installing VSCodium (ARM64)..."
+  echo "==> Installing VSCodium (Latest Official ARM64)..."
   ensure_repo_prereqs
   sudo sh -c '
     set -e
@@ -334,12 +370,19 @@ install_vscodium() {
         sed -i -E "/--no-sandbox/! s#^Exec=/usr/share/codium/codium([[:space:]]|\$)#Exec=/usr/share/codium/codium --no-sandbox --no-zygote --disable-gpu-sandbox --disable-dev-shm-usage \\1#" "$f"
       fi
     done
+    if [ -x /usr/share/codium/bin/codium ]; then
+      cat > /usr/local/bin/codium <<'\''WRAP'\''
+#!/bin/sh
+exec /usr/share/codium/bin/codium --no-sandbox --no-zygote --disable-gpu-sandbox --disable-dev-shm-usage "$@"
+WRAP
+      chmod 755 /usr/local/bin/codium
+    fi
   '
   echo "==> VSCodium installed."
 }
 
 install_vscode() {
-  echo "==> Installing Visual Studio Code (ARM64)..."
+  echo "==> Installing Visual Studio Code (Latest Official ARM64)..."
   ensure_repo_prereqs
   sudo sh -c '
     set -e
@@ -360,63 +403,293 @@ install_vscode() {
         sed -i -E "/--no-sandbox/! s#^Exec=/usr/share/code/code([[:space:]]|\$)#Exec=/usr/share/code/code --no-sandbox --no-zygote --disable-gpu-sandbox --disable-dev-shm-usage \\1#" "$f"
       fi
     done
+    if [ -x /usr/share/code/bin/code ]; then
+      cat > /usr/local/bin/code <<'\''WRAP'\''
+#!/bin/sh
+exec /usr/share/code/bin/code --no-sandbox --no-zygote --disable-gpu-sandbox --disable-dev-shm-usage "$@"
+WRAP
+      chmod 755 /usr/local/bin/code
+    fi
   '
   echo "==> Visual Studio Code installed."
 }
 
 install_blender() {
-  echo "==> Installing Blender (3D Creation Suite)..."
-  apt_install blender
+  echo "==> Installing Blender (Latest Native ARM64 5.x Release)..."
+  apt_install \
+    ca-certificates curl xz-utils tar \
+    libx11-6 libxrender1 libxi6 libxxf86vm1 libxfixes3 libxkbcommon0 \
+    libwayland-client0 libwayland-cursor0 libwayland-egl1 libdecor-0-0 \
+    libgl1 libegl1 libgomp1 libsm6 libice6
+
+  # Remove outdated Ubuntu 4.0.2 blender apt package if previously installed so menus & CLI point to Blender 5.x
+  if dpkg-query -W -f='${db:Status-Status}' blender 2>/dev/null | grep -qx "installed"; then
+    echo "==> Removing legacy Ubuntu Blender 4.0 package before installing latest Blender 5.x..."
+    sudo env DEBIAN_FRONTEND=noninteractive apt-get remove -y blender blender-data 2>/dev/null || true
+  fi
+
+  local fallback_url="https://github.com/lfdevs/blender-linux-arm64/releases/download/v5.1.0/blender-5.1.0-git20260325.ae6d847d66fa-aarch64.tar.gz"
+  local bl_url
+  bl_url="$(python3 -B -c '
+import json, sys, urllib.request
+fallback = sys.argv[1]
+try:
+    req = urllib.request.Request(
+        "https://api.github.com/repos/lfdevs/blender-linux-arm64/releases/latest",
+        headers={"User-Agent": "LinuxDroid-Apps/1.0", "Accept": "application/vnd.github+json"},
+    )
+    with urllib.request.urlopen(req, timeout=10) as r:
+        data = json.loads(r.read().decode("utf-8"))
+    for asset in data.get("assets", []):
+        name = asset.get("name", "").lower()
+        url = asset.get("browser_download_url", "")
+        if ("aarch64" in name or "arm64" in name) and (name.endswith(".tar.gz") or name.endswith(".tar.xz")):
+            print(url)
+            raise SystemExit(0)
+except Exception:
+    pass
+print(fallback)
+' "$fallback_url")"
+
+  local tmp_archive
+  tmp_archive="$(mktemp --suffix=.tar.archive)"
+  echo "==> Downloading ${bl_url} ..."
+  curl -fL --retry 3 "$bl_url" -o "$tmp_archive"
+
+  sudo rm -rf /opt/blender.new
+  sudo mkdir -p /opt/blender.new
+  case "$bl_url" in
+    *.tar.xz) sudo tar -xJf "$tmp_archive" -C /opt/blender.new --strip-components=1 ;;
+    *) sudo tar -xzf "$tmp_archive" -C /opt/blender.new --strip-components=1 ;;
+  esac
+  rm -f "$tmp_archive"
+
+  if [ ! -x /opt/blender.new/blender ]; then
+    sudo rm -rf /opt/blender.new
+    echo "ERROR: Extracted Blender archive did not contain /opt/blender/blender" >&2
+    return 1
+  fi
+  sudo rm -rf /opt/blender
+  sudo mv /opt/blender.new /opt/blender
+
+  sudo sh -c '
+    cat > /usr/local/bin/blender <<'\''WRAP'\''
+#!/bin/sh
+exec /opt/blender/blender "$@"
+WRAP
+    chmod 755 /usr/local/bin/blender
+    if [ -f /opt/blender/blender.svg ]; then
+      mkdir -p /usr/share/icons/hicolor/scalable/apps
+      cp -f /opt/blender/blender.svg /usr/share/icons/hicolor/scalable/apps/blender.svg
+      chmod 644 /usr/share/icons/hicolor/scalable/apps/blender.svg
+    fi
+    if [ -f /opt/blender/blender-symbolic.svg ]; then
+      mkdir -p /usr/share/icons/hicolor/symbolic/apps
+      cp -f /opt/blender/blender-symbolic.svg /usr/share/icons/hicolor/symbolic/apps/blender-symbolic.svg
+      chmod 644 /usr/share/icons/hicolor/symbolic/apps/blender-symbolic.svg
+    fi
+    if [ -f /opt/blender/blender.desktop ]; then
+      sed "s#^Exec=blender#Exec=/usr/local/bin/blender#" /opt/blender/blender.desktop > /usr/share/applications/blender.desktop
+      chmod 644 /usr/share/applications/blender.desktop
+    fi
+  '
+  update-desktop-database /usr/share/applications >/dev/null 2>&1 || sudo update-desktop-database /usr/share/applications >/dev/null 2>&1 || true
+  echo "==> $(/usr/local/bin/blender --version 2>/dev/null | grep -m1 '^Blender ' || echo 'Blender 5.x') installed!"
 }
 
 install_krita() {
-  echo "==> Installing Krita (Digital Painting Studio)..."
+  echo "==> Installing Krita (Latest 5.3+ ARM64 from ubuntuhandbook1/krita PPA)..."
+  install_ppa_keyring "/usr/share/keyrings/ubuntuhandbook1-krita.gpg" \
+    "0xF4E48910A020E77056748B745738AE8480447DDF" \
+    "0xA0062203196CA4482DDB859E4C1CBE14852541CB"
+  sudo sh -c '
+    echo "deb [arch=arm64 signed-by=/usr/share/keyrings/ubuntuhandbook1-krita.gpg] https://ppa.launchpadcontent.net/ubuntuhandbook1/krita/ubuntu noble main" \
+      > /etc/apt/sources.list.d/ubuntuhandbook1-krita.list
+  '
   apt_install krita
+  echo "==> Krita installed."
 }
 
 install_obs_studio() {
-  echo "==> Installing OBS Studio (Screen Recording & Streaming)..."
-  apt_install obs-studio
+  echo "==> Installing OBS Studio (Latest ARM64 from Ubuntu noble-backports)..."
+  if ! grep -Rqs "noble-backports" /etc/apt/sources.list /etc/apt/sources.list.d/ 2>/dev/null; then
+    sudo sh -c '
+      echo "deb [arch=arm64 signed-by=/usr/share/keyrings/ubuntu-archive-keyring.gpg] http://ports.ubuntu.com/ubuntu-ports/ noble-backports main universe restricted multiverse" \
+        > /etc/apt/sources.list.d/noble-backports.list
+    '
+  fi
+  apt_install -t noble-backports obs-studio || apt_install obs-studio
+  echo "==> OBS Studio installed."
 }
 
 install_kdenlive() {
-  echo "==> Installing Kdenlive (Non-Linear Video Editor)..."
-  apt_install kdenlive
+  echo "==> Installing Kdenlive (Latest 26.x ARM64 Release from Flathub)..."
+  ensure_flatpak_flathub_ready
+  if dpkg-query -W -f='${db:Status-Status}' kdenlive 2>/dev/null | grep -qx "installed"; then
+    echo "==> Removing legacy Ubuntu Kdenlive 23.08 package before installing latest Kdenlive 26.x..."
+    sudo env DEBIAN_FRONTEND=noninteractive apt-get remove -y kdenlive kdenlive-data 2>/dev/null || true
+  fi
+  if [ -n "$FP_USER" ]; then
+    su - "$FP_USER" -c "FLATPAK_BWRAP=/usr/local/bin/bwrap /usr/local/bin/flatpak --user install -y --or-update flathub org.kde.kdenlive"
+  else
+    /usr/local/bin/flatpak --user install -y --or-update flathub org.kde.kdenlive
+  fi
+
+  local kd_icon="kdenlive"
+  local kd_svg="${FP_HOME}/.local/share/flatpak/exports/share/icons/hicolor/scalable/apps/org.kde.kdenlive.svg"
+  if [ -f "$kd_svg" ]; then
+    sudo mkdir -p /usr/share/icons/hicolor/scalable/apps
+    sudo cp -f "$kd_svg" /usr/share/icons/hicolor/scalable/apps/org.kde.kdenlive.svg
+    sudo chmod 644 /usr/share/icons/hicolor/scalable/apps/org.kde.kdenlive.svg
+    kd_icon="org.kde.kdenlive"
+  fi
+  sudo sh -c "cat > /usr/local/bin/kdenlive <<'WRAP'
+#!/bin/sh
+exec /usr/local/bin/flatpak run org.kde.kdenlive \"\$@\"
+WRAP
+chmod 755 /usr/local/bin/kdenlive
+cat > /usr/share/applications/org.kde.kdenlive.desktop <<EOF
+[Desktop Entry]
+Type=Application
+Name=Kdenlive
+GenericName=Video Editor
+Comment=Non-linear video editor by KDE (Flathub Latest)
+Exec=/usr/local/bin/flatpak run org.kde.kdenlive %U
+Icon=${kd_icon}
+Terminal=false
+Categories=Qt;KDE;AudioVideo;AudioVideoEditing;
+MimeType=application/x-kdenlive;
+StartupWMClass=kdenlive
+EOF
+chmod 644 /usr/share/applications/org.kde.kdenlive.desktop"
+  echo "==> Kdenlive installed!"
 }
 
 install_libreoffice() {
-  echo "==> Installing LibreOffice Workstation Suite..."
+  echo "==> Installing LibreOffice Fresh (Latest 26.x ARM64 Suite from libreoffice/ppa)..."
+  install_ppa_keyring "/usr/share/keyrings/libreoffice-ppa.gpg" \
+    "0xCDDE43BA4DE3F09D7CE7016673AEE920AD55F5A0" \
+    "0x36E81C9267FD1383FCC4490983FBA1751378B444"
+  sudo sh -c '
+    echo "deb [arch=arm64 signed-by=/usr/share/keyrings/libreoffice-ppa.gpg] https://ppa.launchpadcontent.net/libreoffice/ppa/ubuntu noble main" \
+      > /etc/apt/sources.list.d/libreoffice-ppa.list
+  '
   apt_install libreoffice
+  echo "==> LibreOffice Fresh installed."
 }
 
 install_gimp() {
-  echo "==> Installing GIMP Image Editor..."
+  echo "==> Installing GIMP 3 (Latest 3.x ARM64 Image Editor from ubuntuhandbook1/gimp-3 PPA)..."
+  install_ppa_keyring "/usr/share/keyrings/ubuntuhandbook1-gimp3.gpg" \
+    "0xF4E48910A020E77056748B745738AE8480447DDF" \
+    "0xA0062203196CA4482DDB859E4C1CBE14852541CB"
+  sudo sh -c '
+    echo "deb [arch=arm64 signed-by=/usr/share/keyrings/ubuntuhandbook1-gimp3.gpg] https://ppa.launchpadcontent.net/ubuntuhandbook1/gimp-3/ubuntu noble main" \
+      > /etc/apt/sources.list.d/ubuntuhandbook1-gimp3.list
+  '
   apt_install gimp
+  echo "==> GIMP 3 installed."
 }
 
 install_dev_tools() {
-  echo "==> Installing C/C++, CMake, Python & Node.js Build Toolchain..."
-  apt_install build-essential cmake ninja-build pkg-config gdb python3-pip python3-venv nodejs npm
+  echo "==> Installing C/C++, CMake, Python & Node.js 22 LTS Build Toolchain..."
+  ensure_repo_prereqs
+  sudo sh -c '
+    set -e
+    curl -fsSL https://deb.nodesource.com/gpgkey/nodesource-repo.gpg.key \
+      | gpg --dearmor --yes -o /usr/share/keyrings/nodesource.gpg
+    chmod 644 /usr/share/keyrings/nodesource.gpg
+    echo "deb [arch=arm64 signed-by=/usr/share/keyrings/nodesource.gpg] https://deb.nodesource.com/node_22.x nodistro main" \
+      > /etc/apt/sources.list.d/nodesource.list
+  '
+  # NodeSource nodejs 22 bundles npm/npx/corepack and conflicts with Ubuntu universe separate npm/libnode-dev
+  if dpkg-query -W -f='${db:Status-Status}' npm 2>/dev/null | grep -qx "installed"; then
+    sudo env DEBIAN_FRONTEND=noninteractive apt-get remove -y npm libnode-dev 2>/dev/null || true
+  fi
+  apt_install build-essential cmake ninja-build pkg-config gdb python3-pip python3-venv nodejs
+  echo "==> Toolchain installed (Node $(node --version 2>/dev/null || echo 22.x))."
 }
 
 install_rust() {
-  echo "==> Installing Rust Toolchain (rustc, cargo)..."
-  apt_install rustc cargo
+  echo "==> Installing Latest Stable Rust Toolchain via official rustup..."
+  apt_install ca-certificates curl build-essential pkg-config libssl-dev
+  if dpkg-query -W -f='${db:Status-Status}' rustc 2>/dev/null | grep -qx "installed"; then
+    sudo env DEBIAN_FRONTEND=noninteractive apt-get remove -y rustc cargo 2>/dev/null || true
+  fi
+  sudo sh -c '
+    set -e
+    export RUSTUP_HOME=/usr/local/rustup
+    export CARGO_HOME=/usr/local/cargo
+    mkdir -p "$RUSTUP_HOME" "$CARGO_HOME"
+    curl --proto "=https" --tlsv1.2 -fsSL https://sh.rustup.rs \
+      | sh -s -- -y --no-modify-path --profile default --default-toolchain stable
+    chmod -R a+rX "$RUSTUP_HOME" "$CARGO_HOME"
+    for bin in "$CARGO_HOME"/bin/*; do
+      [ -x "$bin" ] && ln -sfn "$bin" "/usr/local/bin/$(basename "$bin")"
+    done
+  '
+  echo "==> $(/usr/local/bin/rustc --version 2>/dev/null || echo 'Rust stable') installed!"
 }
 
 install_golang() {
-  echo "==> Installing Go Toolchain (golang-go)..."
-  apt_install golang-go
+  echo "==> Installing Latest Official Go Toolchain (go.dev ARM64)..."
+  apt_install ca-certificates curl tar
+  if dpkg-query -W -f='${db:Status-Status}' golang-go 2>/dev/null | grep -qx "installed"; then
+    sudo env DEBIAN_FRONTEND=noninteractive apt-get remove -y golang-go golang-src 2>/dev/null || true
+  fi
+  local go_meta go_url go_sha tmp_go actual_sha
+  go_meta="$(python3 -B -c '
+import json, urllib.request
+req = urllib.request.Request("https://go.dev/dl/?mode=json", headers={"User-Agent": "LinuxDroid-Apps/1.0"})
+with urllib.request.urlopen(req, timeout=10) as r:
+    releases = json.loads(r.read().decode("utf-8"))
+for rel in releases:
+    if not rel.get("stable"):
+        continue
+    for f in rel.get("files", []):
+        if f.get("os") == "linux" and f.get("arch") == "arm64" and f.get("kind") == "archive":
+            print("https://go.dev/dl/" + f["filename"] + "|" + f.get("sha256", ""))
+            raise SystemExit(0)
+raise SystemExit(1)
+')"
+  go_url="${go_meta%%|*}"
+  go_sha="${go_meta#*|}"
+  tmp_go="$(mktemp --suffix=.tar.gz)"
+  echo "==> Downloading ${go_url} ..."
+  curl -fL --retry 3 "$go_url" -o "$tmp_go"
+  if [ -n "$go_sha" ]; then
+    actual_sha="$(sha256sum "$tmp_go" | awk '{print $1}')"
+    if [ "$actual_sha" != "$go_sha" ]; then
+      rm -f "$tmp_go"
+      echo "ERROR: Go archive SHA-256 mismatch (expected $go_sha, got $actual_sha)" >&2
+      return 1
+    fi
+  fi
+  sudo rm -rf /usr/local/go
+  sudo tar -C /usr/local -xzf "$tmp_go"
+  rm -f "$tmp_go"
+  sudo ln -sfn /usr/local/go/bin/go /usr/local/bin/go
+  sudo ln -sfn /usr/local/go/bin/gofmt /usr/local/bin/gofmt
+  echo "==> $(/usr/local/bin/go version 2>/dev/null || echo 'Go') installed!"
 }
 
 install_openjdk() {
-  echo "==> Installing OpenJDK 21 SDK (Java Development Kit)..."
-  apt_install openjdk-21-jdk
+  echo "==> Installing OpenJDK 25 LTS SDK (Latest Java Development Kit)..."
+  apt_install openjdk-25-jdk || apt_install openjdk-21-jdk
 }
 
 install_docker_cli() {
-  echo "==> Installing Docker CLI (docker.io, docker-buildx, docker-compose-v2)..."
-  apt_install docker.io docker-buildx docker-compose-v2
+  echo "==> Installing Latest Official Docker CLI (docker-ce-cli, buildx, compose)..."
+  ensure_repo_prereqs
+  sudo sh -c '
+    set -e
+    curl -fsSL https://download.docker.com/linux/ubuntu/gpg \
+      | gpg --dearmor --yes -o /usr/share/keyrings/docker.gpg
+    chmod 644 /usr/share/keyrings/docker.gpg
+    echo "deb [arch=arm64 signed-by=/usr/share/keyrings/docker.gpg] https://download.docker.com/linux/ubuntu noble stable" \
+      > /etc/apt/sources.list.d/docker.list
+  '
+  apt_install docker-ce-cli docker-buildx-plugin docker-compose-plugin
 }
 
 install_podman() {
@@ -486,11 +759,11 @@ if [ -n "${DISPLAY:-}${WAYLAND_DISPLAY:-}" ]; then
   done
 
   if command -v kdialog >/dev/null 2>&1; then
-    choice=$(kdialog --title "LinuxDroid Workstation Setup" --geometry 720x540 \
-      --menu "Select a workstation application or toolchain to install:" \
+    choice=$(kdialog --title "LinuxDroid Workstation Setup" --geometry 760x580 \
+      --menu "Select a workstation application or toolchain to install (latest ARM64 releases):" \
       "${menu_args[@]}" 2>/dev/null || true)
   elif command -v zenity >/dev/null 2>&1; then
-    choice=$(zenity --list --title="LinuxDroid Workstation Setup" --width=720 --height=540 \
+    choice=$(zenity --list --title="LinuxDroid Workstation Setup" --width=760 --height=580 \
       --column="ID" --column="Component" \
       "${menu_args[@]}" 2>/dev/null || true)
   else

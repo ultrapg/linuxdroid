@@ -1072,4 +1072,100 @@ sys.exit(0)
         assertTrue("linuxdroid-apps reinstreq test timed out:\n$output", finished)
         assertEquals("linuxdroid-apps reinstreq test failed:\n$output", 0, proc.exitValue())
     }
+
+    @Test
+    fun linuxdroidAppsVersionGatingFlagsOutdatedUbuntuUniverseVersionsForUpgrade() {
+        val assetsRoot = findAssetsLinuxfs().canonicalFile
+        val appsScript = File(assetsRoot, "usr/local/bin/linuxdroid-apps").canonicalPath
+
+        val pyTest = """
+import os
+import re
+import subprocess
+import sys
+import tempfile
+
+apps_script = sys.argv[1]
+
+with tempfile.TemporaryDirectory(prefix="ld-apps-vers-") as tmp:
+    mock_bin = os.path.join(tmp, "bin")
+    os.makedirs(mock_bin, exist_ok=True)
+    vers_file = os.path.join(tmp, "versions.txt")
+
+    def write_exec(name, body):
+        p = os.path.join(mock_bin, name)
+        with open(p, "w") as f:
+            f.write(body)
+        os.chmod(p, 0o755)
+
+    for cmd in ("gimp", "krita", "libreoffice", "obs", "gcc", "cmake", "node", "javac", "docker"):
+        write_exec(cmd, "#!/bin/sh\nexit 0\n")
+
+    write_exec("dpkg-query", f'''#!/usr/bin/env python3
+import sys
+args = sys.argv[1:]
+fmt = ""
+pkg = ""
+for a in args:
+    if a.startswith("-f="):
+        fmt = a[3:]
+    elif not a.startswith("-"):
+        pkg = a
+vers = dict(line.strip().split("=", 1) for line in open({vers_file!r}) if "=" in line)
+if pkg not in vers:
+    sys.exit(1)
+if "Status-Status" in fmt:
+    print("installed ok", end="")
+elif "Version" in fmt:
+    print(vers[pkg], end="")
+sys.exit(0)
+''')
+
+    env = dict(os.environ, PATH=mock_bin + ":" + os.environ.get("PATH", "/usr/bin:/bin"))
+
+    # 1. Old Ubuntu 24.04 universe versions must report [Not Installed] so users can upgrade to latest releases
+    with open(vers_file, "w") as f:
+        f.write("\n".join([
+            "gimp=2.10.36-3ubuntu0.24.04.1",
+            "krita=1:5.2.2+dfsg-2build8",
+            "libreoffice=4:24.2.7-0ubuntu0.24.04.1",
+            "obs-studio=30.0.2+dfsg-3build1",
+            "build-essential=12.10ubuntu1",
+            "cmake=3.28.3-1build7",
+            "nodejs=18.19.1+dfsg-6ubuntu5",
+            "openjdk-21-jdk=21.0.5+11",
+            "docker.io=24.0.7-0ubuntu4",
+        ]) + "\n")
+    r_old = subprocess.run([apps_script, "--list"], env=env, capture_output=True, text=True, timeout=10)
+    assert r_old.returncode == 0, r_old.stderr
+    for item in ("gimp", "krita", "libreoffice", "obs-studio", "devtools", "openjdk", "docker-cli", "blender"):
+        assert re.search(rf"^\s*{re.escape(item)}\s+\[Not Installed\]", r_old.stdout, re.M), f"Expected {item} [Not Installed] on old version:\n{r_old.stdout}"
+
+    # 2. Modern upstream ARM64 versions report [Installed]
+    with open(vers_file, "w") as f:
+        f.write("\n".join([
+            "gimp=3.2.8-0build2~ubuntu2404",
+            "krita=1:5.3.4.1-0build1~ubuntu24.04",
+            "libreoffice=4:26.2.6.3-0ubuntu0.24.04.1~lo1",
+            "obs-studio=30.2.3+dfsg-3~bpo24.04.1",
+            "build-essential=12.10ubuntu1",
+            "cmake=3.28.3-1build7",
+            "nodejs=22.15.0-1nodesource1",
+            "openjdk-25-jdk=25.0.4+7-1~24.04",
+            "docker-ce-cli=5:28.1.1-1~ubuntu.24.04~noble",
+        ]) + "\n")
+    r_new = subprocess.run([apps_script, "--list"], env=env, capture_output=True, text=True, timeout=10)
+    assert r_new.returncode == 0, r_new.stderr
+    for item in ("gimp", "krita", "libreoffice", "obs-studio", "devtools", "openjdk", "docker-cli"):
+        assert re.search(rf"^\s*{re.escape(item)}\s+\[Installed\]", r_new.stdout, re.M), f"Expected {item} [Installed] on modern version:\n{r_new.stdout}"
+""".trimIndent()
+
+        val proc = ProcessBuilder("python3", "-B", "-c", pyTest, appsScript)
+            .redirectErrorStream(true)
+            .start()
+        val output = proc.inputStream.bufferedReader().readText()
+        val finished = proc.waitFor(15, TimeUnit.SECONDS)
+        assertTrue("linuxdroid-apps version gating test timed out:\n$output", finished)
+        assertEquals("linuxdroid-apps version gating test failed:\n$output", 0, proc.exitValue())
+    }
 }
