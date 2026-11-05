@@ -38,6 +38,7 @@ struct AHardwareBuffer;
 struct vkp_image *vkp_image_from_ahb(struct AHardwareBuffer *ahb);
 void vkp_wait_idle(void);
 void vkp_image_upload_shm(struct vkp_image *img, const void *data, int stride);
+void vkp_image_upload_shm_rows(struct vkp_image *img, const void *data, int stride, int y0, int y1);
 
 int vkp_image_width(const struct vkp_image *img);
 int vkp_image_height(const struct vkp_image *img);

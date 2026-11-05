@@ -758,6 +758,7 @@ static void take_shm(struct surface *s, struct wl_shm_buffer *shm, struct wl_res
         vkp_image_destroy(s->shm_img);
         s->shm_img = NULL;
     }
+    int had_img = s->shm_img != NULL;
     if (!s->shm_img) s->shm_img = vkp_image_create_shm(w, h);
     if (s->shm_img) {
         wl_shm_buffer_begin_access(shm);
@@ -765,7 +766,22 @@ static void take_shm(struct surface *s, struct wl_shm_buffer *shm, struct wl_res
         if (!vkp_desktop_content_ready() && shm_has_visible_desktop_pixels(pixels, w, h, stride)) {
             vkp_mark_desktop_pixels_visible();
         }
-        vkp_image_upload_shm(s->shm_img, pixels, stride);
+        /* Damage-aware upload: only copy the rows the client reported as changed. Falls back to a
+         * full copy for new images, surface-local-only damage, or overflowed damage lists. */
+        int y0 = 0, y1 = h, partial = 0;
+        if (had_img && s->damage_buf.n > 0 && s->damage_buf.n < DAMAGE_RECTS && s->damage_local.n == 0) {
+            y0 = h; y1 = 0; partial = 1;
+            for (int i = 0; i < s->damage_buf.n; i++) {
+                const int32_t *r = s->damage_buf.r[i];
+                if (r[1] < y0) y0 = r[1];
+                if (r[1] + r[3] > y1) y1 = r[1] + r[3];
+            }
+            if (y0 < 0) y0 = 0;
+            if (y1 > h) y1 = h;
+            if (y1 <= y0) partial = 0;
+        }
+        if (partial) vkp_image_upload_shm_rows(s->shm_img, pixels, stride, y0, y1);
+        else vkp_image_upload_shm(s->shm_img, pixels, stride);
         wl_shm_buffer_end_access(shm);
     }
     wl_buffer_send_release(buffer);

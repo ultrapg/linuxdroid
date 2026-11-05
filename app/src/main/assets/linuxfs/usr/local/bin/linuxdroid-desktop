@@ -533,7 +533,9 @@ if [ "$desktop_choice" = "kde" ]; then
   # hardware OpenGL is available anytime via `linuxdroid-gpu <program>`.
   export KWIN_COMPOSE=Q
   export QT_QUICK_BACKEND=software
-  export GALLIUM_THREAD=0
+  unset GALLIUM_THREAD
+  export LP_NUM_THREADS="${BL_CPU_COUNT:-4}"
+  export QSG_RENDER_LOOP=basic
   export KWIN_USE_OVERLAYS=0
   export KWIN_EFFECTS_FORCE_ANIMATIONS=0
   export KWIN_WAYLAND_NO_PERMISSION_CHECKS=1

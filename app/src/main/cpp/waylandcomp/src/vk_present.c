@@ -1126,6 +1126,18 @@ void vkp_image_upload_shm(struct vkp_image *img, const void *data, int stride) {
                (const uint8_t *)data + (size_t)y * stride, rowbytes);
 }
 
+/* Copies only rows [y0, y1) of a persistent shm image; the rest keeps the previous frame. */
+void vkp_image_upload_shm_rows(struct vkp_image *img, const void *data, int stride, int y0, int y1) {
+    if (!img || !img->map || !data) return;
+    if (y0 < 0) y0 = 0;
+    if (y1 > img->h) y1 = img->h;
+    size_t rowbytes = (size_t)img->w * 4;
+    if ((size_t)stride < rowbytes) rowbytes = (size_t)stride;
+    for (int y = y0; y < y1; y++)
+        memcpy((uint8_t *)img->map + img->offset + (size_t)y * img->row_pitch,
+               (const uint8_t *)data + (size_t)y * stride, rowbytes);
+}
+
 int vkp_image_width(const struct vkp_image *img) { return img ? img->w : 0; }
 int vkp_image_height(const struct vkp_image *img) { return img ? img->h : 0; }
 
