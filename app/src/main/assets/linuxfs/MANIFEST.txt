@@ -35,6 +35,7 @@
 0755 usr/local/bin/linuxdroid-apps
 0755 usr/local/bin/linuxdroid-bookmarks
 0755 usr/local/bin/linuxdroid-clipboard
+0755 usr/local/bin/linuxdroid-default-browser
 0755 usr/local/bin/linuxdroid-desktop
 0755 usr/local/bin/linuxdroid-fex
 0755 usr/local/bin/linuxdroid-flatpak-helper

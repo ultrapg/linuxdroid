@@ -2,6 +2,8 @@
 Backend=QPainter
 Enabled=true
 LatencyPolicy=Low
+WindowsBlockCompositing=false
+AllowTearing=true
 
 [org.kde.kdecoration2]
 library=org.kde.breeze

@@ -410,6 +410,7 @@ class SessionActivity : ComponentActivity() {
             SessionService.togglePause(this)
         }
         imeBridge.start()
+        runCatching { window.setSustainedPerformanceMode(true) }
         vsyncRunning = true
         Choreographer.getInstance().postFrameCallback(vsyncCallback)
         refreshDisplayRouting()

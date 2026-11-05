@@ -242,6 +242,7 @@ if [ -d /mnt/linuxdroid ] && [ "$(ls -A /mnt/linuxdroid 2>/dev/null)" ]; then
 fi
 
 /usr/local/bin/linuxdroid-bookmarks 2>/dev/null || true
+/usr/local/bin/linuxdroid-default-browser 2>/dev/null || true
 
 if [ -r /etc/linuxdroid/gpu.env ]; then
   set -a

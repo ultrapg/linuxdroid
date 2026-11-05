@@ -148,7 +148,7 @@ object SessionPrefs {
         context.applicationContext.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
 
     fun appTheme(context: Context): com.linuxdroid.app.ui.AppTheme =
-        com.linuxdroid.app.ui.AppTheme.fromId(prefs(context).getString("app_theme", "dark"))
+        com.linuxdroid.app.ui.AppTheme.fromId(prefs(context).getString("app_theme", "dynamic"))
 
     fun setAppTheme(context: Context, theme: com.linuxdroid.app.ui.AppTheme) {
         prefs(context).edit().putString("app_theme", theme.id).apply()
@@ -260,7 +260,7 @@ object SessionPrefs {
     }
 
     fun resolutionPreset(context: Context): ResolutionPreset =
-        ResolutionPreset.fromId(prefs(context).getString("resolution_preset", ResolutionPreset.NATIVE.id))
+        ResolutionPreset.fromId(prefs(context).getString("resolution_preset", ResolutionPreset.BALANCED_900P.id))
 
     fun setResolutionPreset(context: Context, preset: ResolutionPreset) {
         prefs(context).edit().putString("resolution_preset", preset.id).apply()

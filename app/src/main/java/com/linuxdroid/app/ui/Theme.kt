@@ -56,20 +56,20 @@ private val DarkScheme = darkColorScheme(
 )
 
 enum class AppTheme(val id: String, val label: String, val description: String) {
+    DYNAMIC("dynamic", "Dynamic Colors", "Use your wallpaper colors (Android 12+)"),
     DARK("dark", "Dark", "Deep slate with cyan accents"),
     AMOLED("amoled", "AMOLED Black", "True #000000 backgrounds and cards to switch off OLED pixels"),
     LIGHT("light", "Light", "Bright surfaces"),
-    SYSTEM("system", "Follow System", "Match your phone's light or dark mode"),
-    DYNAMIC("dynamic", "Dynamic Colors", "Use your wallpaper colors (Android 12+)");
+    SYSTEM("system", "Follow System", "Match your phone's light or dark mode");
 
     companion object {
-        fun fromId(id: String?): AppTheme = entries.firstOrNull { it.id == id } ?: DARK
+        fun fromId(id: String?): AppTheme = entries.firstOrNull { it.id == id } ?: DYNAMIC
     }
 }
 
 /** Shared theme selection so the dashboard, session overlays and terminal always match. */
 object ThemeState {
-    val current = androidx.compose.runtime.mutableStateOf(AppTheme.DARK)
+    val current = androidx.compose.runtime.mutableStateOf(AppTheme.DYNAMIC)
 }
 
 private val AmoledScheme = darkColorScheme(

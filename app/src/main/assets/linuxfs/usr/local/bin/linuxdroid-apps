@@ -104,7 +104,7 @@ flatpak_app_installed() {
 }
 
 ALL_ITEMS=(
-  "media-codecs|Media Codecs — video & audio playback (YouTube)"
+  "media-codecs|Media Codecs — video & audio playback"
   "warehouse|Warehouse — Flatpak app store"
   "fex-rootfs|FEX RootFS — run x86_64 apps"
   "chromium|Chromium — web browser"
@@ -349,7 +349,8 @@ install_chromium() {
       sed -i "s#^Exec=\([^ ]*chromium[^ ]*\)#Exec=\1 --no-sandbox --no-zygote --disable-gpu-sandbox --disable-dev-shm-usage --ozone-platform-hint=auto#" "$f"
     fi
   '
-  echo "==> Chromium installed."
+  /usr/local/bin/linuxdroid-default-browser --force || true
+  echo "==> Chromium installed and set as the default browser."
 }
 
 install_vscodium() {
@@ -723,7 +724,7 @@ install_podman() {
 install_media_codecs() {
   echo "==> Installing media codecs (FFmpeg libraries for Firefox video & audio)..."
   apt_install libavcodec60 libavformat60 libavutil58 libswresample4 ffmpeg
-  echo "==> Done. Restart Firefox to play YouTube videos."
+  echo "==> Done. Restart your browser to use the new codecs."
 }
 
 print_list() {
