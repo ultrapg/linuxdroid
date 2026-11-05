@@ -2,10 +2,14 @@
 #include <dlfcn.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <limits.h>
+#include <stddef.h>
 #include <unistd.h>
 
 __attribute__((visibility("hidden"))) int bl_binfmt_runnable(const char *path, int mode);
 __attribute__((visibility("hidden"))) int bl_writable_access(int dirfd, const char *path, int mode, int flags);
+__attribute__((visibility("hidden"))) const char *bl_flatpak_map_path_mode(const char *path, char *buf, size_t bufsz,
+                                                                            int follow_final);
 
 static int (*next_faccessat(void))(int, const char *, int, int) {
   static int (*real)(int, const char *, int, int);
@@ -20,6 +24,8 @@ static int writable_as_owner(int (*real)(int, const char *, int, int), int dirfd
 }
 
 static int check_cwd(const char *path, int mode, int flags) {
+  char vfs_buf[PATH_MAX];
+  path = bl_flatpak_map_path_mode(path, vfs_buf, sizeof(vfs_buf), (flags & AT_SYMLINK_NOFOLLOW) ? 0 : 1);
   int (*real)(int, const char *, int, int) = next_faccessat();
   if (real == NULL) {
     errno = ENOSYS;
@@ -49,6 +55,8 @@ int eaccess(const char *path, int mode) {
 
 int faccessat(int dirfd, const char *path, int mode, int flags) {
   if (dirfd == AT_FDCWD) return check_cwd(path, mode, flags);
+  char vfs_buf[PATH_MAX];
+  path = bl_flatpak_map_path_mode(path, vfs_buf, sizeof(vfs_buf), (flags & AT_SYMLINK_NOFOLLOW) ? 0 : 1);
   int (*real)(int, const char *, int, int) = next_faccessat();
   if (real == NULL) {
     errno = ENOSYS;

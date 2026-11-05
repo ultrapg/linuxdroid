@@ -367,19 +367,23 @@ static int fp_prepare_exec(const char *path, char *const argv[], char *const env
   const char *base = strrchr(elf_target, '/');
   base = base ? base + 1 : elf_target;
   int need_pyhome = fp_usr && strncmp(base, "python3", 7) == 0 && !fp_env_get(envp, "PYTHONHOME");
-  if (need_pyhome || shebang_env_count > 0) {
+  {
     extern char **environ;
     char *const *src_env = envp ? envp : environ;
     size_t ec = 0;
     while (src_env && src_env[ec]) ec++;
-    size_t extra_ec = (size_t)shebang_env_count + (need_pyhome ? 1u : 0u);
+    size_t extra_ec = (size_t)shebang_env_count + (need_pyhome ? 1u : 0u) + 1u;
     size_t env_ptr_bytes = (ec + extra_ec + 1) * sizeof(char *);
-    size_t env_str_bytes = need_pyhome ? (strlen(fp_usr) + 16) : 0;
+    size_t exec_kv_cap = strlen(elf_target) + 20;
+    size_t env_str_bytes = (need_pyhome ? (strlen(fp_usr) + 16) : 0) + exec_kv_cap;
     for (int i = 0; i < shebang_env_count; i++) env_str_bytes += strlen(shebang_env[i]) + 1;
     new_envp = malloc(env_ptr_bytes + env_str_bytes);
     if (new_envp) {
       char *epool = (char *)new_envp + env_ptr_bytes;
       size_t idx = 0;
+      int elen = snprintf(epool, exec_kv_cap, "BL_FLATPAK_EXEC=%s", elf_target);
+      new_envp[idx++] = epool;
+      epool += elen + 1;
       if (need_pyhome) {
         int plen = snprintf(epool, strlen(fp_usr) + 16, "PYTHONHOME=%s", fp_usr);
         new_envp[idx++] = epool;
@@ -389,6 +393,7 @@ static int fp_prepare_exec(const char *path, char *const argv[], char *const env
         new_envp[idx++] = pool_copy(&epool, shebang_env[i]);
       }
       for (size_t i = 0; i < ec; i++) {
+        if (strncmp(src_env[i], "BL_FLATPAK_EXEC=", 16) == 0) continue;
         new_envp[idx++] = src_env[i];
       }
       new_envp[idx] = NULL;

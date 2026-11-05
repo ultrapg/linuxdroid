@@ -2,7 +2,7 @@
  * Ported from WinNative (maxjivi05, feature/wayland-gamescope, 2026-09-18/19), GPL-3.0.
  */
 
-#define _GNU_SOURCE 1
+#define _GNU_SOURCE
 #include <arpa/inet.h>
 #include <dlfcn.h>
 #include <errno.h>
@@ -572,8 +572,11 @@ int bl_status_without_tracer(const char *path, int flags, const void *caller) __
 int bl_proc_open(int dirfd, const char *path, int flags) __attribute__((visibility("hidden")));
 void bl_proc_close(int fd) __attribute__((visibility("hidden")));
 int bl_proc_is_tracked_fd(int fd) __attribute__((visibility("hidden")));
+const char *bl_flatpak_map_path(const char *path, char *buf, size_t bufsz) __attribute__((visibility("hidden")));
 
 static FILE *open_stream(fopen_fn real, const char *path, const char *mode, const void *caller) {
+    char fp_buf[4096];
+    path = bl_flatpak_map_path(path, fp_buf, sizeof(fp_buf));
     int status = mode && mode[0] == 'r' && !strchr(mode, '+')
             ? bl_status_without_tracer(path, O_RDONLY | O_CLOEXEC, caller) : -1;
     if (status < 0 && mode && mode[0] == 'r' && !strchr(mode, '+')) {

@@ -219,8 +219,8 @@ object LinuxRuntime {
             "${BuildConfig.VERSION_NAME}\n"
         )
 
-        // Ensure hardcoded /usr/bin/{sudo,pkexec,su} invocations also use the LinuxDroid root bridge
-        for (tool in listOf("sudo", "pkexec", "su")) {
+        // Ensure hardcoded /usr/bin/{sudo,pkexec,su,bwrap,flatpak-spawn} invocations also use the LinuxDroid shims
+        for (tool in listOf("sudo", "pkexec", "su", "bwrap", "flatpak-spawn")) {
             val localWrapper = File(root, "usr/local/bin/$tool")
             val usrBinTarget = File(root, "usr/bin/$tool")
             if (localWrapper.isFile) {

@@ -109,8 +109,9 @@ is_installed() {
   case "$id" in
     warehouse)
       pkg_not_broken flatpak && [ -x /usr/bin/flatpak ] && {
-        [ -d /var/lib/flatpak/app/io.github.flattool.Warehouse ] || \
-        [ -d "${HOME:-/home/linux}/.local/share/flatpak/app/io.github.flattool.Warehouse" ]
+        [ -d "${HOME:-/home/linux}/.local/share/flatpak/app/io.github.flattool.Warehouse" ] || \
+        { [ -n "${SUDO_USER:-}" ] && [ -d "/home/${SUDO_USER}/.local/share/flatpak/app/io.github.flattool.Warehouse" ]; } || \
+        [ -d /var/lib/flatpak/app/io.github.flattool.Warehouse ]
       }
       ;;
     fex-rootfs)
@@ -200,26 +201,72 @@ install_warehouse() {
     adwaita-icon-theme \
     librsvg2-common
 
-  echo "==> Configuring Flathub remote (https://dl.flathub.org/repo/flathub.flatpakrepo)..."
-  sudo flatpak remote-add --if-not-exists flathub https://dl.flathub.org/repo/flathub.flatpakrepo
+  # Ensure /usr/bin/bwrap and /usr/bin/flatpak-spawn use our PRoot-compatible shims immediately
+  for shim_tool in bwrap flatpak-spawn; do
+    if [ -f "/usr/local/bin/${shim_tool}" ]; then
+      if [ -f "/usr/bin/${shim_tool}" ] && ! [ -f "/usr/bin/${shim_tool}.distrib" ] && head -c 4 "/usr/bin/${shim_tool}" 2>/dev/null | grep -q "ELF"; then
+        sudo mv -f "/usr/bin/${shim_tool}" "/usr/bin/${shim_tool}.distrib" 2>/dev/null || true
+      fi
+      sudo cp -f "/usr/local/bin/${shim_tool}" "/usr/bin/${shim_tool}" 2>/dev/null || true
+      sudo chmod 755 "/usr/bin/${shim_tool}" 2>/dev/null || true
+    fi
+  done
 
-  echo "==> Installing Warehouse (io.github.flattool.Warehouse) from Flathub..."
-  sudo flatpak install -y flathub io.github.flattool.Warehouse
+  # Clean up any broken system-scope OSTree .l2s. symlink remnants left by older versions
+  if [ -d /var/lib/flatpak/repo/objects ] && [ ! -d /var/lib/flatpak/app/io.github.flattool.Warehouse ]; then
+    if find /var/lib/flatpak/repo/objects -maxdepth 3 -name '.l2s.*' -print -quit 2>/dev/null | grep -q .; then
+      echo "==> Cleaning broken legacy system Flatpak object links..."
+      sudo rm -rf /var/lib/flatpak/repo/tmp /var/lib/flatpak/repo/objects 2>/dev/null || true
+      sudo ostree --repo=/var/lib/flatpak/repo init --mode=bare 2>/dev/null || true
+    fi
+  fi
 
-  sudo sh -c 'cat > /usr/share/applications/io.github.flattool.Warehouse.desktop <<EOF
+  local fp_user=""
+  local fp_home="${HOME:-/home/linux}"
+  if [ "$(id -u)" -eq 0 ]; then
+    if [ -n "${SUDO_USER:-}" ] && [ "${SUDO_USER}" != "root" ] && id "${SUDO_USER}" >/dev/null 2>&1; then
+      fp_user="${SUDO_USER}"
+      fp_home="$(getent passwd "${SUDO_USER}" | cut -d: -f6)"
+    elif id linux >/dev/null 2>&1; then
+      fp_user="linux"
+      fp_home="/home/linux"
+    fi
+  fi
+
+  echo "==> Configuring unprivileged user Flathub remote (https://dl.flathub.org/repo/flathub.flatpakrepo)..."
+  if [ -n "$fp_user" ]; then
+    su - "$fp_user" -c "FLATPAK_BWRAP=/usr/local/bin/bwrap /usr/local/bin/flatpak --user remote-add --if-not-exists flathub https://dl.flathub.org/repo/flathub.flatpakrepo"
+    echo "==> Installing Warehouse (io.github.flattool.Warehouse) from Flathub..."
+    su - "$fp_user" -c "FLATPAK_BWRAP=/usr/local/bin/bwrap /usr/local/bin/flatpak --user install -y --or-update flathub io.github.flattool.Warehouse"
+  else
+    /usr/local/bin/flatpak --user remote-add --if-not-exists flathub https://dl.flathub.org/repo/flathub.flatpakrepo
+    echo "==> Installing Warehouse (io.github.flattool.Warehouse) from Flathub..."
+    /usr/local/bin/flatpak --user install -y --or-update flathub io.github.flattool.Warehouse
+  fi
+
+  local wh_icon="system-software-install"
+  local wh_svg="${fp_home}/.local/share/flatpak/exports/share/icons/hicolor/scalable/apps/io.github.flattool.Warehouse.svg"
+  if [ -f "$wh_svg" ]; then
+    sudo mkdir -p /usr/share/icons/hicolor/scalable/apps
+    sudo cp -f "$wh_svg" /usr/share/icons/hicolor/scalable/apps/io.github.flattool.Warehouse.svg
+    sudo chmod 644 /usr/share/icons/hicolor/scalable/apps/io.github.flattool.Warehouse.svg
+    wh_icon="io.github.flattool.Warehouse"
+  fi
+
+  sudo sh -c "cat > /usr/share/applications/io.github.flattool.Warehouse.desktop <<EOF
 [Desktop Entry]
 Type=Application
 Name=Warehouse (Flatpak Store)
 GenericName=Flatpak Manager & Store
 Comment=Manage installed Flatpaks, remotes, and install apps from Flathub
 Exec=/usr/local/bin/flatpak run io.github.flattool.Warehouse
-Icon=system-software-install
+Icon=${wh_icon}
 Terminal=false
 Categories=System;PackageManager;GTK;
 Keywords=flatpak;flathub;warehouse;store;packages;
 StartupWMClass=io.github.flattool.Warehouse
 EOF
-chmod 644 /usr/share/applications/io.github.flattool.Warehouse.desktop'
+chmod 644 /usr/share/applications/io.github.flattool.Warehouse.desktop"
   echo "==> Warehouse (Flatpak Store) installed! Launch it from the application menu or via: flatpak run io.github.flattool.Warehouse"
 }
 

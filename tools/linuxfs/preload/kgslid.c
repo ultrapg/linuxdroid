@@ -1,4 +1,4 @@
-#define _GNU_SOURCE 1
+#define _GNU_SOURCE
 #include <stddef.h>
 #include <sys/ioctl.h>
 

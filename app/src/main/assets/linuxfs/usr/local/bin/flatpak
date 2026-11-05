@@ -1,4 +1,6 @@
 #!/usr/bin/python3 -BE
+import configparser
+import io
 import os
 import resource
 import shutil
@@ -19,6 +21,13 @@ LINUXDROID_ROOT = (
     if os.path.exists(os.path.join(_SELF_DIR, "linuxdroid-root"))
     else "/usr/local/bin/linuxdroid-root"
 )
+FLATPAK_HELPER = (
+    os.path.join(_SELF_DIR, "linuxdroid-flatpak-helper")
+    if os.path.exists(os.path.join(_SELF_DIR, "linuxdroid-flatpak-helper"))
+    else "/usr/local/bin/linuxdroid-flatpak-helper"
+)
+
+FLATHUB_URL = "https://dl.flathub.org/repo/flathub.flatpakrepo"
 
 SYSTEM_MUTATING_CMDS = {
     "remote-add",
@@ -34,12 +43,21 @@ SYSTEM_MUTATING_CMDS = {
     "pin",
 }
 
+USER_DEFAULT_CMDS = SYSTEM_MUTATING_CMDS | {
+    "remote-ls",
+    "remote-info",
+}
+
+FAST_HELP_FLAGS = {"-h", "--help", "--version", "--default-arch", "--supported-arches", "--gl-drivers"}
+
 SYSTEM_BUS_CONF = """<!DOCTYPE busconfig PUBLIC "-//freedesktop//DTD D-Bus Bus Configuration 1.0//EN"
  "http://www.freedesktop.org/standards/dbus/1.0/busconfig.dtd">
 <busconfig>
   <type>system</type>
   <listen>unix:path=/run/dbus/system_bus_socket</listen>
   <auth>EXTERNAL</auth>
+  <auth>ANONYMOUS</auth>
+  <allow_anonymous/>
   <policy context="default">
     <allow user="*"/>
     <allow own="*"/>
@@ -56,6 +74,8 @@ SESSION_BUS_CONF_TMPL = """<!DOCTYPE busconfig PUBLIC "-//freedesktop//DTD D-Bus
   <type>session</type>
   <listen>unix:path={sock_path}</listen>
   <auth>EXTERNAL</auth>
+  <auth>ANONYMOUS</auth>
+  <allow_anonymous/>
   <policy context="default">
     <allow user="*"/>
     <allow own="*"/>
@@ -141,10 +161,10 @@ def ensure_system_bus():
     ensure_runtime_dirs()
     sock = "/run/dbus/system_bus_socket"
     if is_unix_socket_live(sock):
-        return
+        return None
     dbus_daemon = shutil.which("dbus-daemon")
     if not dbus_daemon:
-        return
+        return None
     try:
         os.makedirs("/tmp/linuxdroid-dbus", exist_ok=True)
         conf_path = "/tmp/linuxdroid-dbus/system.conf"
@@ -155,7 +175,7 @@ def ensure_system_bus():
                 os.unlink(sock)
             except OSError:
                 subprocess.call([LINUXDROID_ROOT, "rm", "-f", sock])
-        subprocess.Popen(
+        proc = subprocess.Popen(
             [dbus_daemon, f"--config-file={conf_path}", "--nofork", "--nopidfile"],
             stdin=subprocess.DEVNULL,
             stdout=subprocess.DEVNULL,
@@ -166,8 +186,9 @@ def ensure_system_bus():
             if is_unix_socket_live(sock):
                 break
             time.sleep(0.05)
+        return proc
     except OSError:
-        pass
+        return None
 
 
 def ensure_session_bus():
@@ -178,7 +199,7 @@ def ensure_session_bus():
 
     cur_addr = os.environ.get("DBUS_SESSION_BUS_ADDRESS", "")
     if is_dbus_address_live(cur_addr):
-        return
+        return None
 
     bus_addr_file = os.path.join(xdg_run, "bus-address")
     if os.path.isfile(bus_addr_file):
@@ -187,18 +208,19 @@ def ensure_session_bus():
                 saved_addr = f.read().strip()
             if is_dbus_address_live(saved_addr):
                 os.environ["DBUS_SESSION_BUS_ADDRESS"] = saved_addr
-                return
+                return None
         except OSError:
             pass
 
     std_bus = os.path.join(xdg_run, "bus")
     if is_unix_socket_live(std_bus):
         os.environ["DBUS_SESSION_BUS_ADDRESS"] = f"unix:path={std_bus}"
-        return
+        return None
 
     dbus_daemon = shutil.which("dbus-daemon")
     if not dbus_daemon:
-        return
+        return None
+    proc = None
     try:
         os.makedirs("/tmp/linuxdroid-dbus", exist_ok=True)
         sock = f"/tmp/linuxdroid-dbus/session-{uid}.sock"
@@ -211,7 +233,7 @@ def ensure_session_bus():
                     os.unlink(sock)
                 except OSError:
                     pass
-            subprocess.Popen(
+            proc = subprocess.Popen(
                 [dbus_daemon, f"--config-file={conf_path}", "--nofork", "--nopidfile"],
                 stdin=subprocess.DEVNULL,
                 stdout=subprocess.DEVNULL,
@@ -226,19 +248,166 @@ def ensure_session_bus():
             os.environ["DBUS_SESSION_BUS_ADDRESS"] = f"unix:path={sock}"
     except OSError:
         pass
+    return proc
+
+
+def ensure_flatpak_session_helper():
+    if not os.path.exists(FLATPAK_HELPER):
+        return None
+    if not os.environ.get("DBUS_SESSION_BUS_ADDRESS"):
+        return None
+    uid = os.geteuid()
+    pid_file = f"/tmp/linuxdroid-dbus/flatpak-helper-{uid}.pid"
+    try:
+        if os.path.isfile(pid_file):
+            with open(pid_file, "r", encoding="utf-8") as f:
+                old_pid = int(f.read().strip())
+            os.kill(old_pid, 0)
+            return None
+    except (OSError, ValueError):
+        pass
+
+    try:
+        os.makedirs("/tmp/linuxdroid-dbus", exist_ok=True)
+        proc = subprocess.Popen(
+            [FLATPAK_HELPER],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            start_new_session=True,
+        )
+        with open(pid_file, "w", encoding="utf-8") as f:
+            f.write(f"{proc.pid}\n")
+        return proc
+    except OSError:
+        return None
+
+
+def ensure_xdg_data_dirs():
+    home = os.environ.get("HOME") or "/home/linux"
+    user_exports = os.path.join(home, ".local", "share", "flatpak", "exports", "share")
+    sys_exports = "/var/lib/flatpak/exports/share"
+    raw = os.environ.get("XDG_DATA_DIRS") or "/usr/local/share:/usr/share"
+    parts = [p for p in raw.split(":") if p]
+    changed = False
+    for exp in (sys_exports, user_exports):
+        if exp not in parts:
+            parts.insert(0, exp)
+            changed = True
+    if changed:
+        os.environ["XDG_DATA_DIRS"] = ":".join(parts)
+
+
+def user_flatpak_base_dir():
+    xdg_data = os.environ.get("XDG_DATA_HOME")
+    if not xdg_data:
+        home = os.environ.get("HOME") or "/home/linux"
+        xdg_data = os.path.join(home, ".local", "share")
+    return os.path.join(xdg_data, "flatpak")
+
+
+def tune_ostree_repo_config(repo_dir, bare_user_only=True):
+    conf_path = os.path.join(repo_dir, "config")
+    if not os.path.isfile(conf_path):
+        try:
+            for sub in (
+                "objects",
+                os.path.join("tmp", "cache"),
+                "extensions",
+                "state",
+                os.path.join("refs", "heads"),
+                os.path.join("refs", "mirrors"),
+                os.path.join("refs", "remotes"),
+            ):
+                os.makedirs(os.path.join(repo_dir, sub), exist_ok=True)
+            mode = "bare-user-only" if bare_user_only else "bare"
+            with open(conf_path, "w", encoding="utf-8") as f:
+                f.write(
+                    f"[core]\nrepo_version=1\nmode={mode}\nfsync=false\nmin-free-space-percent=1\n"
+                )
+        except OSError:
+            pass
+        return
+
+    try:
+        with open(conf_path, "r", encoding="utf-8", errors="surrogateescape") as f:
+            raw = f.read()
+        cp = configparser.RawConfigParser()
+        cp.optionxform = str
+        cp.read_string(raw)
+        if not cp.has_section("core"):
+            cp.add_section("core")
+        changed = False
+        if cp.get("core", "fsync", fallback="") != "false":
+            cp.set("core", "fsync", "false")
+            changed = True
+        if cp.get("core", "min-free-space-percent", fallback="") != "1":
+            cp.set("core", "min-free-space-percent", "1")
+            changed = True
+        if changed:
+            buf = io.StringIO()
+            cp.write(buf, space_around_delimiters=False)
+            tmp_path = conf_path + ".tmp"
+            with open(tmp_path, "w", encoding="utf-8", errors="surrogateescape") as f:
+                f.write(buf.getvalue())
+            os.replace(tmp_path, conf_path)
+    except Exception:
+        pass
+
+
+def ensure_user_flatpak_repo(args, subcmd):
+    base = user_flatpak_base_dir()
+    repo_dir = os.path.join(base, "repo")
+    tune_ostree_repo_config(repo_dir, bare_user_only=True)
+
+    # If the user asks to install/inspect from 'flathub' and user repo doesn't have it yet
+    # (for instance, upgraded from an older setup that added flathub only to --system),
+    # register flathub in --user automatically so `flatpak install flathub <app>` works immediately.
+    if subcmd in ("install", "remote-ls", "remote-info") and "flathub" in args:
+        conf_path = os.path.join(repo_dir, "config")
+        has_flathub = False
+        try:
+            if os.path.isfile(conf_path):
+                with open(conf_path, "r", encoding="utf-8", errors="ignore") as f:
+                    has_flathub = '[remote "flathub"]' in f.read()
+        except OSError:
+            pass
+        if not has_flathub:
+            subprocess.call(
+                [REAL_FLATPAK, "--user", "remote-add", "--if-not-exists", "flathub", FLATHUB_URL],
+                stdin=subprocess.DEVNULL,
+            )
+            tune_ostree_repo_config(repo_dir, bare_user_only=True)
 
 
 def find_subcommand_and_scope(args):
     subcmd = None
     explicit_user = False
+    explicit_system = False
+    has_fast_help = False
     for a in args:
         if a == "--":
             break
+        if a in FAST_HELP_FLAGS:
+            has_fast_help = True
         if a in ("--user", "-u"):
             explicit_user = True
+        elif a == "--system" or a.startswith("--installation="):
+            explicit_system = True
         elif not a.startswith("-") and subcmd is None:
             subcmd = a
-    return subcmd, explicit_user
+    return subcmd, explicit_user, explicit_system, has_fast_help
+
+
+def inject_user_scope_if_default(args, subcmd, explicit_user, explicit_system):
+    if explicit_user or explicit_system or subcmd not in USER_DEFAULT_CMDS:
+        return args, explicit_user
+    out = list(args)
+    for idx, a in enumerate(out):
+        if a == subcmd:
+            out.insert(idx + 1, "--user")
+            return out, True
+    return ["--user"] + out, True
 
 
 def inject_no_documents_portal_if_needed(args):
@@ -264,18 +433,45 @@ def main(argv):
 
     cap_nofile_soft_limit()
     os.environ.setdefault("FLATPAK_BWRAP", BWRAP_SHIM)
+    ensure_xdg_data_dirs()
+
     args = argv[1:]
-    subcmd, explicit_user = find_subcommand_and_scope(args)
+    subcmd, explicit_user, explicit_system, has_fast_help = find_subcommand_and_scope(args)
 
-    if subcmd == "run":
-        ensure_system_bus()
-        ensure_session_bus()
-        args = inject_no_documents_portal_if_needed(args)
+    spawned_daemons = []
+    if subcmd and not has_fast_help:
+        args, explicit_user = inject_user_scope_if_default(args, subcmd, explicit_user, explicit_system)
+        ensure_runtime_dirs()
+        for p in (ensure_system_bus(), ensure_session_bus()):
+            if p is not None:
+                spawned_daemons.append(p)
+        if not explicit_system:
+            ensure_user_flatpak_repo(args, subcmd)
+        if subcmd == "run":
+            hp = ensure_flatpak_session_helper()
+            if hp is not None:
+                spawned_daemons.append(hp)
+            args = inject_no_documents_portal_if_needed(args)
 
-    if os.geteuid() != 0 and not explicit_user and subcmd in SYSTEM_MUTATING_CMDS:
-        os.execv(LINUXDROID_ROOT, [LINUXDROID_ROOT, REAL_FLATPAK] + args)
+    target_cmd = (
+        [LINUXDROID_ROOT, REAL_FLATPAK] + args
+        if (os.geteuid() != 0 and explicit_system and not explicit_user and subcmd in SYSTEM_MUTATING_CMDS)
+        else [REAL_FLATPAK] + args
+    )
 
-    os.execv(REAL_FLATPAK, [REAL_FLATPAK] + args)
+    # When invoked outside a persistent desktop session (e.g., standalone CLI or setup scripts),
+    # clean up any ephemeral D-Bus / helper processes we spawned so PRoot exits cleanly right away.
+    if spawned_daemons and os.environ.get("BL_DESKTOP") != "1":
+        try:
+            return subprocess.call(target_cmd)
+        finally:
+            for p in reversed(spawned_daemons):
+                try:
+                    p.terminate()
+                except OSError:
+                    pass
+
+    os.execv(target_cmd[0], target_cmd)
 
 
 if __name__ == "__main__":

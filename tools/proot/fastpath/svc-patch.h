@@ -246,10 +246,13 @@ static void svc_child(void) { svc_busy = 0; }
 __attribute__((constructor)) static void svc_patch_init(void) {
   const char *enabled = getenv("PROOT_FP_PATCH_SVC");
   if ((enabled && strcmp(enabled, "1")) || !fp_ready()) return;
-  if (getauxval(AT_HWCAP) & HWCAP_SVE) return;
-#ifdef HWCAP2_SME
-  if (getauxval(AT_HWCAP2) & HWCAP2_SME) return;
-#endif
+  /*
+   * Linux AArch64 ABI discards SVE state above 128-bit v0..v31 and exits SME
+   * streaming mode on every svc #0 syscall, and fp_svc_entry saves/restores
+   * full x0..x30, q0..q31, fpcr, fpsr, and nzcv while libblfastpath.so is
+   * compiled with +nosve -fno-tree-vectorize. Keep svc patching active on
+   * modern ARMv9 (Snapdragon 8 Gen 2/3/Elite, Dimensity, Tensor) SoCs.
+   */
   if (!svc_single_thread()) return;
   if (pthread_atfork(NULL, NULL, svc_child)) return;
   svc_android_api = svc_host_android_api();

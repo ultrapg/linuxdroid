@@ -88,6 +88,8 @@ class RuntimeStabilityPerformanceTest {
         assertTrue("libblsession.so must export 64-bit linkat()", funcs.contains("linkat"))
         assertTrue("libblsession.so must export getgrgid() for Android supplementary GIDs", funcs.contains("getgrgid"))
         assertTrue("libblsession.so must export getgrgid_r() for Android supplementary GIDs", funcs.contains("getgrgid_r"))
+        assertTrue("libblsession.so must export getpwuid() for Android/PRoot peer UIDs", funcs.contains("getpwuid"))
+        assertTrue("libblsession.so must export getpwuid_r() for D-Bus SO_PEERCRED auth", funcs.contains("getpwuid_r"))
         assertTrue("libblsession.so must export fopen() for /proc/stat synthesis", funcs.contains("fopen"))
         assertTrue("libblsession.so must export fopen64() for /proc/stat synthesis", funcs.contains("fopen64"))
         assertTrue("libblsession.so must export __open_2() for fortified open calls", funcs.contains("__open_2"))
@@ -160,5 +162,97 @@ class RuntimeStabilityPerformanceTest {
         assertEquals("1", turnipCfg.envVars["MESA_DISK_CACHE_DATABASE"])
         assertEquals("lazy", turnipCfg.envVars["ZINK_DESCRIPTORS"])
         assertEquals("1", turnipCfg.envVars["MESA_NO_ERROR"])
+    }
+
+    @Test
+    fun preloadsAvoidGlibc238SymbolsAndExportFlatpakVfsInterposers() {
+        val assetsRoot = findAssetsLinuxfs()
+        for (rel in listOf(
+            "usr/local/lib/libblsession.so",
+            "usr/local/lib/libblfastpath.so",
+            "usr/local/lib/libblaudit.so",
+        )) {
+            val raw = File(assetsRoot, rel).readBytes()
+            val latin = String(raw, Charsets.ISO_8859_1)
+            assertFalse("$rel must not depend on GLIBC_2.38 symbols inside Flatpak runtimes", latin.contains("GLIBC_2.38"))
+            assertFalse("$rel must not depend on GLIBC_2.39 symbols inside Flatpak runtimes", latin.contains("GLIBC_2.39"))
+        }
+
+        val sessionFuncs = readDefinedElf64DynamicFunctions(File(assetsRoot, "usr/local/lib/libblsession.so"))
+        for (sym in listOf("opendir", "stat", "lstat", "fstatat", "statx", "readlink", "readlinkat", "realpath")) {
+            assertTrue("libblsession.so must export $sym() for per-process Flatpak VFS", sessionFuncs.contains(sym))
+        }
+
+        val fastpathFuncs = readDefinedElf64DynamicFunctions(File(assetsRoot, "usr/local/lib/libblfastpath.so"))
+        assertTrue(
+            "libblfastpath.so must export bl_fastpath_is_active()",
+            fastpathFuncs.contains("bl_fastpath_is_active"),
+        )
+    }
+
+    @Test
+    fun manifestListsAllFlatpakAndHelperAssetsAndEveryEntryExistsOnDisk() {
+        val assetsRoot = findAssetsLinuxfs()
+        val manifest = File(assetsRoot, "MANIFEST.txt")
+        assertTrue(manifest.isFile)
+        val entries = manifest.readLines()
+            .map { it.trim() }
+            .filter { it.isNotEmpty() && !it.startsWith("#") }
+
+        val modesByPath = HashMap<String, String>()
+        for (line in entries) {
+            val parts = line.split(Regex("\\s+"), limit = 2)
+            assertEquals("Malformed MANIFEST.txt line: $line", 2, parts.size)
+            val f = File(assetsRoot, parts[1])
+            assertTrue("Missing asset listed in MANIFEST.txt: ${parts[1]}", f.exists())
+            modesByPath[parts[1]] = parts[0]
+        }
+
+        for (bin in listOf(
+            "usr/local/bin/flatpak",
+            "usr/local/bin/bwrap",
+            "usr/local/bin/flatpak-spawn",
+            "usr/local/bin/linuxdroid-flatpak-helper",
+            "usr/local/bin/linuxdroid-apps",
+        )) {
+            assertEquals("$bin must be 0755 in MANIFEST.txt", "0755", modesByPath[bin])
+        }
+    }
+
+    @Test
+    fun flatpakAndWarehouseStackUsesUnprivilegedUserScopePerProcessVfsAndPortalHelper() {
+        val assetsRoot = findAssetsLinuxfs()
+
+        val flatpakPy = File(assetsRoot, "usr/local/bin/flatpak").readText()
+        assertTrue(flatpakPy.contains("USER_DEFAULT_CMDS"))
+        assertTrue(flatpakPy.contains("bare-user-only"))
+        assertTrue(flatpakPy.contains("\"fsync\", \"false\""))
+        assertTrue(flatpakPy.contains("linuxdroid-flatpak-helper"))
+
+        val bwrapPy = File(assetsRoot, "usr/local/bin/bwrap").readText()
+        assertTrue(bwrapPy.contains("BL_FLATPAK_INFO"))
+        assertTrue(bwrapPy.contains("BL_FLATPAK_SANDBOX_DIR"))
+        assertTrue(bwrapPy.contains("BL_FLATPAK_EXTS"))
+        assertTrue(bwrapPy.contains("BL_FLATPAK_EXEC"))
+        assertTrue(bwrapPy.contains("glib-compile-schemas"))
+        assertTrue(bwrapPy.contains("GSK_RENDERER"))
+        assertTrue(bwrapPy.contains(".bwrap-meta-"))
+        assertTrue(bwrapPy.contains("\"-C\""))
+
+        val spawnPy = File(assetsRoot, "usr/local/bin/flatpak-spawn").readText()
+        assertTrue(spawnPy.contains("--forward-fd"))
+        assertTrue(spawnPy.contains("set_inheritable"))
+        assertTrue(spawnPy.contains("BL_FLATPAK_INFO"))
+        assertTrue(spawnPy.contains("BL_FLATPAK_EXEC"))
+        assertTrue(spawnPy.contains("/.var/app/"))
+
+        val helperPy = File(assetsRoot, "usr/local/bin/linuxdroid-flatpak-helper").readText()
+        assertTrue(helperPy.contains("org.freedesktop.Flatpak"))
+        assertTrue(helperPy.contains("org.freedesktop.portal.Flatpak"))
+        assertTrue(helperPy.contains("HostCommand"))
+        assertTrue(helperPy.contains("get_unix_fd_list"))
+
+        val appsSh = File(assetsRoot, "usr/local/bin/linuxdroid-apps").readText()
+        assertTrue(appsSh.contains("flatpak --user install -y --or-update flathub io.github.flattool.Warehouse"))
     }
 }

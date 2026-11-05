@@ -216,6 +216,8 @@ start_system_bus() {
   <type>system</type>
   <listen>unix:path=/run/dbus/system_bus_socket</listen>
   <auth>EXTERNAL</auth>
+  <auth>ANONYMOUS</auth>
+  <allow_anonymous/>
   <policy context="default">
     <allow user="*"/>
     <allow own="*"/>

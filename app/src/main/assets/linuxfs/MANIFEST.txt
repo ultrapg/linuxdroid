@@ -36,6 +36,7 @@
 0755 usr/local/bin/linuxdroid-clipboard
 0755 usr/local/bin/linuxdroid-desktop
 0755 usr/local/bin/linuxdroid-fex
+0755 usr/local/bin/linuxdroid-flatpak-helper
 0755 usr/local/bin/linuxdroid-gpu
 0755 usr/local/bin/linuxdroid-ime
 0755 usr/local/bin/linuxdroid-open

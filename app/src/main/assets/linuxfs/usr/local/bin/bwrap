@@ -1,5 +1,7 @@
 #!/usr/bin/python3 -BE
 import glob
+import hashlib
+import json
 import os
 import shutil
 import subprocess
@@ -83,6 +85,20 @@ FLAGS_3 = {
     "--overlay",
 }
 
+TRIGGER_BINS = {
+    "ldconfig",
+    "ldconfig.real",
+    "glib-compile-schemas",
+    "gtk4-update-icon-cache",
+    "gtk-update-icon-cache",
+    "update-desktop-database",
+    "update-mime-database",
+    "gdk-pixbuf-query-loaders",
+    "fc-cache",
+    " gio-querymodules",
+    "gio-querymodules",
+}
+
 NEVER_SYMLINK_PREFIXES = (
     "libc.so",
     "ld-linux",
@@ -101,16 +117,59 @@ NEVER_SYMLINK_PREFIXES = (
 )
 
 
+def prune_stale_sandbox_dirs(uid, max_checks=16):
+    prefix = f".bwrap-sbx-{uid}-"
+    try:
+        entries = os.listdir("/tmp")
+    except OSError:
+        return
+    checked = 0
+    my_pid = os.getpid()
+    for name in entries:
+        if not name.startswith(prefix):
+            continue
+        checked += 1
+        if checked > max_checks:
+            break
+        pid_part = name[len(prefix) :]
+        try:
+            pid = int(pid_part)
+        except ValueError:
+            continue
+        if pid == my_pid:
+            continue
+        alive = True
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            alive = False
+        except PermissionError:
+            alive = True
+        except OSError:
+            alive = os.path.exists(f"/proc/{pid}")
+        if not alive:
+            shutil.rmtree(os.path.join("/tmp", name), ignore_errors=True)
+
+
+def ensure_sandbox_dir(sbx_dir):
+    try:
+        os.makedirs(sbx_dir, mode=0o700, exist_ok=True)
+        return sbx_dir
+    except OSError:
+        return None
+
+
 def read_args_fd(fd_str):
     try:
         fd = int(fd_str)
-        data = b""
+        chunks = []
         while True:
             chunk = os.read(fd, 65536)
             if not chunk:
                 break
-            data += chunk
+            chunks.append(chunk)
         os.close(fd)
+        data = b"".join(chunks)
         parts = [p.decode("utf-8", errors="surrogateescape") for p in data.split(b"\0")]
         if parts and parts[-1] == "":
             parts.pop()
@@ -136,42 +195,84 @@ def expand_args(raw_args):
     return expanded
 
 
-def copy_fd_to_dest(fd_str, dest):
+def copy_fd_to_dest(fd_str, dest, sbx_dir=None):
+    if not sbx_dir:
+        sbx_dir = f"/tmp/.bwrap-sbx-{os.geteuid()}-{os.getpid()}"
     try:
         fd = int(fd_str)
-        data = b""
+        chunks = []
         while True:
             chunk = os.read(fd, 65536)
             if not chunk:
                 break
-            data += chunk
+            chunks.append(chunk)
         os.close(fd)
+        data = b"".join(chunks)
     except (OSError, ValueError):
         return None
 
+    if dest == "/.flatpak-info":
+        if ensure_sandbox_dir(sbx_dir):
+            out = os.path.join(sbx_dir, "flatpak-info")
+            try:
+                with open(out, "wb") as f:
+                    f.write(data)
+                return out
+            except OSError:
+                return None
+        return None
+
     if dest == "/etc/ld.so.conf":
-        staged_conf = f"/tmp/.bwrap-ld-so-conf-{os.getpid()}"
-        try:
-            with open(staged_conf, "wb") as f:
-                f.write(data)
-            return staged_conf
-        except OSError:
-            return None
+        if ensure_sandbox_dir(sbx_dir):
+            staged_conf = os.path.join(sbx_dir, "ld.so.conf")
+            try:
+                with open(staged_conf, "wb") as f:
+                    f.write(data)
+                return staged_conf
+            except OSError:
+                return None
+        return None
 
     home_dir = os.environ.get("HOME") or "/home/linux"
     allowed_prefixes = ("/tmp/", "/run/", "/var/tmp/", home_dir.rstrip("/") + "/")
-    if not dest.startswith(allowed_prefixes):
-        return None
+    if dest.startswith(allowed_prefixes):
+        try:
+            parent = os.path.dirname(dest)
+            if parent:
+                os.makedirs(parent, exist_ok=True)
+            with open(dest, "wb") as f:
+                f.write(data)
+            return dest
+        except OSError:
+            pass
 
-    try:
-        parent = os.path.dirname(dest)
-        if parent:
-            os.makedirs(parent, exist_ok=True)
-        with open(dest, "wb") as f:
-            f.write(data)
-        return dest
-    except OSError:
+    if ensure_sandbox_dir(sbx_dir):
+        rel = dest.lstrip("/")
+        if rel and ".." not in rel.split("/"):
+            staged = os.path.join(sbx_dir, rel)
+            try:
+                os.makedirs(os.path.dirname(staged), exist_ok=True)
+                with open(staged, "wb") as f:
+                    f.write(data)
+                return staged
+            except OSError:
+                pass
+    return None
+
+
+def stage_flatpak_info_file(src_path, sbx_dir):
+    if not src_path or not os.path.isfile(src_path):
         return None
+    if ensure_sandbox_dir(sbx_dir):
+        dst = os.path.join(sbx_dir, "flatpak-info")
+        if os.path.abspath(src_path) == os.path.abspath(dst):
+            return dst
+        try:
+            shutil.copyfile(src_path, dst)
+            return dst
+        except OSError:
+            return src_path
+    return src_path
 
 
 def prepend_env_path(key, entries, default_existing=""):
@@ -196,9 +297,29 @@ def append_env_path(key, entries, default_existing=""):
         os.environ[key] = ":".join(cur)
 
 
-def build_filtered_runtime_libdir(usr_src):
-    rt_lib_dir = f"/tmp/.bwrap-rt-lib-{os.getuid()}"
+def safe_mtime_ns(path):
+    if not path:
+        return 0
     try:
+        return os.stat(path).st_mtime_ns
+    except OSError:
+        return 0
+
+
+def short_hash(text):
+    return hashlib.sha1(text.encode("utf-8", errors="surrogateescape")).hexdigest()[:12]
+
+
+def build_filtered_runtime_libdir(usr_src):
+    tag = short_hash(usr_src)
+    rt_lib_dir = f"/tmp/.bwrap-rt-lib-{os.getuid()}-{tag}"
+    stamp_file = os.path.join(rt_lib_dir, ".stamp")
+    usr_mtime = str(safe_mtime_ns(usr_src))
+    try:
+        if os.path.isfile(stamp_file):
+            with open(stamp_file, "r", encoding="utf-8") as f:
+                if f.read().strip() == usr_mtime:
+                    return rt_lib_dir
         os.makedirs(rt_lib_dir, exist_ok=True)
     except OSError:
         return None
@@ -238,6 +359,11 @@ def build_filtered_runtime_libdir(usr_src):
                 os.symlink(src_file, dst_link)
             except OSError:
                 pass
+    try:
+        with open(stamp_file, "w", encoding="utf-8") as f:
+            f.write(usr_mtime)
+    except OSError:
+        pass
     return rt_lib_dir
 
 
@@ -262,6 +388,9 @@ def map_sandbox_virtual_path(vpath, app_src, usr_src, runtime_ext_dirs):
         return "/usr/local/bin/bwrap"
     if vpath in ("/usr/bin/flatpak-spawn", "/bin/flatpak-spawn") and os.path.exists("/usr/local/bin/flatpak-spawn"):
         return "/usr/local/bin/flatpak-spawn"
+    if vpath == "/run/host" or vpath.startswith("/run/host/"):
+        rest = vpath[9:]
+        return rest if rest else "/"
     for dst_prefix, src_prefix in sorted(runtime_ext_dirs, key=lambda kv: len(kv[0]), reverse=True):
         if vpath == dst_prefix:
             return src_prefix
@@ -371,7 +500,7 @@ def build_runtime_library_path(app_src, usr_src, runtime_ext_dirs):
         )
         raw_dirs.extend(usr_bases)
         for base in usr_bases:
-            for priv in ("pulseaudio", "gvfs", "tinysparql-3.0", "gjs", "webkitgtk-6.0", "webkit2gtk-4.1"):
+            for priv in ("pulseaudio", "gvfs", "tinysparql-3.0", "tracker-3.0", "gjs", "webkitgtk-6.0", "webkit2gtk-4.1"):
                 raw_dirs.append(os.path.join(base, priv))
     seen = set()
     out = []
@@ -385,6 +514,8 @@ def build_runtime_library_path(app_src, usr_src, runtime_ext_dirs):
 def prepare_relocated_pixbuf_cache(usr_src):
     if not usr_src:
         return None
+    tag = short_hash(usr_src)
+    out_cache = f"/tmp/.bwrap-pixbuf-{os.getuid()}-{tag}.cache"
     matches = glob.glob(os.path.join(usr_src, "lib", "*", "gdk-pixbuf-2.0", "*", "loaders.cache")) + glob.glob(
         os.path.join(usr_src, "lib*", "gdk-pixbuf-2.0", "*", "loaders.cache")
     )
@@ -392,16 +523,177 @@ def prepare_relocated_pixbuf_cache(usr_src):
         return None
     src_cache = matches[0]
     try:
+        if os.path.isfile(out_cache) and safe_mtime_ns(out_cache) >= safe_mtime_ns(src_cache):
+            return out_cache
         with open(src_cache, "r", encoding="utf-8", errors="replace") as f:
             content = f.read()
         relocated = content.replace('"/usr/', f'"{usr_src.rstrip("/")}/')
-        tag = f"{abs(hash(usr_src)) & 0xffffffff:08x}"
-        out_cache = f"/tmp/.bwrap-pixbuf-{os.getuid()}-{tag}.cache"
-        with open(out_cache, "w", encoding="utf-8") as f:
+        tmp_cache = f"{out_cache}.{os.getpid()}.tmp"
+        with open(tmp_cache, "w", encoding="utf-8") as f:
             f.write(relocated)
+        os.replace(tmp_cache, out_cache)
         return out_cache
     except OSError:
-        return None
+        return out_cache if os.path.isfile(out_cache) else None
+
+
+def load_or_build_runtime_meta(app_src, usr_src, runtime_ext_dirs):
+    ext_sig = "|".join(f"{d}={s}@{safe_mtime_ns(s)}" for d, s in runtime_ext_dirs)
+    ld_conf_sig = "|".join(f"{p}@{safe_mtime_ns(p)}" for p in sorted(glob.glob("/run/flatpak/ld.so.conf.d/*.conf")))
+    key_raw = f"{app_src or ''}@{safe_mtime_ns(app_src)}|{usr_src or ''}@{safe_mtime_ns(usr_src)}|{ext_sig}|{ld_conf_sig}"
+    cache_path = f"/tmp/.bwrap-meta-{os.getuid()}-{short_hash(key_raw)}.json"
+    try:
+        if os.path.isfile(cache_path):
+            with open(cache_path, "r", encoding="utf-8") as f:
+                meta = json.load(f)
+            if meta.get("key") == key_raw:
+                pix = meta.get("pixbuf_cache")
+                if not pix or os.path.isfile(pix):
+                    return meta.get("rt_lib_path", ""), pix
+    except Exception:
+        pass
+
+    rt_lib_path = build_runtime_library_path(app_src, usr_src, runtime_ext_dirs)
+    pixbuf_cache = prepare_relocated_pixbuf_cache(usr_src)
+    try:
+        tmp_path = f"{cache_path}.{os.getpid()}.tmp"
+        with open(tmp_path, "w", encoding="utf-8") as f:
+            json.dump(
+                {
+                    "key": key_raw,
+                    "rt_lib_path": rt_lib_path,
+                    "pixbuf_cache": pixbuf_cache,
+                },
+                f,
+            )
+        os.replace(tmp_path, cache_path)
+    except OSError:
+        pass
+    return rt_lib_path, pixbuf_cache
+
+
+def ensure_app_gschemas(app_src, usr_src):
+    if not app_src:
+        return
+    schemas_dir = os.path.join(app_src, "share", "glib-2.0", "schemas")
+    if not os.path.isdir(schemas_dir):
+        return
+    compiled = os.path.join(schemas_dir, "gschemas.compiled")
+    if os.path.isfile(compiled) and os.path.getsize(compiled) > 0:
+        return
+    try:
+        has_xml = any(
+            n.endswith((".gschema.xml", ".override", ".enums.xml")) for n in os.listdir(schemas_dir)
+        )
+    except OSError:
+        return
+    if not has_xml:
+        return
+
+    compiler = shutil.which("glib-compile-schemas")
+    if not compiler:
+        for cand in glob.glob("/usr/lib/*/glib-2.0/glib-compile-schemas") + [
+            "/usr/lib/glib-2.0/glib-compile-schemas"
+        ]:
+            if os.access(cand, os.X_OK):
+                compiler = cand
+                break
+    if not compiler:
+        return
+
+    if os.access(schemas_dir, os.W_OK):
+        try:
+            subprocess.call(
+                [compiler, schemas_dir],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+            if os.path.isfile(compiled) and os.path.getsize(compiled) > 0:
+                return
+        except OSError:
+            pass
+
+    fallback_dir = f"/tmp/.bwrap-schemas-{os.getuid()}-{short_hash(schemas_dir)}"
+    fallback_compiled = os.path.join(fallback_dir, "gschemas.compiled")
+    if not (os.path.isfile(fallback_compiled) and os.path.getsize(fallback_compiled) > 0):
+        try:
+            os.makedirs(fallback_dir, exist_ok=True)
+            subprocess.call(
+                [compiler, "--targetdir=" + fallback_dir, schemas_dir],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+        except OSError:
+            pass
+    if os.path.isfile(fallback_compiled):
+        os.environ["GSETTINGS_SCHEMA_DIR"] = fallback_dir
+
+
+def sanitize_graphics_env_for_runtime(usr_src, runtime_ext_dirs, explicit_setenv_keys):
+    # Strip host toolkit module variables that point at host Ubuntu /usr/lib ABI plugins
+    # unless explicitly requested via bwrap --setenv.
+    for mod_key in ("GTK_MODULES", "GTK3_MODULES", "GTK_PATH", "GTK_IM_MODULE", "QT_IM_MODULE"):
+        if mod_key not in explicit_setenv_keys:
+            os.environ.pop(mod_key, None)
+
+    # Strip host-Ubuntu /usr/... ICDs and DRI paths that would either fail inside
+    # the Flatpak runtime dynamic linker or load incompatible host glibc .so files.
+    for vk_key in ("VK_ICD_FILENAMES", "VK_DRIVER_FILES"):
+        raw = os.environ.get(vk_key)
+        if raw:
+            kept = [p for p in raw.split(":") if p and not p.startswith(("/usr/", "/lib/")) and os.path.isfile(p)]
+            if kept:
+                os.environ[vk_key] = ":".join(kept)
+            else:
+                os.environ.pop(vk_key, None)
+
+    ext_icd_files = []
+    for _, ext_src in runtime_ext_dirs:
+        ext_icd_files.extend(sorted(glob.glob(os.path.join(ext_src, "share", "vulkan", "icd.d", "*.json"))))
+    if usr_src:
+        ext_icd_files.extend(sorted(glob.glob(os.path.join(usr_src, "share", "vulkan", "icd.d", "*.json"))))
+
+    # In nested software-composited desktops (KDE KWin QPainter wl_shm or Xwayland llvmpipe),
+    # GTK4's default Vulkan/NGL renderer either fails dmabuf negotiation or spends seconds
+    # compiling LLVM shaders. Default GSK_RENDERER=cairo unless caller explicitly chose one.
+    if "GSK_RENDERER" not in explicit_setenv_keys and not os.environ.get("GSK_RENDERER"):
+        software_desktop = (
+            os.environ.get("KWIN_COMPOSE") == "Q"
+            or os.environ.get("LIBGL_ALWAYS_SOFTWARE") == "1"
+            or os.environ.get("GALLIUM_DRIVER") == "llvmpipe"
+            or not os.path.exists("/dev/dri")
+        )
+        if software_desktop:
+            os.environ["GSK_RENDERER"] = "cairo"
+            os.environ["BL_BWRAP_SET_GSK"] = "1"
+    elif ext_icd_files and "VK_ICD_FILENAMES" not in os.environ:
+        os.environ["VK_ICD_FILENAMES"] = ":".join(ext_icd_files)
+
+
+def remap_command_token(token, app_src, usr_src, runtime_ext_dirs, ephemeral_binds, force_virtual_remap):
+    for dst_prefix, src_prefix in ephemeral_binds.items():
+        if token == dst_prefix:
+            return src_prefix
+        if token.startswith(dst_prefix + "/"):
+            return src_prefix + token[len(dst_prefix) :]
+
+    if not force_virtual_remap:
+        return token
+
+    if "=" in token and token.startswith("-"):
+        opt, val = token.split("=", 1)
+        mapped_val = map_sandbox_virtual_path(val, app_src, usr_src, runtime_ext_dirs)
+        if mapped_val != val:
+            return f"{opt}={mapped_val}"
+        return token
+
+    if token.startswith(("/app", "/usr", "/run/host")):
+        mapped = map_sandbox_virtual_path(token, app_src, usr_src, runtime_ext_dirs)
+        if mapped != token and (
+            token.startswith("/app") or os.path.lexists(mapped) or os.path.lexists(os.path.dirname(mapped))
+        ):
+            return mapped
+    return token
 
 
 def is_flatpak_owned_path(path, app_src, usr_src):
@@ -414,6 +706,73 @@ def is_flatpak_owned_path(path, app_src, usr_src):
     if path.startswith("/var/lib/flatpak/") or "/.local/share/flatpak/" in path:
         return True
     return False
+
+
+def sync_dir_entries_as_symlinks(src_dir, dst_dir):
+    if not os.path.isdir(src_dir) or not os.path.isdir(dst_dir):
+        return
+    try:
+        entries = os.listdir(src_dir)
+    except OSError:
+        return
+    for entry in entries:
+        src_e = os.path.join(src_dir, entry)
+        dst_e = os.path.join(dst_dir, entry)
+        try:
+            if os.path.islink(dst_e):
+                link_tgt = os.readlink(dst_e)
+                if not os.path.exists(dst_e) or link_tgt.startswith("/run/flatpak"):
+                    os.unlink(dst_e)
+            if not os.path.lexists(dst_e):
+                os.symlink(src_e, dst_e)
+        except OSError:
+            pass
+
+
+def ensure_runtime_sockets_reachable(saved_host_env):
+    wl = os.environ.get("WAYLAND_DISPLAY", "")
+    if wl and not os.path.isabs(wl):
+        xdg_run = os.environ.get("XDG_RUNTIME_DIR", "")
+        expected_wl = os.path.join(xdg_run, wl) if xdg_run else ""
+        if not expected_wl or not os.path.exists(expected_wl):
+            host_run = saved_host_env.get("BL_HOST_XDG_RUNTIME_DIR", "")
+            host_wl = saved_host_env.get("BL_HOST_WAYLAND_DISPLAY", "")
+            candidates = [f"/run/flatpak/{wl}"]
+            if host_run:
+                candidates.append(os.path.join(host_run, wl))
+                if host_wl and not os.path.isabs(host_wl):
+                    candidates.append(os.path.join(host_run, host_wl))
+            if host_wl and os.path.isabs(host_wl):
+                candidates.append(host_wl)
+            for cand in candidates:
+                if cand and os.path.exists(cand):
+                    if expected_wl:
+                        try:
+                            os.makedirs(xdg_run, exist_ok=True)
+                            if os.path.islink(expected_wl) and not os.path.exists(expected_wl):
+                                os.unlink(expected_wl)
+                            if not os.path.lexists(expected_wl):
+                                os.symlink(cand, expected_wl)
+                        except OSError:
+                            pass
+                    if not expected_wl or not os.path.exists(expected_wl):
+                        os.environ["WAYLAND_DISPLAY"] = cand
+                    break
+
+    dbus_addr = os.environ.get("DBUS_SESSION_BUS_ADDRESS", "")
+    if dbus_addr.startswith("unix:path="):
+        bus_path = dbus_addr[len("unix:path=") :].split(",", 1)[0]
+        if bus_path and not os.path.exists(bus_path) and os.path.exists("/run/flatpak/bus"):
+            try:
+                os.makedirs(os.path.dirname(bus_path), exist_ok=True)
+                if os.path.islink(bus_path) and not os.path.exists(bus_path):
+                    os.unlink(bus_path)
+                if not os.path.lexists(bus_path):
+                    os.symlink("/run/flatpak/bus", bus_path)
+            except OSError:
+                pass
+            if not os.path.exists(bus_path):
+                os.environ["DBUS_SESSION_BUS_ADDRESS"] = "unix:path=/run/flatpak/bus"
 
 
 def read_file_header(path, nbytes=256):
@@ -435,10 +794,19 @@ def main(argv):
             print("usage: bwrap [OPTIONS...] [--] COMMAND [ARGS...]")
             return 0
 
+    uid = os.getuid()
+    pid = os.getpid()
+    sbx_dir = f"/tmp/.bwrap-sbx-{uid}-{pid}"
+    prune_stale_sandbox_dirs(uid)
+
     keep_root_sock = os.environ.get("LINUXDROID_ROOT_SOCKET")
     keep_desktop = os.environ.get("BL_DESKTOP")
+    keep_kwin_compose = os.environ.get("KWIN_COMPOSE")
+    keep_libgl_sw = os.environ.get("LIBGL_ALWAYS_SOFTWARE")
     prev_fp_usr = os.environ.get("BL_FLATPAK_USR")
     prev_fp_app = os.environ.get("BL_FLATPAK_APP")
+    prev_fp_info = os.environ.get("BL_FLATPAK_INFO")
+    prev_fp_exts = os.environ.get("BL_FLATPAK_EXTS")
     saved_host_env = {}
     for real_k, saved_k in (
         ("DBUS_SESSION_BUS_ADDRESS", "BL_HOST_DBUS_SESSION_BUS_ADDRESS"),
@@ -460,7 +828,10 @@ def main(argv):
     usr_src = None
     runtime_ext_dirs = []
     staged_ld_conf = None
+    staged_flatpak_info = None
     ephemeral_binds = {}
+    deferred_dir_symlinks = []
+    explicit_setenv_keys = set()
 
     i = 0
     while i < len(args):
@@ -479,6 +850,10 @@ def main(argv):
                     os.environ["LINUXDROID_ROOT_SOCKET"] = keep_root_sock
                 if keep_desktop:
                     os.environ["BL_DESKTOP"] = keep_desktop
+                if keep_kwin_compose:
+                    os.environ["KWIN_COMPOSE"] = keep_kwin_compose
+                if keep_libgl_sw:
+                    os.environ["LIBGL_ALWAYS_SOFTWARE"] = keep_libgl_sw
             i += 1
         elif a in FLAGS_1 and i + 1 < len(args):
             val = args[i + 1]
@@ -490,10 +865,11 @@ def main(argv):
                 if val != "LINUXDROID_ROOT_SOCKET":
                     os.environ.pop(val, None)
             elif a == "--dir":
-                try:
-                    os.makedirs(val, exist_ok=True)
-                except OSError:
-                    pass
+                if val.startswith(("/tmp/", "/run/", "/var/tmp/")):
+                    try:
+                        os.makedirs(val, exist_ok=True)
+                    except OSError:
+                        pass
             elif a in ("--info-fd", "--json-status-fd"):
                 info_fds.append(val)
             elif a in ("--block-fd", "--userns-block-fd"):
@@ -505,12 +881,19 @@ def main(argv):
             v1, v2 = args[i + 1], args[i + 2]
             if a == "--setenv":
                 os.environ[v1] = v2
+                explicit_setenv_keys.add(v1)
             elif a in ("--file", "--bind-data", "--ro-bind-data"):
-                out_path = copy_fd_to_dest(v1, v2)
+                out_path = copy_fd_to_dest(v1, v2, sbx_dir)
                 if v2 == "/etc/ld.so.conf" and out_path:
                     staged_ld_conf = out_path
+                elif v2 == "/.flatpak-info" and out_path:
+                    staged_flatpak_info = out_path
             elif a in ("--bind", "--bind-try", "--ro-bind", "--ro-bind-try", "--dev-bind", "--dev-bind-try"):
-                if v2 == "/app":
+                if v2 == "/.flatpak-info":
+                    staged = stage_flatpak_info_file(v1, sbx_dir)
+                    if staged:
+                        staged_flatpak_info = staged
+                elif v2 == "/app":
                     if v1 != "/app" and os.path.isdir(v1):
                         app_src = v1
                     elif v1 == "/app" and prev_fp_app and os.path.isdir(prev_fp_app):
@@ -521,29 +904,52 @@ def main(argv):
                     elif v1 == "/usr" and prev_fp_usr and os.path.isdir(prev_fp_usr):
                         usr_src = prev_fp_usr
                 elif v2.startswith(("/usr/", "/app/")) and v1 != v2 and os.path.isdir(v1):
-                    runtime_ext_dirs.append((v2.rstrip("/"), v1.rstrip("/")))
+                    pair = (v2.rstrip("/"), v1.rstrip("/"))
+                    if pair not in runtime_ext_dirs:
+                        runtime_ext_dirs.append(pair)
                 elif v2.startswith(("/tmp/", "/run/", "/var/tmp/")) and v1 != v2 and os.path.exists(v1):
-                    ephemeral_binds[v2.rstrip("/")] = v1.rstrip("/")
-                    try:
-                        parent = os.path.dirname(v2)
-                        if parent:
-                            os.makedirs(parent, exist_ok=True)
-                        if os.path.islink(v2) or not os.path.exists(v2) or not os.path.isdir(v2):
-                            if os.path.lexists(v2) and not os.path.isdir(v2):
-                                os.unlink(v2)
-                            if not os.path.lexists(v2):
-                                os.symlink(v1, v2)
-                    except OSError:
-                        pass
+                    if not v2.startswith("/run/host"):
+                        ephemeral_binds[v2.rstrip("/")] = v1.rstrip("/")
+                        try:
+                            parent = os.path.dirname(v2)
+                            if parent:
+                                os.makedirs(parent, exist_ok=True)
+                            if os.path.islink(v2) or not os.path.exists(v2) or not os.path.isdir(v2):
+                                if os.path.lexists(v2) and not os.path.isdir(v2):
+                                    os.unlink(v2)
+                                if not os.path.lexists(v2):
+                                    os.symlink(v1, v2)
+                            elif os.path.isdir(v2):
+                                try:
+                                    os.rmdir(v2)
+                                    os.symlink(v1, v2)
+                                except OSError:
+                                    if os.path.isdir(v1):
+                                        deferred_dir_symlinks.append((v1, v2))
+                        except OSError:
+                            pass
             elif a == "--symlink":
                 try:
-                    if v2.startswith(("/tmp/", "/run/", "/var/tmp/")):
+                    if v2.startswith(("/tmp/", "/run/", "/var/tmp/")) and not v2.startswith("/run/host"):
                         parent = os.path.dirname(v2)
                         if parent:
                             os.makedirs(parent, exist_ok=True)
-                        if os.path.lexists(v2):
+                        if os.path.islink(v2) or (os.path.lexists(v2) and not os.path.isdir(v2)):
                             os.unlink(v2)
-                        os.symlink(v1, v2)
+                            os.symlink(v1, v2)
+                        elif os.path.isdir(v2):
+                            try:
+                                os.rmdir(v2)
+                                os.symlink(v1, v2)
+                            except OSError:
+                                target_real = (
+                                    v1
+                                    if os.path.isabs(v1)
+                                    else os.path.normpath(os.path.join(parent or "/", v1))
+                                )
+                                deferred_dir_symlinks.append((target_real, v2))
+                        else:
+                            os.symlink(v1, v2)
                 except OSError:
                     pass
             i += 3
@@ -554,6 +960,9 @@ def main(argv):
         else:
             break
 
+    for src_dir, dst_dir in deferred_dir_symlinks:
+        sync_dir_entries_as_symlinks(src_dir, dst_dir)
+
     cmd = args[i:]
     if not cmd:
         print("bwrap: No command specified", file=sys.stderr)
@@ -563,23 +972,35 @@ def main(argv):
         usr_src = prev_fp_usr
     if not app_src and prev_fp_app and os.path.isdir(prev_fp_app):
         app_src = prev_fp_app
+    if not staged_flatpak_info and prev_fp_info and os.path.isfile(prev_fp_info):
+        staged_flatpak_info = prev_fp_info
+    if not runtime_ext_dirs and prev_fp_exts:
+        for entry in prev_fp_exts.split(":"):
+            if "=" in entry:
+                vp, rp = entry.split("=", 1)
+                if vp and rp and os.path.isdir(rp):
+                    runtime_ext_dirs.append((vp, rp))
 
-    if ephemeral_binds:
-        remapped_cmd = []
-        for token in cmd:
-            for dst_prefix, src_prefix in ephemeral_binds.items():
-                if token == dst_prefix:
-                    token = src_prefix
-                    break
-                if token.startswith(dst_prefix + "/"):
-                    token = src_prefix + token[len(dst_prefix) :]
-                    break
-            remapped_cmd.append(token)
-        cmd = remapped_cmd
+    cmd0_base = os.path.basename(cmd[0])
+    is_ldconfig = cmd0_base in ("ldconfig", "ldconfig.real")
+    is_trigger = cmd0_base in TRIGGER_BINS
+    rt_ld_linux = find_runtime_ld_linux(usr_src) if (usr_src and not is_ldconfig) else None
 
-    is_ldconfig = os.path.basename(cmd[0]) == "ldconfig"
-    if is_ldconfig and staged_ld_conf and "-f" not in cmd:
-        cmd = [cmd[0], "-f", staged_ld_conf] + cmd[1:]
+    if ephemeral_binds or is_trigger or not rt_ld_linux:
+        force_vremap = is_trigger or not rt_ld_linux
+        cmd = [
+            remap_command_token(tok, app_src, usr_src, runtime_ext_dirs, ephemeral_binds, force_vremap)
+            for tok in cmd
+        ]
+
+    if is_ldconfig:
+        extra_ld_flags = []
+        if staged_ld_conf and "-f" not in cmd:
+            extra_ld_flags.extend(["-f", staged_ld_conf])
+        if os.geteuid() != 0 and "-C" not in cmd and ensure_sandbox_dir(sbx_dir):
+            extra_ld_flags.extend(["-C", os.path.join(sbx_dir, "ld.so.cache")])
+        if extra_ld_flags:
+            cmd = [cmd[0]] + extra_ld_flags + cmd[1:]
 
     for fd_str in close_fds:
         try:
@@ -591,6 +1012,15 @@ def main(argv):
         os.environ["LINUXDROID_ROOT_SOCKET"] = keep_root_sock
     for saved_k, saved_v in saved_host_env.items():
         os.environ.setdefault(saved_k, saved_v)
+    if usr_src and not is_ldconfig:
+        ensure_runtime_sockets_reachable(saved_host_env)
+
+    if os.path.isdir(sbx_dir):
+        os.environ["BL_FLATPAK_SANDBOX_DIR"] = sbx_dir
+    if staged_flatpak_info:
+        os.environ["BL_FLATPAK_INFO"] = staged_flatpak_info
+    if runtime_ext_dirs:
+        os.environ["BL_FLATPAK_EXTS"] = ":".join(f"{dst}={src}" for dst, src in runtime_ext_dirs)
 
     append_env_path("PATH", ["/usr/local/sbin", "/usr/sbin", "/usr/bin", "/sbin", "/bin"])
     priority_bins = ["/usr/local/bin"]
@@ -603,32 +1033,15 @@ def main(argv):
     prepend_env_path("PATH", priority_bins)
 
     if app_src:
-        already_linked = False
-        try:
-            already_linked = os.path.islink("/app") and os.readlink("/app") == app_src
-        except OSError:
-            pass
-        if not already_linked:
+        # Per-process /app VFS is provided by libblsession.so + libblfastpath.so without global
+        # mutation or root IPC. Only create /app opportunistically if absent and directly writable.
+        if not os.path.lexists("/app"):
             try:
-                if os.path.islink("/app") or not os.path.exists("/app"):
-                    if os.path.islink("/app"):
-                        os.unlink("/app")
-                    os.symlink(app_src, "/app")
+                os.symlink(app_src, "/app")
             except OSError:
-                root_helper = os.path.join(os.path.dirname(os.path.abspath(__file__)), "linuxdroid-root")
-                if not os.path.exists(root_helper):
-                    root_helper = "/usr/local/bin/linuxdroid-root"
-                if os.path.exists(root_helper) and (
-                    os.environ.get("LINUXDROID_ROOT_SOCKET") or os.path.exists("/etc/linuxdroid/root-socket")
-                ):
-                    try:
-                        subprocess.call(
-                            [root_helper, "ln", "-sfn", app_src, "/app"],
-                            stdout=subprocess.DEVNULL,
-                            stderr=subprocess.DEVNULL,
-                        )
-                    except OSError:
-                        pass
+                pass
+        if not is_trigger:
+            ensure_app_gschemas(app_src, usr_src)
         prepend_env_path(
             "XDG_DATA_DIRS",
             [os.path.join(app_src, "share")],
@@ -652,7 +1065,6 @@ def main(argv):
             if os.path.exists(candidate):
                 cmd[0] = candidate
 
-    rt_ld_linux = find_runtime_ld_linux(usr_src) if (usr_src and not is_ldconfig) else None
     rt_lib_path = ""
 
     if usr_src and not is_ldconfig:
@@ -679,7 +1091,7 @@ def main(argv):
         if existing_typelibs:
             os.environ["GI_TYPELIB_PATH"] = ":".join(existing_typelibs)
 
-        pixbuf_cache = prepare_relocated_pixbuf_cache(usr_src)
+        rt_lib_path, pixbuf_cache = load_or_build_runtime_meta(app_src, usr_src, runtime_ext_dirs)
         if pixbuf_cache:
             os.environ["GDK_PIXBUF_MODULE_FILE"] = pixbuf_cache
 
@@ -726,11 +1138,14 @@ def main(argv):
             )
             egl_vendor_dirs.append(os.path.join(ext_src, "share", "glvnd", "egl_vendor.d"))
         egl_vendor_dirs.append(os.path.join(usr_src, "share", "glvnd", "egl_vendor.d"))
-        prepend_env_path("LIBGL_DRIVERS_PATH", dri_dirs)
+        if dri_dirs:
+            os.environ["LIBGL_DRIVERS_PATH"] = ":".join([d for d in dri_dirs if os.path.isdir(d)])
+        else:
+            os.environ.pop("LIBGL_DRIVERS_PATH", None)
         prepend_env_path("__EGL_VENDOR_LIBRARY_DIRS", egl_vendor_dirs)
 
         if rt_ld_linux:
-            rt_lib_path = build_runtime_library_path(app_src, usr_src, runtime_ext_dirs)
+            sanitize_graphics_env_for_runtime(usr_src, runtime_ext_dirs, explicit_setenv_keys)
             os.environ["BL_FLATPAK_LD"] = rt_ld_linux
             os.environ["BL_FLATPAK_LIBPATH"] = rt_lib_path
             os.environ["BL_FLATPAK_USR"] = usr_src
@@ -766,11 +1181,14 @@ def main(argv):
         except (OSError, ValueError):
             pass
 
-    if chdir_path and os.path.isdir(chdir_path):
-        try:
-            os.chdir(chdir_path)
-        except OSError:
-            pass
+    if chdir_path:
+        mapped_chdir = map_sandbox_virtual_path(chdir_path, app_src, usr_src, runtime_ext_dirs)
+        target_chdir = mapped_chdir if os.path.isdir(mapped_chdir) else chdir_path
+        if os.path.isdir(target_chdir):
+            try:
+                os.chdir(target_chdir)
+            except OSError:
+                pass
 
     if rt_ld_linux:
         exe_path = resolve_sandbox_file(cmd[0], app_src, usr_src, runtime_ext_dirs)
@@ -816,6 +1234,25 @@ def main(argv):
             if head.startswith(b"\x7fELF"):
                 if usr_src and os.path.basename(exe_path).startswith("python3") and exe_path.startswith(usr_src.rstrip("/") + "/"):
                     os.environ["PYTHONHOME"] = usr_src
+                os.environ["BL_FLATPAK_EXEC"] = exe_path
+                has_etc_preload = False
+                try:
+                    with open("/etc/ld.so.preload", "r", encoding="utf-8", errors="ignore") as pf:
+                        has_etc_preload = any(ln.strip() and not ln.strip().startswith("#") for ln in pf)
+                except OSError:
+                    has_etc_preload = False
+                if not has_etc_preload and not os.environ.get("LD_PRELOAD"):
+                    preload_candidates = []
+                    if os.path.isfile("/usr/local/lib/libblsession.so"):
+                        preload_candidates.append("/usr/local/lib/libblsession.so")
+                    if (
+                        os.path.isfile("/usr/local/lib/libblfastpath.so")
+                        and os.environ.get("PROOT_FP_OFF") != "1"
+                        and os.environ.get("PROOT_FP_ROOT")
+                    ):
+                        preload_candidates.append("/usr/local/lib/libblfastpath.so")
+                    if preload_candidates:
+                        os.environ["LD_PRELOAD"] = ":".join(preload_candidates)
                 effective_argv0 = argv0 if argv0 is not None else cmd[0]
                 ld_args = [rt_ld_linux, "--inhibit-cache", "--argv0", effective_argv0]
                 if rt_lib_path:
@@ -824,9 +1261,14 @@ def main(argv):
                 ld_args.extend(cmd[1:])
                 os.execv(rt_ld_linux, ld_args)
 
-    exec_args = [argv0 if argv0 is not None else cmd[0]] + cmd[1:]
+    exec_target = cmd[0]
+    if not rt_ld_linux and (usr_src or app_src):
+        resolved_host = resolve_sandbox_file(cmd[0], app_src, usr_src, runtime_ext_dirs)
+        if resolved_host and os.path.exists(resolved_host):
+            exec_target = resolved_host
+    exec_args = [argv0 if argv0 is not None else exec_target] + cmd[1:]
     try:
-        os.execvp(cmd[0], exec_args)
+        os.execvp(exec_target, exec_args)
     except FileNotFoundError:
         print(f"bwrap: execvp {cmd[0]}: No such file or directory", file=sys.stderr)
         return 127

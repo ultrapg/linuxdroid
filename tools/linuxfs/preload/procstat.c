@@ -1211,3 +1211,112 @@ int getgrgid_r(gid_t gid, struct group *grp, char *buf, size_t buflen, struct gr
   errno = saved;
   return 0;
 }
+
+static void format_android_user_name(uid_t uid, char *buf, size_t cap) {
+  if (uid == 1000) {
+    const char *env_u = getenv("USER");
+    if (env_u && env_u[0] && strlen(env_u) < cap && strchr(env_u, ':') == NULL) {
+      snprintf(buf, cap, "%s", env_u);
+      return;
+    }
+    snprintf(buf, cap, "linux");
+    return;
+  }
+  unsigned int user_id = (unsigned int)uid / 100000U;
+  unsigned int rem = (unsigned int)uid % 100000U;
+  if (rem >= 10000U && rem <= 19999U) {
+    snprintf(buf, cap, "u%u_a%u", user_id, rem - 10000U);
+  } else if (rem >= 90000U && rem <= 99999U) {
+    snprintf(buf, cap, "u%u_i%u", user_id, rem - 90000U);
+  } else {
+    snprintf(buf, cap, "aid_%u", (unsigned int)uid);
+  }
+}
+
+static int should_synthesize_uid(uid_t uid) {
+  if (uid == 0) return 0;
+  if (uid == 1000 || uid == getuid() || uid == geteuid()) return 1;
+  unsigned int rem = (unsigned int)uid % 100000U;
+  if ((uid >= 1000 && uid <= 9999) || (rem >= 10000U && rem <= 99999U)) {
+    return 1;
+  }
+  return 0;
+}
+
+struct passwd *getpwuid(uid_t uid) {
+  static struct passwd *(*real_getpwuid)(uid_t);
+  if (!real_getpwuid) real_getpwuid = (struct passwd *(*)(uid_t))dlsym(RTLD_NEXT, "getpwuid");
+  int saved = errno;
+  struct passwd *pw = real_getpwuid ? real_getpwuid(uid) : NULL;
+  if (pw != NULL) return pw;
+  if (!should_synthesize_uid(uid)) return NULL;
+
+  static __thread struct passwd tls_pw;
+  static __thread char tls_name[48];
+  static __thread char tls_dir[256];
+  format_android_user_name(uid, tls_name, sizeof(tls_name));
+  const char *home = getenv("HOME");
+  snprintf(tls_dir, sizeof(tls_dir), "%s", (home && home[0] == '/') ? home : "/home/linux");
+  tls_pw.pw_name = tls_name;
+  tls_pw.pw_passwd = (char *)"x";
+  tls_pw.pw_uid = uid;
+  tls_pw.pw_gid = getgid();
+  tls_pw.pw_gecos = tls_name;
+  tls_pw.pw_dir = tls_dir;
+  tls_pw.pw_shell = (char *)"/bin/bash";
+  errno = saved;
+  return &tls_pw;
+}
+
+int getpwuid_r(uid_t uid, struct passwd *pwd, char *buf, size_t buflen, struct passwd **result) {
+  static int (*real_getpwuid_r)(uid_t, struct passwd *, char *, size_t, struct passwd **);
+  if (!real_getpwuid_r) {
+    real_getpwuid_r = (int (*)(uid_t, struct passwd *, char *, size_t, struct passwd **))dlsym(RTLD_NEXT, "getpwuid_r");
+  }
+  int saved = errno;
+  int rc = real_getpwuid_r ? real_getpwuid_r(uid, pwd, buf, buflen, result) : ENOENT;
+  if (rc == 0 && *result != NULL) return 0;
+  if (!should_synthesize_uid(uid)) {
+    return rc;
+  }
+
+  char name[48];
+  format_android_user_name(uid, name, sizeof(name));
+  const char *home = getenv("HOME");
+  const char *dir_src = (home && home[0] == '/') ? home : "/home/linux";
+  const char *shell_src = "/bin/bash";
+
+  size_t n_len = strlen(name) + 1;
+  size_t p_len = 2;
+  size_t d_len = strlen(dir_src) + 1;
+  size_t s_len = strlen(shell_src) + 1;
+  if (buflen < n_len + p_len + d_len + s_len) {
+    *result = NULL;
+    errno = ERANGE;
+    return ERANGE;
+  }
+
+  char *cur = buf;
+  memcpy(cur, name, n_len);
+  pwd->pw_name = cur;
+  pwd->pw_gecos = cur;
+  cur += n_len;
+
+  cur[0] = 'x';
+  cur[1] = '\0';
+  pwd->pw_passwd = cur;
+  cur += p_len;
+
+  memcpy(cur, dir_src, d_len);
+  pwd->pw_dir = cur;
+  cur += d_len;
+
+  memcpy(cur, shell_src, s_len);
+  pwd->pw_shell = cur;
+
+  pwd->pw_uid = uid;
+  pwd->pw_gid = getgid();
+  *result = pwd;
+  errno = saved;
+  return 0;
+}

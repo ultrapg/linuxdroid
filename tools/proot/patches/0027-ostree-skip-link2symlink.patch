@@ -1,0 +1,74 @@
+--- a/src/extension/link2symlink/link2symlink.c
++++ b/src/extension/link2symlink/link2symlink.c
+@@ -48,6 +48,42 @@
+ 	return 0;
+ }
+ 
++static bool is_hex_pair(const char *s)
++{
++	return isxdigit((unsigned char) s[0]) && isxdigit((unsigned char) s[1]);
++}
++
++static bool is_ostree_or_flatpak_path(const char *path)
++{
++	const char *p;
++	size_t len;
++
++	if (path == NULL || path[0] == '\0')
++		return false;
++
++	if (strstr(path, "/flatpak/") != NULL || strstr(path, "/ostree/") != NULL)
++		return true;
++
++	/* Match custom OSTree repos (.../objects/XX/<hash>.file) */
++	p = strstr(path, "/objects/");
++	while (p != NULL) {
++		const char *after = p + strlen("/objects/");
++		if (is_hex_pair(after) && after[2] == '/') {
++			len = strlen(after + 3);
++			if ((len > 5 && strcmp(after + 3 + len - 5, ".file") == 0)
++			    || (len > 6 && strcmp(after + 3 + len - 6, ".filez") == 0)
++			    || (len > 8 && strcmp(after + 3 + len - 8, ".dirtree") == 0)
++			    || (len > 8 && strcmp(after + 3 + len - 8, ".dirmeta") == 0)
++			    || (len > 7 && strcmp(after + 3 + len - 7, ".commit") == 0)) {
++				return true;
++			}
++		}
++		p = strstr(after, "/objects/");
++	}
++
++	return false;
++}
++
+ /**
+  * Move the path pointed to by @tracee's @sysarg to a new location,
+  * symlink the original path to this new one, make @tracee's @sysarg
+@@ -77,6 +113,13 @@
+ 	if (size >= PATH_MAX)
+ 		return -ENAMETOOLONG;
+ 
++	if (is_ostree_or_flatpak_path(original))
++		return -EPERM;
++
++	size = read_path(tracee, final, peek_reg(tracee, CURRENT, link_target_sysarg));
++	if (size >= 0 && is_ostree_or_flatpak_path(final))
++		return -EPERM;
++
+ 	/* Sanity check: directories can't be linked.  */
+ 	status = lstat(original, &statl);
+ 	if (status < 0)
+@@ -160,10 +203,12 @@
+ 			return size;
+ 
+ 		link_count = atoi(final + strlen(final) - 4);
++		if (link_count >= 9999)
++			return -EMLINK;
+ 		link_count++;
+ 
+-		strncpy(new_final, final, strlen(final) - 4);
+-		sprintf(new_final + strlen(final) - 4, "%04d", link_count);
++		memcpy(new_final, final, strlen(final) - 4);
++		snprintf(new_final + strlen(final) - 4, 5, "%04d", link_count);
+ 
+ 		status = rename(final, new_final);
+ 		if (status < 0)

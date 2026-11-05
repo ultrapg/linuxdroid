@@ -2,6 +2,7 @@
 #include <dlfcn.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <limits.h>
 #include <stdarg.h>
 #include <stddef.h>
 #include <string.h>
@@ -12,6 +13,8 @@ int bl_status_without_tracer(const char *path, int flags, const void *caller) __
 int bl_proc_open(int dirfd, const char *path, int flags) __attribute__((visibility("hidden")));
 void bl_proc_close(int fd) __attribute__((visibility("hidden")));
 int bl_writable_retry(int dirfd, const char *path, int flags) __attribute__((visibility("hidden")));
+const char *bl_flatpak_map_path_mode(const char *path, char *buf, size_t bufsz, int follow_final)
+    __attribute__((visibility("hidden")));
 
 static int (*real_open)(const char *, int, ...);
 static int (*real_openat)(int, const char *, int, ...);
@@ -31,10 +34,12 @@ int open(const char *path, int flags, ...) {
   va_list ap;
   mode_t mode;
   int fd;
+  char vfs_buf[PATH_MAX];
 
   va_start(ap, flags);
   mode = va_arg(ap, mode_t);
   va_end(ap);
+  path = bl_flatpak_map_path_mode(path, vfs_buf, sizeof(vfs_buf), (flags & O_NOFOLLOW) ? 0 : 1);
   if (is_trace_marker(path)) {
     errno = EACCES;
     return -1;
@@ -56,10 +61,12 @@ int openat(int dirfd, const char *path, int flags, ...) {
   va_list ap;
   mode_t mode;
   int fd;
+  char vfs_buf[PATH_MAX];
 
   va_start(ap, flags);
   mode = va_arg(ap, mode_t);
   va_end(ap);
+  path = bl_flatpak_map_path_mode(path, vfs_buf, sizeof(vfs_buf), (flags & O_NOFOLLOW) ? 0 : 1);
   if (is_trace_marker(path)) {
     errno = EACCES;
     return -1;

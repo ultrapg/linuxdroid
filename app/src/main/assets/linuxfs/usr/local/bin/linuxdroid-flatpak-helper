@@ -1,0 +1,393 @@
+#!/usr/bin/python3 -BE
+"""
+Lightweight session D-Bus helper implementing org.freedesktop.Flatpak
+(/org/freedesktop/Flatpak/Development) and org.freedesktop.portal.Flatpak
+(/org/freedesktop/portal/Flatpak) for unprivileged PRoot containers where
+systemd user units cannot auto-activate flatpak-session-helper / flatpak-portal.
+"""
+
+import fcntl
+import os
+import signal
+import sys
+
+try:
+    import gi
+
+    gi.require_version("Gio", "2.0")
+    from gi.repository import Gio, GLib
+except Exception:
+    sys.exit(0)
+
+DEV_BUS_NAME = "org.freedesktop.Flatpak"
+DEV_OBJ_PATH = "/org/freedesktop/Flatpak/Development"
+DEV_IFACE = "org.freedesktop.Flatpak.Development"
+
+PORTAL_BUS_NAME = "org.freedesktop.portal.Flatpak"
+PORTAL_OBJ_PATH = "/org/freedesktop/portal/Flatpak"
+PORTAL_IFACE = "org.freedesktop.portal.Flatpak"
+
+DEV_XML = """
+<node>
+  <interface name="org.freedesktop.Flatpak.Development">
+    <method name="HostCommand">
+      <arg type="ay" name="cwd_path" direction="in"/>
+      <arg type="aay" name="argv" direction="in"/>
+      <arg type="a{uh}" name="fds" direction="in"/>
+      <arg type="a{ss}" name="envs" direction="in"/>
+      <arg type="u" name="flags" direction="in"/>
+      <arg type="u" name="pid" direction="out"/>
+    </method>
+    <method name="HostCommandSignal">
+      <arg type="u" name="pid" direction="in"/>
+      <arg type="u" name="signal" direction="in"/>
+      <arg type="b" name="to_process_group" direction="in"/>
+    </method>
+    <signal name="HostCommandExited">
+      <arg type="u" name="pid"/>
+      <arg type="u" name="exit_status"/>
+    </signal>
+  </interface>
+</node>
+"""
+
+PORTAL_XML = """
+<node>
+  <interface name="org.freedesktop.portal.Flatpak">
+    <property name="version" type="u" access="read"/>
+    <property name="supports" type="u" access="read"/>
+    <method name="Spawn">
+      <arg type="ay" name="cwd_path" direction="in"/>
+      <arg type="aay" name="argv" direction="in"/>
+      <arg type="a{uh}" name="fds" direction="in"/>
+      <arg type="a{ss}" name="envs" direction="in"/>
+      <arg type="u" name="flags" direction="in"/>
+      <arg type="a{sv}" name="options" direction="in"/>
+      <arg type="u" name="pid" direction="out"/>
+    </method>
+    <method name="SpawnSignal">
+      <arg type="u" name="pid" direction="in"/>
+      <arg type="u" name="signal" direction="in"/>
+      <arg type="b" name="to_process_group" direction="in"/>
+    </method>
+    <signal name="SpawnExited">
+      <arg type="u" name="pid"/>
+      <arg type="u" name="exit_status"/>
+    </signal>
+  </interface>
+</node>
+"""
+
+PRESERVE_ENV_KEYS = (
+    "HOME",
+    "USER",
+    "LOGNAME",
+    "LANG",
+    "LC_ALL",
+    "TERM",
+    "LD_PRELOAD",
+    "LINUXDROID_ROOT_SOCKET",
+    "BL_DESKTOP",
+    "XDG_RUNTIME_DIR",
+    "DBUS_SESSION_BUS_ADDRESS",
+    "WAYLAND_DISPLAY",
+    "DISPLAY",
+    "PULSE_SERVER",
+    "FLATPAK_BWRAP",
+)
+
+SANDBOX_STRIP_KEYS = (
+    "BL_FLATPAK_LD",
+    "BL_FLATPAK_LIBPATH",
+    "BL_FLATPAK_USR",
+    "BL_FLATPAK_APP",
+    "BL_FLATPAK_INFO",
+    "BL_FLATPAK_SANDBOX_DIR",
+    "BL_FLATPAK_EXEC",
+    "BL_FLATPAK_EXTS",
+    "BL_FLATPAK_FORCE_VFS",
+    "PYTHONHOME",
+    "GDK_PIXBUF_MODULE_FILE",
+    "GIO_EXTRA_MODULES",
+    "GSETTINGS_SCHEMA_DIR",
+)
+
+FLAG_CLEAR_ENV = 1 << 0
+FLAG_NEW_PGRP = 1 << 2  # Spawn / HostCommand process group support
+
+active_children = {}  # pid -> (conn, obj_path, iface_name, signal_name)
+
+
+def decode_bytestring(raw):
+    if not raw:
+        return ""
+    b = bytes(raw)
+    if b.endswith(b"\x00"):
+        b = b[:-1]
+    return b.decode("utf-8", errors="surrogateescape")
+
+
+def build_child_env(envs, flags, unset_list=()):
+    host_env = os.environ
+    if flags & FLAG_CLEAR_ENV:
+        env = {k: host_env[k] for k in PRESERVE_ENV_KEYS if k in host_env}
+    else:
+        env = host_env.copy()
+        for k in SANDBOX_STRIP_KEYS:
+            env.pop(k, None)
+    env["PATH"] = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+    env.setdefault("FLATPAK_BWRAP", "/usr/local/bin/bwrap")
+    for k in unset_list:
+        if k != "LINUXDROID_ROOT_SOCKET":
+            env.pop(str(k), None)
+    if envs:
+        for k, v in envs.items():
+            sk, sv = str(k), str(v)
+            if sk in SANDBOX_STRIP_KEYS:
+                continue
+            if sk in ("XDG_DATA_HOME", "XDG_CONFIG_HOME", "XDG_CACHE_HOME", "XDG_STATE_HOME") and "/.var/app/" in sv:
+                continue
+            if sk == "DBUS_SESSION_BUS_ADDRESS" and "/run/flatpak/" in sv and "DBUS_SESSION_BUS_ADDRESS" in host_env:
+                continue
+            if sk == "XDG_RUNTIME_DIR" and "XDG_RUNTIME_DIR" in host_env:
+                continue
+            env[sk] = sv
+    for xdg_k in ("XDG_DATA_HOME", "XDG_CONFIG_HOME", "XDG_CACHE_HOME", "XDG_STATE_HOME"):
+        if "/.var/app/" in env.get(xdg_k, ""):
+            env.pop(xdg_k, None)
+    return env
+
+
+def spawn_command(conn, invocation, cwd_raw, argv_raw, fds_map, envs_map, flags, unset_list, obj_path, iface_name, exit_sig):
+    argv = [decode_bytestring(a) for a in argv_raw]
+    if not argv or not argv[0]:
+        invocation.return_dbus_error("org.freedesktop.DBus.Error.InvalidArgs", "Empty argv")
+        return
+
+    cwd = decode_bytestring(cwd_raw)
+    child_env = build_child_env(envs_map, flags, unset_list)
+
+    msg = invocation.get_message()
+    fd_list = msg.get_unix_fd_list() if msg else None
+    extracted_fds = {}  # target_fd -> host_dup_fd
+    try:
+        if fds_map and fd_list is not None:
+            for target_fd, handle_idx in fds_map.items():
+                extracted_fds[int(target_fd)] = fd_list.get(int(handle_idx))
+
+        pid = os.fork()
+        if pid == 0:
+            try:
+                if flags & FLAG_NEW_PGRP:
+                    try:
+                        os.setpgid(0, 0)
+                    except OSError:
+                        pass
+                # Move any source FD that overlaps with a target FD out of the way first
+                if extracted_fds:
+                    max_target = max(extracted_fds.keys())
+                    safe_sources = {}
+                    for tgt, src in extracted_fds.items():
+                        if src in extracted_fds and src != tgt:
+                            new_src = fcntl.fcntl(src, fcntl.F_DUPFD, max_target + 1)
+                            safe_sources[tgt] = new_src
+                        else:
+                            safe_sources[tgt] = src
+                    for tgt, src in safe_sources.items():
+                        if src != tgt:
+                            os.dup2(src, tgt)
+                        os.set_inheritable(tgt, True)
+                if cwd and os.path.isdir(cwd):
+                    try:
+                        os.chdir(cwd)
+                    except OSError:
+                        pass
+                if argv[0] in ("/usr/bin/flatpak", "/bin/flatpak", "flatpak") and os.path.isfile("/usr/local/bin/flatpak"):
+                    argv = ["/usr/local/bin/flatpak"] + argv[1:]
+                os.execvpe(argv[0], argv, child_env)
+            except FileNotFoundError:
+                os._exit(127)
+            except OSError:
+                os._exit(126)
+            os._exit(127)
+    except Exception as e:
+        for src in extracted_fds.values():
+            try:
+                os.close(src)
+            except OSError:
+                pass
+        invocation.return_dbus_error("org.freedesktop.DBus.Error.Spawn.Failed", str(e))
+        return
+
+    for src in extracted_fds.values():
+        try:
+            os.close(src)
+        except OSError:
+            pass
+
+    active_children[pid] = (conn, obj_path, iface_name, exit_sig)
+
+    def _on_child_exit(exited_pid, wait_status):
+        info = active_children.pop(exited_pid, None)
+        if info is not None:
+            c, op, ifc, sig_name = info
+            try:
+                c.emit_signal(
+                    None,
+                    op,
+                    ifc,
+                    sig_name,
+                    GLib.Variant("(uu)", (int(exited_pid), int(wait_status) & 0xFFFFFFFF)),
+                )
+            except Exception:
+                pass
+
+    GLib.child_watch_add(GLib.PRIORITY_DEFAULT, pid, _on_child_exit)
+    invocation.return_value(GLib.Variant("(u)", (int(pid),)))
+
+
+def send_child_signal(invocation, pid, sig_num, to_pgroup):
+    pid = int(pid)
+    sig_num = int(sig_num)
+    if pid not in active_children:
+        invocation.return_dbus_error("org.freedesktop.DBus.Error.UnixProcessIdUnknown", f"Unknown PID {pid}")
+        return
+    try:
+        if to_pgroup:
+            os.killpg(pid, sig_num)
+        else:
+            os.kill(pid, sig_num)
+    except ProcessLookupError:
+        pass
+    except OSError as e:
+        invocation.return_dbus_error("org.freedesktop.DBus.Error.Failed", str(e))
+        return
+    invocation.return_value(GLib.Variant("()", ()))
+
+
+def on_dev_method_call(conn, sender, obj_path, iface_name, method_name, params, invocation):
+    if method_name == "HostCommand":
+        cwd_raw, argv_raw, fds_map, envs_map, flags = params.unpack()
+        spawn_command(
+            conn,
+            invocation,
+            cwd_raw,
+            argv_raw,
+            fds_map,
+            envs_map,
+            int(flags),
+            (),
+            DEV_OBJ_PATH,
+            DEV_IFACE,
+            "HostCommandExited",
+        )
+    elif method_name == "HostCommandSignal":
+        pid, sig_num, to_pgroup = params.unpack()
+        send_child_signal(invocation, pid, sig_num, bool(to_pgroup))
+    else:
+        invocation.return_dbus_error("org.freedesktop.DBus.Error.UnknownMethod", method_name)
+
+
+def on_portal_method_call(conn, sender, obj_path, iface_name, method_name, params, invocation):
+    if method_name == "Spawn":
+        cwd_raw, argv_raw, fds_map, envs_map, flags, options = params.unpack()
+        unset_env = options.get("unset-env", ()) if isinstance(options, dict) else ()
+        spawn_command(
+            conn,
+            invocation,
+            cwd_raw,
+            argv_raw,
+            fds_map,
+            envs_map,
+            int(flags),
+            unset_env,
+            PORTAL_OBJ_PATH,
+            PORTAL_IFACE,
+            "SpawnExited",
+        )
+    elif method_name == "SpawnSignal":
+        pid, sig_num, to_pgroup = params.unpack()
+        send_child_signal(invocation, pid, sig_num, bool(to_pgroup))
+    else:
+        invocation.return_dbus_error("org.freedesktop.DBus.Error.UnknownMethod", method_name)
+
+
+def on_portal_get_property(conn, sender, obj_path, iface_name, prop_name):
+    if prop_name == "version":
+        return GLib.Variant("u", 5)
+    if prop_name == "supports":
+        return GLib.Variant("u", 1)
+    return None
+
+
+def main():
+    signal.signal(signal.SIGPIPE, signal.SIG_IGN)
+    if not os.environ.get("DBUS_SESSION_BUS_ADDRESS"):
+        uid = os.geteuid()
+        xdg_run = os.environ.get("XDG_RUNTIME_DIR") or f"/run/user/{uid}"
+        addr_file = os.path.join(xdg_run, "bus-address")
+        if os.path.isfile(addr_file):
+            try:
+                with open(addr_file, "r", encoding="utf-8") as f:
+                    addr = f.read().strip()
+                if addr:
+                    os.environ["DBUS_SESSION_BUS_ADDRESS"] = addr
+            except OSError:
+                pass
+
+    try:
+        conn = Gio.bus_get_sync(Gio.BusType.SESSION, None)
+    except Exception:
+        return 0
+
+    dev_node = Gio.DBusNodeInfo.new_for_xml(DEV_XML)
+    portal_node = Gio.DBusNodeInfo.new_for_xml(PORTAL_XML)
+
+    try:
+        conn.register_object(DEV_OBJ_PATH, dev_node.interfaces[0], on_dev_method_call, None, None)
+    except Exception:
+        pass
+    try:
+        conn.register_object(
+            PORTAL_OBJ_PATH,
+            portal_node.interfaces[0],
+            on_portal_method_call,
+            on_portal_get_property,
+            None,
+        )
+    except Exception:
+        pass
+
+    owned_state = {"count": 0, "checked": 0}
+    loop = GLib.MainLoop()
+
+    def _check_exit():
+        if owned_state["checked"] >= 2 and owned_state["count"] == 0:
+            loop.quit()
+        return False
+
+    def _on_acquired(c, name):
+        owned_state["count"] += 1
+        owned_state["checked"] += 1
+
+    def _on_lost(c, name):
+        owned_state["checked"] += 1
+        if owned_state["count"] > 0:
+            owned_state["count"] -= 1
+        GLib.idle_add(_check_exit)
+
+    id1 = Gio.bus_own_name_on_connection(conn, DEV_BUS_NAME, Gio.BusNameOwnerFlags.NONE, _on_acquired, _on_lost)
+    id2 = Gio.bus_own_name_on_connection(conn, PORTAL_BUS_NAME, Gio.BusNameOwnerFlags.NONE, _on_acquired, _on_lost)
+
+    try:
+        loop.run()
+    except KeyboardInterrupt:
+        pass
+    finally:
+        Gio.bus_unown_name(id1)
+        Gio.bus_unown_name(id2)
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

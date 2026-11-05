@@ -32,6 +32,12 @@ FLAGS_1 = {
     "--app-path",
 }
 
+FD_FORWARD_FLAGS = {
+    "--forward-fd",
+    "--sandbox-expose-fd",
+    "--sandbox-expose-fd-ro",
+}
+
 PRESERVE_KEYS = (
     "LD_PRELOAD",
     "LINUXDROID_ROOT_SOCKET",
@@ -59,9 +65,15 @@ SANDBOX_ONLY_ENV_KEYS = (
     "BL_FLATPAK_LIBPATH",
     "BL_FLATPAK_USR",
     "BL_FLATPAK_APP",
+    "BL_FLATPAK_INFO",
+    "BL_FLATPAK_SANDBOX_DIR",
+    "BL_FLATPAK_EXEC",
+    "BL_FLATPAK_EXTS",
+    "BL_FLATPAK_FORCE_VFS",
     "PYTHONHOME",
     "GDK_PIXBUF_MODULE_FILE",
     "GIO_EXTRA_MODULES",
+    "GSETTINGS_SCHEMA_DIR",
 )
 
 
@@ -76,7 +88,7 @@ def strip_sandbox_paths(key, keep_flatpak_exports=False):
         if keep_flatpak_exports and p.endswith("/flatpak/exports/share"):
             cleaned.append(p)
             continue
-        if p.startswith(("/app/", "/app", "/tmp/.bwrap-rt-lib", "/var/lib/flatpak/")):
+        if p.startswith(("/app/", "/app", "/tmp/.bwrap-", "/var/lib/flatpak/")):
             continue
         if "/.local/share/flatpak/" in p:
             continue
@@ -101,6 +113,7 @@ def main(argv):
 
     env_updates = {}
     env_unsets = []
+    forward_fds = []
     clear_env = False
     is_host = False
     workdir = None
@@ -129,6 +142,8 @@ def main(argv):
                     env_unsets.append(val)
                 elif prefix == "--directory":
                     workdir = val
+                elif prefix in FD_FORWARD_FLAGS:
+                    forward_fds.append(val)
                 matched_eq = True
                 break
         if matched_eq:
@@ -143,6 +158,8 @@ def main(argv):
                 env_unsets.append(val)
             elif a == "--directory":
                 workdir = val
+            elif a in FD_FORWARD_FLAGS:
+                forward_fds.append(val)
             i += 2
             continue
         if a.startswith("-"):
@@ -154,6 +171,12 @@ def main(argv):
     if not cmd:
         print("flatpak-spawn: No command specified", file=sys.stderr)
         return 1
+
+    for fd_str in forward_fds:
+        try:
+            os.set_inheritable(int(fd_str), True)
+        except (OSError, ValueError):
+            pass
 
     if clear_env:
         keep_keys = list(PRESERVE_KEYS)
@@ -167,6 +190,11 @@ def main(argv):
     if is_host:
         for k in SANDBOX_ONLY_ENV_KEYS:
             os.environ.pop(k, None)
+        if os.environ.pop("BL_BWRAP_SET_GSK", None) == "1":
+            os.environ.pop("GSK_RENDERER", None)
+        for xdg_k in ("XDG_DATA_HOME", "XDG_CONFIG_HOME", "XDG_CACHE_HOME", "XDG_STATE_HOME"):
+            if "/.var/app/" in os.environ.get(xdg_k, ""):
+                os.environ.pop(xdg_k, None)
         for k in (
             "LD_LIBRARY_PATH",
             "GI_TYPELIB_PATH",
@@ -189,8 +217,12 @@ def main(argv):
             if saved_val:
                 os.environ[real_k] = saved_val
         os.environ["PATH"] = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+        if cmd[0] in ("/usr/bin/flatpak", "/bin/flatpak", "flatpak") and os.path.isfile("/usr/local/bin/flatpak"):
+            cmd[0] = "/usr/local/bin/flatpak"
     elif "PATH" not in os.environ:
         os.environ["PATH"] = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+        if cmd[0] in ("/usr/bin/flatpak", "/bin/flatpak", "flatpak") and os.path.isfile("/usr/local/bin/flatpak"):
+            cmd[0] = "/usr/local/bin/flatpak"
 
     for k in env_unsets:
         if k != "LINUXDROID_ROOT_SOCKET":

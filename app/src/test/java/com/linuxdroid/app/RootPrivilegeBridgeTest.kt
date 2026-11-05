@@ -362,9 +362,12 @@ try:
     fp_spec = importlib.util.spec_from_loader("flatpak_wrapper", fp_loader)
     fp_mod = importlib.util.module_from_spec(fp_spec)
     fp_loader.exec_module(fp_mod)
-    assert fp_mod.find_subcommand_and_scope(["remote-add", "--if-not-exists", "flathub", "https://dl.flathub.org/repo/flathub.flatpakrepo"]) == ("remote-add", False)
-    assert fp_mod.find_subcommand_and_scope(["install", "--user", "flathub", "org.gimp.GIMP"]) == ("install", True)
-    assert fp_mod.find_subcommand_and_scope(["install", "-y", "flathub", "io.github.flattool.Warehouse"]) == ("install", False)
+    assert fp_mod.find_subcommand_and_scope(["remote-add", "--if-not-exists", "flathub", "https://dl.flathub.org/repo/flathub.flatpakrepo"]) == ("remote-add", False, False, False)
+    assert fp_mod.find_subcommand_and_scope(["install", "--user", "flathub", "org.gimp.GIMP"]) == ("install", True, False, False)
+    assert fp_mod.find_subcommand_and_scope(["install", "--system", "flathub", "org.gimp.GIMP"]) == ("install", False, True, False)
+    assert fp_mod.find_subcommand_and_scope(["install", "-y", "flathub", "io.github.flattool.Warehouse"]) == ("install", False, False, False)
+    injected_args, injected_user = fp_mod.inject_user_scope_if_default(["install", "-y", "flathub", "io.github.flattool.Warehouse"], "install", False, False)
+    assert injected_user is True and "--user" in injected_args
 
     # 13. Test flatpak-spawn (--host, --clear-env, --env=KEY=VAL, sandbox path stripping)
     fp_spawn_bin = os.path.join(bin_dir, "flatpak-spawn")
@@ -447,7 +450,7 @@ finally:
         pass
 """.trimIndent()
 
-        val proc = ProcessBuilder("python3", "-c", pyTest, binDir)
+        val proc = ProcessBuilder("python3", "-B", "-c", pyTest, binDir)
             .redirectErrorStream(true)
             .start()
         val output = proc.inputStream.bufferedReader().readText()
@@ -492,12 +495,12 @@ fex_mod = load_mod("fex_edge", "linuxdroid-fex")
 bwrap_bin = os.path.join(bin_dir, "bwrap")
 fp_spawn_bin = os.path.join(bin_dir, "flatpak-spawn")
 
-# 1. bwrap copy_fd_to_dest('/etc/ld.so.conf') stages to /tmp instead of clobbering host /etc/ld.so.conf
+# 1. bwrap copy_fd_to_dest('/etc/ld.so.conf') stages to /tmp/.bwrap-sbx-* instead of clobbering host /etc/ld.so.conf
 r_fd, w_fd = os.pipe()
 os.write(w_fd, b"/app/lib\n/usr/lib/aarch64-linux-gnu\n")
 os.close(w_fd)
 staged = bw_mod.copy_fd_to_dest(str(r_fd), "/etc/ld.so.conf")
-assert staged is not None and staged.startswith("/tmp/.bwrap-ld-so-conf-")
+assert staged is not None and staged.startswith("/tmp/.bwrap-sbx-") and staged.endswith("/ld.so.conf")
 with open(staged, "rb") as f:
     assert b"/app/lib" in f.read()
 os.unlink(staged)
@@ -532,7 +535,7 @@ with tempfile.TemporaryDirectory() as tmp_cache_src:
     )
     os.close(conf_r)
     assert r_ld.returncode == 0, f"bwrap ldconfig failed: {r_ld.stderr}"
-    assert "ARGS=-f|/tmp/.bwrap-ld-so-conf-" in r_ld.stdout, f"Unexpected ldconfig args: {r_ld.stdout}"
+    assert "ARGS=-f|/tmp/.bwrap-sbx-" in r_ld.stdout and "/ld.so.conf|" in r_ld.stdout, f"Unexpected ldconfig args: {r_ld.stdout}"
     assert f"{tmp_cache_src}/ld.so.cache" in r_ld.stdout, f"Expected remapped cache path in {r_ld.stdout}"
     if os.path.islink("/tmp/bwrap-ephemeral-cache-test"):
         os.unlink("/tmp/bwrap-ephemeral-cache-test")

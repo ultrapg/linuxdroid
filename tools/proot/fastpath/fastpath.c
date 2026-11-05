@@ -53,8 +53,14 @@ static long sc(long nr, long a, long b, long c, long d, long e) { return fp_sys(
 static void fp_init(void);
 static pthread_once_t init_once = PTHREAD_ONCE_INIT;
 static inline int fp_ready(void) {
+  extern char **environ;
+  if (!environ) return 0;
   pthread_once(&init_once, fp_init);
   return fp_on;
+}
+
+__attribute__((visibility("default"))) int bl_fastpath_is_active(void) {
+  return fp_ready();
 }
 
 static int under(const char *path, const char *dir, size_t dlen) {
@@ -124,7 +130,20 @@ static int traced_by_match(const char *key) {
   const char *line = strstr(buf, "\nTracerPid:");
   if (!line) return 0;
   tracer = strtol(line + 11, NULL, 10);
-  if (tracer <= 0) return 0;
+  if (tracer <= 0) {
+    snprintf(path, sizeof path, "/proc/%ld/status", sc(SYS_getpid, 0, 0, 0, 0, 0));
+    fd = sc(SYS_openat, AT_FDCWD, (long)path, O_RDONLY | O_CLOEXEC, 0, 0);
+    if (fd >= 0) {
+      n = sc(SYS_read, fd, (long)buf, 4095, 0, 0);
+      sc(SYS_close, fd, 0, 0, 0, 0);
+      if (n > 0) {
+        buf[n] = 0;
+        line = strstr(buf, "\nTracerPid:");
+        if (line) tracer = strtol(line + 11, NULL, 10);
+      }
+    }
+    if (tracer <= 0) return 0;
+  }
   snprintf(path, sizeof path, "/proc/%ld/environ", tracer);
   if (snprintf(want, sizeof want, "PROOT_FASTPATH=%s", key) >= (int)sizeof want) return 0;
   fd = sc(SYS_openat, AT_FDCWD, (long)path, O_RDONLY | O_CLOEXEC, 0, 0);
@@ -222,6 +241,9 @@ static int in_tracer(struct bind *bd) {
   return 1;
 }
 
+static int guest_text(const char *h, char *g);
+static void sbx_init(void);
+
 static void fp_init(void) {
   const char *r = getenv("PROOT_FP_ROOT"), *b = getenv("PROOT_FP_BINDS"), *t = getenv("PROOT_FP_TTL_MS");
   const char *key = getenv("PROOT_FP_KEY");
@@ -281,6 +303,7 @@ static void fp_init(void) {
   for (int i = 0; i < nbinds; i++)
     if (under(binds[i].host, "/proc/self", 10) && !in_tracer(&binds[i])) { fp_sys = NULL; return; }
   pthread_atfork(NULL, NULL, after_fork);
+  sbx_init();
   fp_on = 1;
   if (getenv("PROOT_FP_STATS")) atexit(stats);
   miss_log = getenv("PROOT_FP_LOG");
@@ -508,7 +531,166 @@ struct res {
   int libc;
   int moving;
   int magic;
+  unsigned l2s_nlink;
 };
+
+#define MAX_SBX_EXTS 16
+struct sbx_ext { char virt[256]; char real[PATH_MAX]; size_t vlen; };
+static int sbx_active, sbx_exec_active, sbx_has_lib64;
+static char sbx_usr[PATH_MAX], sbx_app[PATH_MAX], sbx_info[PATH_MAX], sbx_dir[PATH_MAX], sbx_exec[PATH_MAX];
+static struct sbx_ext sbx_exts[MAX_SBX_EXTS];
+static int sbx_nexts;
+
+static void sbx_trim_copy(char *dst, size_t cap, const char *src) {
+  if (!src || src[0] != '/') { dst[0] = 0; return; }
+  size_t len = strlen(src);
+  while (len > 1 && src[len - 1] == '/') len--;
+  if (len >= cap) { dst[0] = 0; return; }
+  memcpy(dst, src, len);
+  dst[len] = 0;
+}
+
+static void sbx_init(void) {
+  const char *u = getenv("BL_FLATPAK_USR"), *a = getenv("BL_FLATPAK_APP");
+  const char *info = getenv("BL_FLATPAK_INFO"), *sd = getenv("BL_FLATPAK_SANDBOX_DIR");
+  const char *ex = getenv("BL_FLATPAK_EXEC"), *exts = getenv("BL_FLATPAK_EXTS");
+  const char *force = getenv("BL_FLATPAK_FORCE_VFS");
+  if ((!u || !*u) && (!a || !*a) && (!info || !*info)) return;
+
+  sbx_trim_copy(sbx_usr, sizeof sbx_usr, u);
+  if (!strcmp(sbx_usr, "/usr") || under(sbx_usr, "/usr", 4)) sbx_usr[0] = 0;
+  sbx_trim_copy(sbx_app, sizeof sbx_app, a);
+  if (!strcmp(sbx_app, "/app") || under(sbx_app, "/app", 4)) sbx_app[0] = 0;
+  sbx_trim_copy(sbx_info, sizeof sbx_info, info);
+  sbx_trim_copy(sbx_dir, sizeof sbx_dir, sd);
+  sbx_trim_copy(sbx_exec, sizeof sbx_exec, ex);
+
+  for (const char *p = exts; p && *p && sbx_nexts < MAX_SBX_EXTS;) {
+    const char *end = strchrnul(p, ':');
+    const char *eq = memchr(p, '=', (size_t)(end - p));
+    if (eq && eq > p && end > eq + 1 && p[0] == '/' && eq[1] == '/') {
+      size_t vl = (size_t)(eq - p), rl = (size_t)(end - (eq + 1));
+      while (vl > 1 && p[vl - 1] == '/') vl--;
+      while (rl > 1 && eq[1 + rl - 1] == '/') rl--;
+      if (vl < sizeof sbx_exts[0].virt && rl < sizeof sbx_exts[0].real) {
+        struct sbx_ext item;
+        memcpy(item.virt, p, vl); item.virt[vl] = 0;
+        memcpy(item.real, eq + 1, rl); item.real[rl] = 0;
+        item.vlen = vl;
+        int pos = sbx_nexts;
+        while (pos > 0 && sbx_exts[pos - 1].vlen < item.vlen) { sbx_exts[pos] = sbx_exts[pos - 1]; pos--; }
+        sbx_exts[pos] = item;
+        sbx_nexts++;
+      }
+    }
+    if (!*end) break;
+    p = end + 1;
+  }
+
+  char raw_exe[PATH_MAX], guest_exe[PATH_MAX];
+  long n = sc(SYS_readlinkat, AT_FDCWD, (long)"/proc/self/exe", (long)raw_exe, sizeof raw_exe - 1, 0);
+  raw_exe[n > 0 ? n : 0] = 0;
+  if (!raw_exe[0] || guest_text(raw_exe, guest_exe) < 0) strcpy(guest_exe, raw_exe);
+
+  int forced = force && !strcmp(force, "1");
+  int maps_matched_exec = 0;
+  int in_fp = forced || strstr(raw_exe, "/flatpak/runtime/") != NULL || strstr(raw_exe, "/flatpak/app/") != NULL
+      || (sbx_usr[0] && under(guest_exe, sbx_usr, strlen(sbx_usr)))
+      || (sbx_app[0] && under(guest_exe, sbx_app, strlen(sbx_app)));
+  if (!in_fp || sbx_exec[0]) {
+    char maps[16384];
+    long mfd = sc(SYS_openat, AT_FDCWD, (long)"/proc/self/maps", O_RDONLY | O_CLOEXEC, 0, 0);
+    if (mfd >= 0) {
+      size_t tot = 0;
+      while (tot < sizeof maps - 1) {
+        long r = sc(SYS_read, mfd, (long)(maps + tot), sizeof maps - 1 - tot, 0, 0);
+        if (r <= 0) break;
+        tot += (size_t)r;
+      }
+      sc(SYS_close, mfd, 0, 0, 0, 0);
+      maps[tot] = 0;
+      if (sbx_exec[0] && strstr(maps, sbx_exec) != NULL) maps_matched_exec = 1;
+      if (!in_fp) {
+        if (strstr(maps, "/flatpak/runtime/") != NULL || strstr(maps, "/flatpak/app/") != NULL ||
+            (sbx_usr[0] && strstr(maps, sbx_usr) != NULL) ||
+            (sbx_app[0] && strstr(maps, sbx_app) != NULL)) {
+          in_fp = 1;
+        }
+      }
+    }
+  }
+  if (!in_fp) return;
+
+  if (sbx_usr[0]) {
+    char g64[PATH_MAX], h64[PATH_MAX];
+    struct stat st;
+    if (snprintf(g64, sizeof g64, "%s/lib64", sbx_usr) < (int)sizeof g64 && to_host(g64, h64, NULL) == 0 &&
+        sc(SYS_newfstatat, AT_FDCWD, (long)h64, (long)&st, 0, 0) == 0 && S_ISDIR(st.st_mode)) {
+      sbx_has_lib64 = 1;
+    }
+  }
+  if (sbx_exec[0]) {
+    const char *base = strrchr(raw_exe, '/');
+    base = base ? base + 1 : raw_exe;
+    if (forced || maps_matched_exec || strncmp(base, "ld-linux", 8) == 0 || !strcmp(guest_exe, sbx_exec))
+      sbx_exec_active = 1;
+  }
+  sbx_active = 1;
+}
+
+static void sbx_map_inplace(char *path, size_t cap) {
+  if (!sbx_active || path[0] != '/') return;
+  char c1 = path[1];
+  if (c1 != '.' && c1 != 'a' && c1 != 'u' && c1 != 'b' && c1 != 's' && c1 != 'l' && c1 != 'r' && c1 != 'e') return;
+  char tmp[PATH_MAX];
+  int n = -1;
+  if (!strcmp(path, "/.flatpak-info") && sbx_info[0]) {
+    n = snprintf(tmp, sizeof tmp, "%s", sbx_info);
+  } else if (under(path, "/run/host", 9)) {
+    if (!strcmp(path, "/run/host/fonts") || !strncmp(path, "/run/host/fonts/", 16))
+      n = snprintf(tmp, sizeof tmp, "/usr/share/fonts%s", path + 15);
+    else if (!strcmp(path, "/run/host/local-fonts") || !strncmp(path, "/run/host/local-fonts/", 22))
+      n = snprintf(tmp, sizeof tmp, "/usr/local/share/fonts%s", path + 21);
+    else if (!strcmp(path, "/run/host/os-release"))
+      n = snprintf(tmp, sizeof tmp, "/etc/os-release");
+    else
+      n = snprintf(tmp, sizeof tmp, "%s", path[9] ? path + 9 : "/");
+  } else {
+    for (int i = 0; i < sbx_nexts && n < 0; i++) {
+      if (under(path, sbx_exts[i].virt, sbx_exts[i].vlen))
+        n = snprintf(tmp, sizeof tmp, "%s%s", sbx_exts[i].real, path + sbx_exts[i].vlen);
+    }
+    if (n < 0) {
+      if (!strcmp(path, "/usr/bin/bwrap") || !strcmp(path, "/bin/bwrap"))
+        n = snprintf(tmp, sizeof tmp, "/usr/local/bin/bwrap");
+      else if (!strcmp(path, "/usr/bin/flatpak-spawn") || !strcmp(path, "/bin/flatpak-spawn"))
+        n = snprintf(tmp, sizeof tmp, "/usr/local/bin/flatpak-spawn");
+      else if (sbx_app[0] && under(path, "/app", 4))
+        n = snprintf(tmp, sizeof tmp, "%s%s", sbx_app, path + 4);
+      else if (sbx_usr[0] && under(path, "/usr", 4) && !under(path, "/usr/local", 10))
+        n = snprintf(tmp, sizeof tmp, "%s%s", sbx_usr, path + 4);
+      else if (sbx_usr[0] && under(path, "/bin", 4))
+        n = snprintf(tmp, sizeof tmp, "%s/bin%s", sbx_usr, path + 4);
+      else if (sbx_usr[0] && under(path, "/sbin", 5))
+        n = snprintf(tmp, sizeof tmp, "%s/sbin%s", sbx_usr, path + 5);
+      else if (sbx_usr[0] && under(path, "/lib", 4))
+        n = snprintf(tmp, sizeof tmp, "%s/lib%s", sbx_usr, path + 4);
+      else if (sbx_usr[0] && under(path, "/lib64", 6))
+        n = snprintf(tmp, sizeof tmp, "%s/%s%s", sbx_usr, sbx_has_lib64 ? "lib64" : "lib", path + 6);
+      else if (sbx_dir[0] && !strncmp(path, "/etc/ld.so.", 11) &&
+               (!strcmp(path + 5, "ld.so.conf") || !strcmp(path + 5, "ld.so.cache"))) {
+        char gh[PATH_MAX], hh[PATH_MAX];
+        if (snprintf(gh, sizeof gh, "%s/%s", sbx_dir, path + 5) < (int)sizeof gh &&
+            to_host(gh, hh, NULL) == 0 && sc(SYS_faccessat, AT_FDCWD, (long)hh, F_OK, 0, 0) == 0) {
+          n = snprintf(tmp, sizeof tmp, "%s", gh);
+        }
+      }
+    }
+  }
+  if (n > 0 && (size_t)n < cap && (size_t)n < sizeof tmp) {
+    memcpy(path, tmp, (size_t)n + 1);
+  }
+}
 
 static int gone(const char *h, size_t n) {
   return n > 10 && strcmp(h + n - 10, " (deleted)") == 0;
@@ -529,17 +711,73 @@ static int is_l2s_name(const char *p) {
   return strncmp(b, ".l2s.", 5) == 0 || strncmp(b, ".proot.l2s.", 11) == 0;
 }
 
-static int is_l2s_host_symlink(const char *host) {
-  char target[PATH_MAX];
-  long t = sc(SYS_readlinkat, AT_FDCWD, (long)host, (long)target, sizeof target - 1, 0);
-  if (t <= 0 || t >= (long)sizeof target - 1) return 0;
-  target[t] = 0;
-  return is_l2s_name(target);
+static int l2s_join_target(const char *from_host, const char *target, char *out) {
+  if (target[0] == '/') {
+    size_t len = strlen(target);
+    if (len >= PATH_MAX) return -1;
+    memcpy(out, target, len + 1);
+    return 0;
+  }
+  const char *slash = strrchr(from_host, '/');
+  if (!slash) return -1;
+  size_t dlen = slash == from_host ? 1 : (size_t)(slash - from_host);
+  size_t tlen = strlen(target);
+  if (dlen + 1 + tlen >= PATH_MAX) return -1;
+  memcpy(out, from_host, dlen);
+  if (dlen > 1 || out[0] != '/') out[dlen++] = '/';
+  memcpy(out + dlen, target, tlen + 1);
+  return 0;
+}
+
+static int resolve_l2s_host(struct res *r, int allow_l2s) {
+  char step1[PATH_MAX], h1[PATH_MAX], step2[PATH_MAX], h2[PATH_MAX];
+  long n1 = sc(SYS_readlinkat, AT_FDCWD, (long)r->host, (long)step1, sizeof step1 - 1, 0);
+  if (n1 <= 0 || n1 >= (long)sizeof step1 - 1) return 0;
+  step1[n1] = 0;
+  if (!is_l2s_name(step1)) return 0;
+  if (!allow_l2s) return -1;
+  if (l2s_join_target(r->host, step1, h1) < 0) return -1;
+  struct stat st1;
+  if (sc(SYS_newfstatat, AT_FDCWD, (long)h1, (long)&st1, AT_SYMLINK_NOFOLLOW, 0) < 0) return -1;
+  const char *final_host = h1;
+  if (S_ISLNK(st1.st_mode)) {
+    long n2 = sc(SYS_readlinkat, AT_FDCWD, (long)h1, (long)step2, sizeof step2 - 1, 0);
+    if (n2 <= 0 || n2 >= (long)sizeof step2 - 1) return -1;
+    step2[n2] = 0;
+    if (!is_l2s_name(step2) || l2s_join_target(h1, step2, h2) < 0) return -1;
+    if (sc(SYS_newfstatat, AT_FDCWD, (long)h2, (long)&st1, AT_SYMLINK_NOFOLLOW, 0) < 0) return -1;
+    final_host = h2;
+  }
+  if (!S_ISREG(st1.st_mode)) return -1;
+  size_t flen = strlen(final_host);
+  unsigned nlink = 0;
+  if (flen >= 10 && final_host[flen - 5] == '.') {
+    int ok = 1;
+    for (size_t k = 1; k <= 4; k++) {
+      char c = final_host[flen - k];
+      if (c < '0' || c > '9') { ok = 0; break; }
+    }
+    if (ok) {
+      int cnt = atoi(final_host + flen - 4);
+      if (cnt > 0) nlink = (unsigned)cnt;
+    }
+  }
+  if (!nlink) return -1;
+  memcpy(r->host, final_host, flen + 1);
+  r->st = st1;
+  r->st.st_nlink = nlink;
+  r->l2s_nlink = nlink;
+  return 1;
 }
 
 static char exe_text[PATH_MAX];
 static int exe_len;
 static long own_exe(char *g) {
+  if (sbx_exec_active && sbx_exec[0]) {
+    size_t slen = strlen(sbx_exec);
+    memcpy(g, sbx_exec, slen + 1);
+    return (long)slen;
+  }
   int n = __atomic_load_n(&exe_len, __ATOMIC_ACQUIRE);
   if (n > 0) {
     memcpy(g, exe_text, n + 1);
@@ -619,8 +857,9 @@ static int pop(char *g) {
 #define UNSEEN 2
 #define MAY_BE_UNSEEN 2
 #define GLUE 3
+#define ALLOW_L2S 4
 
-static long walk(struct res *r, const char *text, int follow, int last) {
+static long walk(struct res *r, const char *text, int follow, int last, int allow_l2s) {
   char rest[PATH_MAX];
   size_t len = strlen(text);
   int links = 0, stated = 0;
@@ -637,6 +876,7 @@ static long walk(struct res *r, const char *text, int follow, int last) {
     while (*after == '/') after++;
     int final = *after == 0;
     stated = 0;
+    r->l2s_nlink = 0;
     if (n == 1 && c[0] == '.') { c = e; continue; }
     if (n == 2 && c[0] == '.' && c[1] == '.') { pop(r->guest); c = e; continue; }
     size_t glen = strlen(r->guest);
@@ -659,6 +899,10 @@ static long walk(struct res *r, const char *text, int follow, int last) {
       if (!final || !last) return r->libc ? s : -ENOENT;
       return s == -ENOENT ? 1 : UNSEEN;
     }
+    if (S_ISLNK(r->st.st_mode) && !under(r->guest, "/proc", 5)) {
+      int l2s = resolve_l2s_host(r, final ? allow_l2s : 1);
+      if (l2s < 0) return FP_SLOW;
+    }
     if (S_ISLNK(r->st.st_mode) && (!final || follow)) {
       char target[PATH_MAX];
       long t;
@@ -678,6 +922,7 @@ static long walk(struct res *r, const char *text, int follow, int last) {
         target[t] = 0;
         if (is_l2s_name(target)) return FP_SLOW;
         if (detranslated(target, r->host) == FP_SLOW) return FP_SLOW;
+        if (sbx_active && target[0] == '/') sbx_map_inplace(target, sizeof target);
         t = strlen(target);
       }
       if (target[0] == '/') strcpy(r->guest, "/");
@@ -690,17 +935,20 @@ static long walk(struct res *r, const char *text, int follow, int last) {
       c = rest;
       continue;
     }
-    if (S_ISLNK(r->st.st_mode) && !under(r->guest, "/proc", 5) && is_l2s_host_symlink(r->host)) return FP_SLOW;
     if (!final && !S_ISDIR(r->st.st_mode)) return -ENOTDIR;
     stated = 1;
     c = e;
   }
   if (!stated) {
+    r->l2s_nlink = 0;
     if (to_host(r->guest, r->host, NULL) < 0) return FP_SLOW;
     long s = sc(SYS_newfstatat, AT_FDCWD, (long)r->host, (long)&r->st, AT_SYMLINK_NOFOLLOW, 0);
     if (s < 0 && strcmp(r->guest, "/") != 0 && glue_above_binding(r->guest, strlen(r->guest))) return FP_SLOW;
     if (s < 0) return s == -ENOENT ? FP_SLOW : s;
-    if (S_ISLNK(r->st.st_mode) && !under(r->guest, "/proc", 5) && is_l2s_host_symlink(r->host)) return FP_SLOW;
+    if (S_ISLNK(r->st.st_mode) && !under(r->guest, "/proc", 5)) {
+      int l2s = resolve_l2s_host(r, allow_l2s);
+      if (l2s < 0) return FP_SLOW;
+    }
   }
   r->exists = 1;
   return 0;
@@ -717,7 +965,9 @@ static int base_of(int dirfd, char *h) {
   return gone(h, n) ? -1 : 0;
 }
 
-static long resolve_in(const char *base, const char *path, int follow, struct res *r) {
+static long resolve_in(const char *base, const char *path, int how, struct res *r) {
+  int follow = how & 1;
+  int allow_l2s = (how & ALLOW_L2S) != 0;
   char norm[PATH_MAX];
   size_t o = 0;
   int dotdot = 0;
@@ -740,59 +990,63 @@ static long resolve_in(const char *base, const char *path, int follow, struct re
     }
   }
   norm[o] = 0;
+  if (sbx_active && o > 0) {
+    sbx_map_inplace(norm, sizeof norm);
+    o = strlen(norm);
+  }
   strcpy(r->guest, "/");
   r->moving = 0;
   r->magic = 0;
+  r->l2s_nlink = 0;
   long w;
   char *slash = strrchr(norm, '/');
   if (o == 0 || dotdot || slash == norm) {
-    w = walk(r, o ? norm : "/", follow || trailing, 1);
+    w = walk(r, o ? norm : "/", follow || trailing, 1, allow_l2s);
   } else {
     *slash = 0;
     unsigned h = hash_of(norm);
     if (!cached(norm, h, r->guest)) {
-      w = walk(r, norm, 1, 0);
+      w = walk(r, norm, 1, 0, 1);
       if (w < 0) return w;
       if (w != GLUE && !S_ISDIR(r->st.st_mode)) return -ENOTDIR;
       if (!r->moving) remember(norm, h, r->guest);
     }
     *slash = '/';
-    w = walk(r, slash + 1, follow || trailing, 1);
+    w = walk(r, slash + 1, follow || trailing, 1, allow_l2s);
   }
   if (w < 0) return w;
   if (w == GLUE || (trailing && w != 1 && (w != 0 || !S_ISDIR(r->st.st_mode)))) return FP_SLOW;
   return w;
 }
 
-static __attribute__((noinline)) long same_from_other_names(const char *h, const char *path, int follow,
+static __attribute__((noinline)) long same_from_other_names(const char *h, const char *path, int how,
                                                            long rs, const struct res *r) {
   char base[PATH_MAX];
   struct res other;
   other.libc = r->libc;
   for (int k = 1; guest_name(h, k, base) == 0; k++) {
-    if (resolve_in(base, path, follow, &other) != rs) return FP_SLOW;
+    if (resolve_in(base, path, how, &other) != rs) return FP_SLOW;
     if (rs >= 0 && strcmp(other.host, r->host) != 0) return FP_SLOW;
   }
   return rs;
 }
 
 static long resolve_as(int dirfd, const char *path, int how, int libc, struct res *r) {
-  int follow = how & 1;
   long rs;
   char h[PATH_MAX], base[PATH_MAX];
   if (!path || !path[0] || !fp_ready()) return FP_SLOW;
   r->named = 1;
   r->libc = libc;
   if (path[0] == '/') {
-    rs = resolve_in(NULL, path, follow, r);
+    rs = resolve_in(NULL, path, how, r);
   } else {
     int b = base_of(dirfd, h);
     if (b == -ENOTDIR) return b;
     if (b < 0 || guest_name(h, 0, base) < 0) return FP_SLOW;
-    rs = resolve_in(base, path, follow, r);
+    rs = resolve_in(base, path, how, r);
     if (rs != FP_SLOW && guest_name(h, 1, base) == 0) {
       r->named = 0;
-      rs = same_from_other_names(h, path, follow, rs, r);
+      rs = same_from_other_names(h, path, how, rs, r);
     }
   }
   return rs == UNSEEN && !(how & MAY_BE_UNSEEN) ? FP_SLOW : rs;
@@ -825,7 +1079,8 @@ static long fp_open(int dirfd, const char *path, int flags, mode_t mode) {
   if ((flags & __O_TMPFILE) == __O_TMPFILE) return FP_SLOW;
   int follow = !(flags & O_NOFOLLOW) && !((flags & O_CREAT) && (flags & O_EXCL));
   if ((flags & O_CREAT) && trailing_slash(path)) return FP_SLOW;
-  long rs = resolve(dirfd, path, follow | MAY_BE_UNSEEN, &r);
+  int ro = (flags & (O_ACCMODE | O_CREAT | O_TRUNC)) == O_RDONLY ? ALLOW_L2S : 0;
+  long rs = resolve(dirfd, path, follow | MAY_BE_UNSEEN | ro, &r);
   if (rs < 0) return rs;
   if (rs == 1 && !(flags & O_CREAT)) return -ENOENT;
   if (rs == UNSEEN) return sc(SYS_openat, AT_FDCWD, (long)r.host, flags, (flags & O_CREAT) ? mode : 0, 0);
@@ -894,7 +1149,7 @@ static long fp_stat(int dirfd, const char *path, int flags, struct stat *st) {
     return rs;
   }
   if (flags & ~(AT_SYMLINK_NOFOLLOW | AT_NO_AUTOMOUNT)) return FP_SLOW;
-  long rs = resolve(dirfd, path, (flags & AT_SYMLINK_NOFOLLOW ? 0 : 1) | MAY_BE_UNSEEN, &r);
+  long rs = resolve(dirfd, path, (flags & AT_SYMLINK_NOFOLLOW ? 0 : 1) | MAY_BE_UNSEEN | ALLOW_L2S, &r);
   if (rs < 0) return rs;
   if (rs == 1) return -ENOENT;
   if (rs == UNSEEN) return sc(SYS_newfstatat, AT_FDCWD, (long)r.host, (long)st, flags, 0);
@@ -1024,10 +1279,14 @@ static long fp_statx(int dirfd, const char *path, int flags, unsigned mask, stru
     return rs;
   }
   rs = (flags & ~(AT_SYMLINK_NOFOLLOW | AT_NO_AUTOMOUNT | AT_STATX_SYNC_TYPE)) ? FP_SLOW
-       : resolve(dirfd, path, (flags & AT_SYMLINK_NOFOLLOW ? 0 : 1) | MAY_BE_UNSEEN, &r);
+       : resolve(dirfd, path, (flags & AT_SYMLINK_NOFOLLOW ? 0 : 1) | MAY_BE_UNSEEN | ALLOW_L2S, &r);
   if (rs == 1) rs = -ENOENT;
-  if (rs == 0 || rs == UNSEEN)
-    rs = statx_call(AT_FDCWD, r.host, flags | (rs == 0 && !r.magic ? AT_SYMLINK_NOFOLLOW : 0), mask, out);
+  if (rs == 0 || rs == UNSEEN) {
+    int was_resolved = rs == 0;
+    rs = statx_call(AT_FDCWD, r.host, flags | (was_resolved && !r.magic ? AT_SYMLINK_NOFOLLOW : 0), mask, out);
+    if (rs == 0 && was_resolved && r.l2s_nlink && (out->stx_mask & STATX_NLINK))
+      out->stx_nlink = r.l2s_nlink;
+  }
   return rs;
 }
 
@@ -1047,7 +1306,7 @@ static long fp_access(int dirfd, const char *path, int mode, int flags) {
   struct res r;
   if ((flags & AT_EACCESS) && effective_is_real()) flags &= ~AT_EACCESS;
   long rs = (flags & ~AT_SYMLINK_NOFOLLOW) == 0
-            ? resolve(dirfd, path, (flags & AT_SYMLINK_NOFOLLOW ? 0 : 1) | MAY_BE_UNSEEN, &r) : FP_SLOW;
+            ? resolve(dirfd, path, (flags & AT_SYMLINK_NOFOLLOW ? 0 : 1) | MAY_BE_UNSEEN | ALLOW_L2S, &r) : FP_SLOW;
   if (rs == 1) rs = -ENOENT;
   if (rs == 0 && S_ISLNK(r.st.st_mode)) rs = FP_SLOW;
   if (rs == 0 || rs == UNSEEN) rs = sc(SYS_faccessat, AT_FDCWD, (long)r.host, mode, 0, 0);
@@ -1088,7 +1347,7 @@ static long fp_readlink(int dirfd, const char *path, char *buf, size_t size, siz
   struct res r;
   char text[PATH_MAX];
   int changed;
-  long rs = size ? resolve(dirfd, path, 0, &r) : FP_SLOW;
+  long rs = size ? resolve(dirfd, path, ALLOW_L2S, &r) : FP_SLOW;
   if (rs == 1) rs = -ENOENT;
   if (rs == 0) rs = link_text(&r, text, size, &changed);
   if (rs < 0) return rs;
@@ -1131,7 +1390,7 @@ ssize_t __readlinkat_chk(int dirfd, const char *path, char *buf, size_t size, si
 char *realpath(const char *path, char *resolved) {
   REAL(realpath, char *(*)(const char *, char *));
   struct res r;
-  long rs = resolve_as(AT_FDCWD, path, 1, 1, &r);
+  long rs = resolve_as(AT_FDCWD, path, 1 | ALLOW_L2S, 1, &r);
   if (rs == 0 && !r.named) rs = FP_SLOW;
   if (rs == FP_SLOW) { missed(__func__, AT_FDCWD, path); return real_realpath(path, resolved); }
   hits++;
@@ -1359,7 +1618,7 @@ int truncate64(const char *path, off_t length) __attribute__((alias("truncate"))
 
 static long fp_statfs(const char *path, struct statfs *buf) {
   struct res r;
-  long rs = resolve(AT_FDCWD, path, 1, &r);
+  long rs = resolve(AT_FDCWD, path, 1 | ALLOW_L2S, &r);
   if (rs == 1) rs = -ENOENT;
   if (rs == 0 && under(r.guest, "/dev/shm", 8)) rs = FP_SLOW;
   if (rs == 0) rs = sc(SYS_statfs, (long)r.host, (long)buf, 0, 0, 0);
@@ -1383,7 +1642,7 @@ int statfs64(const char *path, struct statfs64 *buf) {
 static int statvfs_common(const char *path, struct statvfs *buf, int (*real)(const char *, struct statvfs *)) {
   struct res r;
   struct statfs fs;
-  long rs = resolve(AT_FDCWD, path, 1, &r);
+  long rs = resolve(AT_FDCWD, path, 1 | ALLOW_L2S, &r);
   if (rs == 1) rs = -ENOENT;
   if (rs == 0 && under(r.guest, "/dev/shm", 8)) rs = FP_SLOW;
   if (rs == 0) rs = sc(SYS_statfs, (long)r.host, (long)&fs, 0, 0, 0);
@@ -1416,7 +1675,7 @@ int statvfs64(const char *path, struct statvfs64 *buf) {
 
 static long fp_getxattr(const char *path, const char *name, void *value, size_t size, int follow) {
   struct res r;
-  long rs = resolve(AT_FDCWD, path, follow | MAY_BE_UNSEEN, &r);
+  long rs = resolve(AT_FDCWD, path, follow | MAY_BE_UNSEEN | ALLOW_L2S, &r);
   if (rs == 1) rs = -ENOENT;
   if (rs == 0 || rs == UNSEEN) rs = sc(follow ? SYS_getxattr : SYS_lgetxattr, (long)r.host, (long)name, (long)value, size, 0);
   return rs;
@@ -1439,7 +1698,7 @@ ssize_t lgetxattr(const char *path, const char *name, void *value, size_t size) 
 
 static long fp_listxattr(const char *path, char *list, size_t size, int follow) {
   struct res r;
-  long rs = resolve(AT_FDCWD, path, follow | MAY_BE_UNSEEN, &r);
+  long rs = resolve(AT_FDCWD, path, follow | MAY_BE_UNSEEN | ALLOW_L2S, &r);
   if (rs == 1) rs = -ENOENT;
   if (rs == 0 || rs == UNSEEN) rs = sc(follow ? SYS_listxattr : SYS_llistxattr, (long)r.host, (long)list, size, 0, 0);
   return rs;

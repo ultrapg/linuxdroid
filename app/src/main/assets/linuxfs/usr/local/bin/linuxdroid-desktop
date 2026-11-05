@@ -215,6 +215,9 @@ ENTRY
     if [ -n "${XDG_RUNTIME_DIR:-}" ] && [ -n "${DBUS_SESSION_BUS_ADDRESS:-}" ]; then
       printf "%s\n" "$DBUS_SESSION_BUS_ADDRESS" > "$XDG_RUNTIME_DIR/bus-address" 2>/dev/null || true
     fi
+    if [ -x /usr/local/bin/linuxdroid-flatpak-helper ]; then
+      /usr/local/bin/linuxdroid-flatpak-helper >/dev/null 2>&1 &
+    fi
     write_status() {
       echo "$2"
       if [ -n "${BL_BOOT_STATUS:-}" ]; then
@@ -411,6 +414,9 @@ run_xwayland_desktop() {
   dbus-run-session -- /bin/bash -c "
     if [ -n \"\${XDG_RUNTIME_DIR:-}\" ] && [ -n \"\${DBUS_SESSION_BUS_ADDRESS:-}\" ]; then
       printf '%s\n' \"\$DBUS_SESSION_BUS_ADDRESS\" > \"\$XDG_RUNTIME_DIR/bus-address\" 2>/dev/null || true
+    fi
+    if [ -x /usr/local/bin/linuxdroid-flatpak-helper ]; then
+      /usr/local/bin/linuxdroid-flatpak-helper >/dev/null 2>&1 &
     fi
     start_x11_helpers '$disp' 'x11-ime'
     exec $session_cmd
