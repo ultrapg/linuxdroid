@@ -57,7 +57,7 @@ private val DarkScheme = darkColorScheme(
 
 enum class AppTheme(val id: String, val label: String, val description: String) {
     DARK("dark", "Dark", "Deep slate with cyan accents"),
-    AMOLED("amoled", "AMOLED Black", "Pure black to save battery on OLED screens"),
+    AMOLED("amoled", "AMOLED Black", "True #000000 backgrounds and cards to switch off OLED pixels"),
     LIGHT("light", "Light", "Bright surfaces"),
     SYSTEM("system", "Follow System", "Match your phone's light or dark mode"),
     DYNAMIC("dynamic", "Dynamic Colors", "Use your wallpaper colors (Android 12+)");
@@ -83,14 +83,14 @@ private val AmoledScheme = darkColorScheme(
     onBackground = SlateOnSurface,
     surface = Color.Black,
     onSurface = SlateOnSurface,
-    surfaceVariant = Color(0xFF111111),
+    surfaceVariant = Color(0xFF0A0A0A),
     onSurfaceVariant = SlateMuted,
-    surfaceContainer = Color(0xFF0A0A0A),
-    surfaceContainerLow = Color(0xFF050505),
+    surfaceContainer = Color.Black,
+    surfaceContainerLow = Color.Black,
     surfaceContainerLowest = Color.Black,
-    surfaceContainerHigh = Color(0xFF141414),
-    surfaceContainerHighest = Color(0xFF1C1C1C),
-    outline = Color(0xFF2A2A2A),
+    surfaceContainerHigh = Color(0xFF0D0D0D),
+    surfaceContainerHighest = Color(0xFF141414),
+    outline = Color(0xFF1F1F1F),
     error = ErrorRed,
 )
 
