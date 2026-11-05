@@ -10,8 +10,8 @@ import java.io.File
 import kotlin.math.roundToInt
 
 enum class TouchInputMode(val id: String, val label: String) {
-    TOUCHSCREEN("touchscreen", "Direct Touchscreen (Laptop Touch)"),
-    TRACKPAD("trackpad", "Virtual Multi-Touch Trackpad");
+    TOUCHSCREEN("touchscreen", "Direct Touch"),
+    TRACKPAD("trackpad", "Virtual Trackpad");
 
     companion object {
         fun fromId(id: String?): TouchInputMode =
@@ -26,18 +26,18 @@ enum class ExternalDisplayMode(
 ) {
     AUTO_EXTERNAL(
         id = "auto_external",
-        title = "Auto Switch When Connected",
-        subtitle = "Outputs to an external monitor whenever connected (requires USB-C DisplayPort Alt Mode / HDMI output or Wireless Cast); uses phone screen when unplugged.",
+        title = "Auto-Switch on Connection",
+        subtitle = "Uses an external USB-C / HDMI monitor or wireless display when connected, and switches back to the phone screen when unplugged.",
     ),
     EXTERNAL_ONLY(
         id = "external_only",
-        title = "Use External Screen Only",
-        subtitle = "Outputs Linux exclusively to an external monitor without needing DeX (device must support USB-C video output / DisplayPort Alt Mode or Wireless Cast). Your phone acts as a trackpad & keyboard.",
+        title = "External Display Only",
+        subtitle = "Outputs the desktop exclusively to a USB-C / HDMI monitor or wireless display while your phone works as a trackpad and keyboard.",
     ),
     PHONE_ONLY(
         id = "phone_only",
-        title = "Phone / App Window Only",
-        subtitle = "Always renders inside the phone screen (for OS screen mirroring) or current Samsung DeX / multi-window.",
+        title = "Phone Screen / App Window Only",
+        subtitle = "Always renders on the device screen or inside the current Samsung DeX / multi-window.",
     );
 
     companion object {
@@ -47,8 +47,8 @@ enum class ExternalDisplayMode(
 }
 
 enum class ScreenOrientationPref(val id: String, val label: String, val androidOrientation: Int) {
-    LANDSCAPE("landscape", "Landscape (Laptop Default)", ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE),
-    AUTO("auto", "Auto-Rotate (Sensor)", ActivityInfo.SCREEN_ORIENTATION_FULL_USER),
+    LANDSCAPE("landscape", "Landscape", ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE),
+    AUTO("auto", "Auto-Rotate", ActivityInfo.SCREEN_ORIENTATION_FULL_USER),
     PORTRAIT("portrait", "Portrait", ActivityInfo.SCREEN_ORIENTATION_SENSOR_PORTRAIT);
 
     fun next(): ScreenOrientationPref = when (this) {
@@ -70,9 +70,9 @@ enum class ResolutionPreset(
     val height: Int,
     val shortEdgeTarget: Int = 0,
 ) {
-    NATIVE("native", "Native Screen / Monitor", 0, 0),
-    BALANCED_900P("aspect_900p", "Balanced 900p (Full Aspect)", 0, 0, shortEdgeTarget = 900),
-    PERFORMANCE_720P("aspect_720p", "Fast 720p (Full Aspect)", 0, 0, shortEdgeTarget = 720),
+    NATIVE("native", "Native Display", 0, 0),
+    BALANCED_900P("aspect_900p", "Balanced 900p", 0, 0, shortEdgeTarget = 900),
+    PERFORMANCE_720P("aspect_720p", "Fast 720p", 0, 0, shortEdgeTarget = 720),
     FHD_PLUS("1920x1200", "1920 × 1200 (16:10)", 1920, 1200),
     FHD("1920x1080", "1920 × 1080 (1080p)", 1920, 1080),
     QHD("2560x1600", "2560 × 1600 (QHD+)", 2560, 1600),

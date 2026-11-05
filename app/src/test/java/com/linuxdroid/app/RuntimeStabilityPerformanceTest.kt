@@ -326,6 +326,9 @@ with tempfile.TemporaryDirectory(prefix="ld-taskbar-test-") as tmp:
     assert "[Containments][2][Applets][5][Configuration][General]\nlaunchers=" + expected_kde in txt0, txt0
     assert os.path.isfile(os.path.join(home0, ".config/plasmashellrc")), "Expected pre-seeded plasmashellrc"
     assert os.path.isfile(os.path.join(home0, ".config/kactivitymanagerdrc")), "Expected pre-seeded kactivitymanagerdrc"
+    assert os.path.isfile(os.path.join(home0, ".config/ksplashrc")), "Expected pre-seeded ksplashrc"
+    assert os.path.isfile(os.path.join(home0, ".config/kdedefaults/ksplashrc")), "Expected pre-seeded kdedefaults/ksplashrc"
+    assert "Engine=none" in open(os.path.join(home0, ".config/kdedefaults/ksplashrc")).read()
 
     # 1. KDE appletsrc with NO [Configuration][General] section (exact v1.0.24 bug)
     home1 = os.path.join(tmp, "home_no_cfg")

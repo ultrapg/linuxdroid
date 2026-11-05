@@ -352,7 +352,7 @@ class RuntimeInstallService : Service() {
         )
         val builder = NotificationCompat.Builder(this, App.CHANNEL_INSTALL)
             .setSmallIcon(android.R.drawable.stat_sys_download)
-            .setContentTitle("LinuxDroid Rootfs Manager")
+            .setContentTitle("LinuxDroid Installer")
             .setContentText(stage)
             .setOngoing(true)
             .setContentIntent(openIntent)

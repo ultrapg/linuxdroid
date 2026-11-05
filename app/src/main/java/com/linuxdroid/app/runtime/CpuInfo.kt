@@ -6,7 +6,7 @@ import java.util.Locale
 enum class CpuCoreTier(val label: String, val shortBadge: String) {
     PRIME("Prime Core", "Prime"),
     PERFORMANCE("Performance Core", "Perf"),
-    EFFICIENCY("Standard / Efficiency", "Other"),
+    EFFICIENCY("Efficiency Core", "Eff"),
 }
 
 data class CoreDescriptor(

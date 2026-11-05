@@ -30,6 +30,7 @@
 0755 usr/local/bin/flatpak-spawn
 0755 usr/local/bin/google-chrome
 0755 usr/local/bin/google-chrome-stable
+0755 usr/local/bin/ksplashqml
 0755 usr/local/bin/kwin_wayland_wrapper
 0755 usr/local/bin/linuxdroid-apps
 0755 usr/local/bin/linuxdroid-bookmarks

@@ -1,0 +1,4 @@
+#!/bin/sh
+# LinuxDroid already provides a native Android 6-step startup progress overlay.
+# Suppress KDE's fullscreen LayerOverlay ksplashqml window so it can never block the desktop.
+exit 0

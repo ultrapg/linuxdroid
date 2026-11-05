@@ -118,6 +118,7 @@ class SessionBootStateTest {
             paths.add(relPath)
         }
 
+        assertTrue(paths.contains("usr/local/bin/ksplashqml"))
         assertTrue(paths.contains("usr/local/bin/kwin_wayland_wrapper"))
         assertTrue(paths.contains("usr/local/bin/linuxdroid-gpu"))
         assertTrue(paths.contains("usr/lib/firefox/defaults/pref/linuxdroid.js"))

@@ -117,7 +117,7 @@ class SessionService : Service() {
         SessionState.update {
             it.copy(
                 phase = SessionPhase.STARTING,
-                statusText = "Applying updated display/hardware settings & restarting...",
+                statusText = "Applying updated settings & restarting...",
                 firstFrameReady = false,
                 guestPid = -1,
                 bootStep = 1,
@@ -197,9 +197,9 @@ class SessionService : Service() {
             SessionSnapshot(
                 phase = SessionPhase.STARTING,
                 statusText = if (forceCompatRetry) {
-                    "Retrying in PRoot compatibility mode (seccomp disabled)..."
+                    "Retrying in compatibility mode..."
                 } else {
-                    "Staging Linux runtime & user account..."
+                    "Preparing Linux runtime & user account..."
                 },
                 resolutionText = resolutionSummary,
                 bootStep = 1,
@@ -227,7 +227,7 @@ class SessionService : Service() {
         updateBootStep(
             generation = generation,
             step = 2,
-            status = "Initializing GPU driver (${gpuConfig.activeBackend.uppercase()})...",
+            status = "Configuring GPU driver (${gpuConfig.activeBackend.uppercase()})...",
             gpuSummary = hwSummary,
         )
         FileUtils.writeString(File(root, "etc/linuxdroid/gpu.env"), gpuConfig.toEnvFileContent())
@@ -235,7 +235,7 @@ class SessionService : Service() {
         updateBootStep(
             generation = generation,
             step = 3,
-            status = "Starting Android Wayland compositor & PulseAudio...",
+            status = "Starting Wayland compositor & audio server...",
         )
         val waylandFirstFrameAtMs = AtomicLong(0L)
         val guestShellReady = AtomicBoolean(false)
@@ -245,7 +245,7 @@ class SessionService : Service() {
             val wfMs = waylandFirstFrameAtMs.get()
             val shellReady = guestShellReady.get()
             if (wfMs <= 0L && !shellReady) return
-            if (!shellReady && System.currentTimeMillis() - wfMs < 12_000L) return
+            if (!shellReady && System.currentTimeMillis() - wfMs < 6_000L) return
             SessionState.update {
                 if (it.firstFrameReady || it.phase == SessionPhase.FAILED || it.phase == SessionPhase.STOPPING) {
                     it
@@ -392,7 +392,7 @@ class SessionService : Service() {
         updateBootStep(
             generation = generation,
             step = 4,
-            status = "Booting ARM64 Ubuntu container (PRoot)...",
+            status = "Starting Ubuntu ARM64 environment...",
             gpuSummary = hwSummary,
         )
 
@@ -629,7 +629,7 @@ class SessionService : Service() {
         ctrl.freeze { ok ->
             if (ok) {
                 releaseWakeLock()
-                SessionState.update { it.copy(phase = SessionPhase.PAUSED, statusText = "Paused (0% CPU Freeze)") }
+                SessionState.update { it.copy(phase = SessionPhase.PAUSED, statusText = "Paused") }
                 refreshNotification()
             }
         }

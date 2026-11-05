@@ -3,23 +3,23 @@ package com.linuxdroid.app.gpu
 enum class GpuDriverMode(val id: String, val title: String, val subtitle: String) {
     AUTO(
         "auto",
-        "Auto (Smart SoC Native)",
-        "Automatically uses KGSL Turnip + Zink on Snapdragon and Venus Vulkan + VirGL on MediaTek, Immortalis & Exynos."
+        "Automatic (Recommended)",
+        "Uses native Turnip Vulkan + Zink OpenGL on Snapdragon Adreno, and Venus Vulkan + VirGL on MediaTek, Exynos, and Tensor."
     ),
     UNIFIED(
         "unified",
-        "Unified Driver (SoC Venus Vulkan + VirGL — All Chips)",
-        "Identical driver stack across Snapdragon, MediaTek & Exynos over Android's native libvulkan.so & libGLESv2.so."
+        "Unified Vulkan + VirGL (All Chipsets)",
+        "Runs Vulkan and OpenGL over Android's native GPU driver across Snapdragon, MediaTek, Exynos, and Tensor."
     ),
     TURNIP(
         "turnip",
-        "Native KGSL Turnip + Zink (Snapdragon Adreno)",
-        "Direct /dev/kgsl-3d0 Mesa Turnip Vulkan 1.3 + Zink OpenGL 4.6 for Qualcomm Adreno 6xx/7xx/8xx."
+        "Adreno Turnip + Zink (Snapdragon)",
+        "Direct /dev/kgsl-3d0 Mesa Turnip Vulkan 1.3 and Zink OpenGL 4.6 for Qualcomm Adreno GPUs."
     ),
     SOFTWARE(
         "software",
-        "Software Safe Mode (LLVMpipe + Lavapipe)",
-        "100% CPU rendering fallback for maximum compatibility."
+        "Software Rendering (Safe Mode)",
+        "CPU-rendered OpenGL and Vulkan (LLVMpipe + Lavapipe) for maximum compatibility."
     );
 
     companion object {
@@ -109,9 +109,9 @@ object GpuConfigGenerator {
                 }.joinToString(":")
 
                 val summary = if (enableVenus) {
-                    "SoC Venus Vulkan + VirGL OpenGL (${gpu.deviceName})"
+                    "Venus Vulkan + VirGL OpenGL (${gpu.deviceName})"
                 } else {
-                    "SoC VirGL OpenGL + Lavapipe Vulkan (${gpu.deviceName})"
+                    "VirGL OpenGL + Lavapipe Vulkan (${gpu.deviceName})"
                 }
                 env["LINUXDROID_GPU_SUMMARY"] = summary
                 env["VTEST_SOCKET_NAME"] = virglSocketGuestPath
@@ -136,7 +136,7 @@ object GpuConfigGenerator {
                 )
             }
             else -> {
-                val summary = "Software Safe Mode (LLVMpipe + Lavapipe)"
+                val summary = "Software Rendering (LLVMpipe + Lavapipe)"
                 env["LINUXDROID_GPU_SUMMARY"] = summary
                 env["LIBGL_ALWAYS_SOFTWARE"] = "1"
                 env["GALLIUM_DRIVER"] = "llvmpipe"

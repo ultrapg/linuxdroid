@@ -363,7 +363,7 @@ private fun DashboardScreen(
                             overflow = TextOverflow.Ellipsis,
                         )
                         Text(
-                            text = "${cpuTopology.totalCores} cores • ${gpuInfo.shortSummary()}",
+                            text = "${cpuTopology.totalCores} CPU Cores • ${gpuInfo.shortSummary()}",
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                             maxLines = 1,
@@ -381,7 +381,7 @@ private fun DashboardScreen(
                             Spacer(Modifier.width(6.dp))
                             Text(
                                 text = when {
-                                    hasPendingRestartChanges -> "Apply"
+                                    hasPendingRestartChanges -> "Restart"
                                     sessionSnap.phase == SessionPhase.RUNNING -> "Open"
                                     else -> "Launch"
                                 },
@@ -450,13 +450,13 @@ private fun DashboardScreen(
                             ) {
                                 Column(modifier = Modifier.weight(1f)) {
                                     Text(
-                                        text = "Restart to apply changes",
+                                        text = "Restart required",
                                         style = MaterialTheme.typography.bodyMedium,
                                         fontWeight = FontWeight.SemiBold,
                                         color = MaterialTheme.colorScheme.onSurface,
                                     )
                                     Text(
-                                        text = "Your display or hardware settings changed.",
+                                        text = "Restart the desktop session to apply your updated settings.",
                                         style = MaterialTheme.typography.bodySmall,
                                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                                     )
@@ -616,13 +616,12 @@ private fun DashboardScreen(
     if (showDeleteConfirmDialog) {
         AlertDialog(
             onDismissRequest = { showDeleteConfirmDialog = false },
-            title = { Text("Delete edition?") },
+            title = { Text("Delete Installed Edition?") },
             text = {
                 Text(
-                    "Are you sure you want to delete \"$installedLabel\"?\n\n" +
-                        "Only one Linux edition can be installed at a time for stability. " +
-                        "Deleting this edition will stop any running Linux session and permanently remove " +
-                        "its root filesystem and /home/$username data (your Android shared storage is untouched)."
+                    "Delete \"$installedLabel\"?\n\n" +
+                        "This will stop any running session and permanently remove the Linux root filesystem " +
+                        "and /home/$username. Your Android storage is not affected."
                 )
             },
             confirmButton = {
@@ -654,19 +653,19 @@ private fun DashboardScreen(
         var mountPath by remember { mutableStateOf("/storage/") }
         AlertDialog(
             onDismissRequest = { showAddMountDialog = false },
-            title = { Text("Add Custom Folder Mount") },
+            title = { Text("Add Shared Folder") },
             text = {
                 Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                     OutlinedTextField(
                         value = mountName,
                         onValueChange = { mountName = it },
-                        label = { Text("Mount Name (e.g. sdcard2 or projects)") },
+                        label = { Text("Folder Name (e.g. projects)") },
                         singleLine = true,
                     )
                     OutlinedTextField(
                         value = mountPath,
                         onValueChange = { mountPath = it },
-                        label = { Text("Android Host Directory Path") },
+                        label = { Text("Android Directory Path") },
                         singleLine = true,
                     )
                 }
@@ -744,14 +743,14 @@ private fun WorkstationTabContent(
                 Text(
                     text = when (sessionSnap.phase) {
                         SessionPhase.STOPPED -> {
-                            if (installedReady) "Ready • User: $username"
-                            else "No edition installed yet"
+                            if (installedReady) "Ready to launch • User: $username"
+                            else "Install a desktop edition below to begin"
                         }
                         SessionPhase.FAILED -> {
-                            sessionSnap.errorMessage ?: "Startup failed. Check logs in System."
+                            sessionSnap.errorMessage ?: "Startup failed — check logs in the System tab."
                         }
                         SessionPhase.STARTING -> {
-                            "Step ${sessionSnap.bootStep.coerceAtLeast(1)}/${sessionSnap.bootTotalSteps}: ${sessionSnap.statusText}"
+                            "Step ${sessionSnap.bootStep.coerceAtLeast(1)} of ${sessionSnap.bootTotalSteps} • ${sessionSnap.statusText}"
                         }
                         else -> "${sessionSnap.statusText} • ${sessionSnap.resolutionText}"
                     },
@@ -776,21 +775,21 @@ private fun WorkstationTabContent(
         ) {
             InfoPill(
                 text = if (effectiveCpuCores >= totalCpuCores) {
-                    "CPU: All $totalCpuCores Cores"
+                    "$totalCpuCores CPU Cores"
                 } else {
-                    "CPU: $effectiveCpuCores / $totalCpuCores Cores"
+                    "$effectiveCpuCores / $totalCpuCores CPU Cores"
                 }
             )
-            InfoPill(text = "GPU: Full ($gpuSummary)")
+            InfoPill(text = "GPU: $gpuSummary")
             InfoPill(
                 text = when {
                     externalMode == ExternalDisplayMode.EXTERNAL_ONLY && connectedExternalSummary != null ->
-                        "External Screen Only (Ready)"
+                        "External Display Ready"
                     externalMode == ExternalDisplayMode.EXTERNAL_ONLY ->
-                        "External Screen Only (Waiting)"
+                        "Waiting for External Display"
                     connectedExternalSummary != null ->
-                        "External Connected"
-                    else -> "Display: ${externalMode.title}"
+                        "External Display Connected"
+                    else -> externalMode.title
                 },
                 accent = connectedExternalSummary != null,
             )
@@ -818,8 +817,8 @@ private fun WorkstationTabContent(
                 Spacer(Modifier.width(6.dp))
                 Text(
                     text = when {
-                        hasPendingRestartChanges -> "Restart & Apply"
-                        sessionSnap.phase == SessionPhase.STARTING -> "Startup Progress"
+                        hasPendingRestartChanges -> "Restart Desktop"
+                        sessionSnap.phase == SessionPhase.STARTING -> "View Startup"
                         sessionSnap.phase == SessionPhase.RUNNING -> "Open Desktop"
                         sessionSnap.phase == SessionPhase.PAUSED -> "Resume Desktop"
                         sessionSnap.phase == SessionPhase.FAILED -> "Retry Launch"
@@ -890,12 +889,12 @@ private fun WorkstationTabContent(
 
         // 2. Linux Desktop Editions Manager (Fixed-height scrollable containers + Single-Edition Delete Confirmation)
     SectionCard {
-        SectionHeader("Linux Desktop Editions")
+        SectionHeader("Desktop Editions")
         Text(
             text = if (installedEditionId != null) {
-                "Only one edition can be installed. Delete it to install another."
+                "One desktop edition can be installed at a time. Delete the current edition to switch."
             } else {
-                "Choose an Ubuntu 24.04 desktop to install."
+                "Select an Ubuntu 24.04 LTS desktop environment to download and install."
             },
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
@@ -1045,7 +1044,7 @@ private fun WorkstationTabContent(
                     if (installedEditionId == "custom-rootfs") {
                         EditionRow(
                             title = installedLabel,
-                            description = "Custom imported ARM64 Linux root filesystem.",
+                            description = "Imported ARM64 Linux root filesystem.",
                             sizeLabel = "Custom Archive",
                             isInstalled = true,
                             anotherInstalled = false,
@@ -1084,9 +1083,9 @@ private fun WorkstationTabContent(
                 Spacer(Modifier.width(8.dp))
                 Text(
                     text = if (installedEditionId == null) {
-                        "Import custom rootfs"
+                        "Import Custom Rootfs"
                     } else {
-                        "Delete the edition to import"
+                        "Delete current edition to import custom archive"
                     },
                     softWrap = false,
                     maxLines = 1,
@@ -1129,12 +1128,12 @@ private fun HardwareTabContent(
             Icon(Icons.Outlined.Memory, contentDescription = null, tint = MaterialTheme.colorScheme.primary)
             Column(modifier = Modifier.weight(1f)) {
                 Text(
-                    text = "CPU Core Selection & Affinity",
+                    text = "CPU Cores & Affinity",
                     style = MaterialTheme.typography.titleMedium,
                     fontWeight = FontWeight.SemiBold,
                 )
                 Text(
-                    text = "Detected: ${cpuTopology.summary}",
+                    text = cpuTopology.summary,
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                     maxLines = 2,
@@ -1154,9 +1153,9 @@ private fun HardwareTabContent(
                 val usingAll = selectedSet.size >= totalCores
                 Text(
                     text = if (usingAll) {
-                        "Active: All $totalCores CPU Cores (100% Full CPU Performance)"
+                        "Using All $totalCores CPU Cores"
                     } else {
-                        "Active: $effectiveCpuCores of $totalCores CPU Cores (CPU ${selectedCoreIndices.joinToString(", ")})"
+                        "Pinned to $effectiveCpuCores of $totalCores CPU Cores (CPU ${selectedCoreIndices.joinToString(", ")})"
                     },
                     style = MaterialTheme.typography.bodyMedium,
                     fontWeight = FontWeight.SemiBold,
@@ -1166,9 +1165,9 @@ private fun HardwareTabContent(
                 )
                 Text(
                     text = if (usingAll) {
-                        "Linux desktop & apps schedule across all performance and efficiency cores."
+                        "Linux schedules tasks across all performance and efficiency cores for maximum speed."
                     } else {
-                        "Pinned via CPU affinity to selected cores (${selectedCoreIndices.joinToString(", ") { "CPU $it" }})."
+                        "Linux processes are restricted to ${selectedCoreIndices.joinToString(", ") { "CPU $it" }}."
                     },
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
@@ -1214,14 +1213,14 @@ private fun HardwareTabContent(
                             FilterChip(
                                 selected = isEffSelected,
                                 onClick = { onSelectCpuCores(effIndices) },
-                                label = { Text("Other / Efficiency Cores (${effIndices.size})") },
+                                label = { Text("Efficiency Cores (${effIndices.size})") },
                             )
                         }
                     }
 
                     Spacer(Modifier.height(10.dp))
                     Text(
-                        text = "Select Individual CPU Cores",
+                        text = "Individual Cores",
                         style = MaterialTheme.typography.labelLarge,
                         color = MaterialTheme.colorScheme.onSurface,
                     )
@@ -1294,9 +1293,9 @@ private fun HardwareTabContent(
                                                 )
                                                 Text(
                                                     text = when (core.tier) {
-                                                        CpuCoreTier.PRIME -> "Prime High-Clock Core"
+                                                        CpuCoreTier.PRIME -> "Prime Core"
                                                         CpuCoreTier.PERFORMANCE -> "Performance Core"
-                                                        CpuCoreTier.EFFICIENCY -> "Other / Efficiency Core"
+                                                        CpuCoreTier.EFFICIENCY -> "Efficiency Core"
                                                     },
                                                     style = MaterialTheme.typography.bodySmall,
                                                     color = MaterialTheme.colorScheme.onSurfaceVariant,
@@ -1324,7 +1323,7 @@ private fun HardwareTabContent(
 
                     Spacer(Modifier.height(8.dp))
                     Text(
-                        text = "Quick Core Count Slider",
+                        text = "Core Count Slider",
                         style = MaterialTheme.typography.labelSmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
@@ -1352,12 +1351,12 @@ private fun HardwareTabContent(
             Icon(Icons.Outlined.Memory, contentDescription = null, tint = MaterialTheme.colorScheme.secondary)
             Column(modifier = Modifier.weight(1f)) {
                 Text(
-                    text = "Full SoC GPU Acceleration",
+                    text = "GPU Hardware Acceleration",
                     style = MaterialTheme.typography.titleMedium,
                     fontWeight = FontWeight.SemiBold,
                 )
                 Text(
-                    text = "100% Hardware GPU Exposed • ${gpuInfo.shortSummary()} • $resolvedGpuSummary",
+                    text = "${gpuInfo.shortSummary()} • $resolvedGpuSummary",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                     maxLines = 3,
@@ -1397,17 +1396,17 @@ private fun HardwareTabContent(
 
     // 3. Execution Engine Tuning Card
     SectionCard {
-        SectionHeader("Container Execution Engine")
+        SectionHeader("Execution Engine")
         SettingToggleRow(
-            title = "PRoot Fast-Path Syscall Bypass",
-            subtitle = "Patches ARM64 syscalls in-process for near-native filesystem speed in browsers, compilers, and FEX-Emu.",
+            title = "Fast-Path Syscall Acceleration",
+            subtitle = "Accelerates ARM64 filesystem syscalls in-process for faster app startup, browsing, and compilation.",
             checked = fastPathEnabled,
             onCheckedChange = onToggleFastPath,
         )
         HorizontalDivider(modifier = Modifier.padding(vertical = 8.dp))
         SettingToggleRow(
-            title = "PRoot Seccomp Compatibility Mode",
-            subtitle = "Sets PROOT_NO_SECCOMP=1 for strict vendor kernels (enable only if normal startup fails).",
+            title = "Seccomp Compatibility Mode",
+            subtitle = "Disables PRoot seccomp filters for devices with strict vendor kernels. Enable only if startup fails.",
             checked = noSeccompEnabled,
             onCheckedChange = onToggleNoSeccomp,
         )
@@ -1446,7 +1445,7 @@ private fun DisplayTabContent(
             )
             Column(modifier = Modifier.weight(1f)) {
                 Text(
-                    text = "External Screen Output (USB-C / HDMI / Cast)",
+                    text = "External Display Output",
                     style = MaterialTheme.typography.titleMedium,
                     fontWeight = FontWeight.SemiBold,
                 )
@@ -1454,7 +1453,7 @@ private fun DisplayTabContent(
                     text = if (connectedExternalSummary != null) {
                         "Connected: $connectedExternalSummary"
                     } else {
-                        "No external display detected • Works without Samsung DeX (requires USB-C display output or Cast)"
+                        "No external display detected • Supports USB-C / HDMI monitors and wireless cast"
                     },
                     style = MaterialTheme.typography.bodySmall,
                     color = if (connectedExternalSummary != null) {
@@ -1471,8 +1470,8 @@ private fun DisplayTabContent(
         Spacer(Modifier.height(10.dp))
 
         SettingToggleRow(
-            title = "Use External Screen Only",
-            subtitle = "Send the Linux desktop exclusively to a connected external monitor/TV without needing DeX (device must support USB-C DisplayPort Alt Mode / HDMI output or Wireless Cast) while using your phone as a trackpad & keyboard.",
+            title = "External Display Only",
+            subtitle = "Render the Linux desktop exclusively on a connected monitor or TV while using your phone as a trackpad and keyboard.",
             checked = externalMode == ExternalDisplayMode.EXTERNAL_ONLY,
             onCheckedChange = { onlyExt ->
                 onSelectExternalMode(
@@ -1513,7 +1512,7 @@ private fun DisplayTabContent(
 
     // 2. Resolution, Scaling, Refresh Rate & Touch Input
     SectionCard {
-        SectionHeader("Resolution, HiDPI & Input")
+        SectionHeader("Display & Input")
 
         Text("Desktop Resolution", style = MaterialTheme.typography.labelLarge)
         FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -1527,8 +1526,8 @@ private fun DisplayTabContent(
         }
 
         Spacer(Modifier.height(10.dp))
-        Text("HiDPI Scaling", style = MaterialTheme.typography.labelLarge)
-        val scales = listOf(0f to "Auto HiDPI", 1.0f to "100%", 1.25f to "125%", 1.5f to "150%", 1.75f to "175%", 2.0f to "200%")
+        Text("Display Scaling", style = MaterialTheme.typography.labelLarge)
+        val scales = listOf(0f to "Auto", 1.0f to "100%", 1.25f to "125%", 1.5f to "150%", 1.75f to "175%", 2.0f to "200%")
         FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             for ((value, label) in scales) {
                 FilterChip(
@@ -1541,7 +1540,7 @@ private fun DisplayTabContent(
 
         Spacer(Modifier.height(10.dp))
         Text("Refresh Rate", style = MaterialTheme.typography.labelLarge)
-        val rates = listOf(0 to "Auto Max (90/120Hz)", 60 to "60 Hz", 90 to "90 Hz", 120 to "120 Hz")
+        val rates = listOf(0 to "Auto (Max)", 60 to "60 Hz", 90 to "90 Hz", 120 to "120 Hz")
         FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             for ((hz, label) in rates) {
                 FilterChip(
@@ -1553,7 +1552,7 @@ private fun DisplayTabContent(
         }
 
         Spacer(Modifier.height(10.dp))
-        Text("Phone Screen Orientation", style = MaterialTheme.typography.labelLarge)
+        Text("Screen Orientation", style = MaterialTheme.typography.labelLarge)
         FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             for (orient in ScreenOrientationPref.entries) {
                 FilterChip(
@@ -1565,7 +1564,7 @@ private fun DisplayTabContent(
         }
 
         Spacer(Modifier.height(10.dp))
-        Text("Touchscreen Behavior", style = MaterialTheme.typography.labelLarge)
+        Text("Touch Input Mode", style = MaterialTheme.typography.labelLarge)
         FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             for (mode in TouchInputMode.entries) {
                 FilterChip(
@@ -1578,8 +1577,8 @@ private fun DisplayTabContent(
 
         HorizontalDivider(modifier = Modifier.padding(vertical = 10.dp))
         SettingToggleRow(
-            title = "Floating Keyboard & Quick Menu Pill",
-            subtitle = "Show a compact 1-tap keyboard & quick menu pill in the top-right corner of the desktop.",
+            title = "Floating Quick Controls",
+            subtitle = "Show a compact keyboard and menu button in the top-right corner of the desktop.",
             checked = showFloatingControls,
             onCheckedChange = onToggleFloatingControls,
         )
@@ -1603,10 +1602,10 @@ private fun SystemTabContent(
 ) {
     // 1. Startup & Workstation Account
     SectionCard {
-        SectionHeader("Startup & Workstation Account")
+        SectionHeader("Startup & User Account")
         SettingToggleRow(
-            title = "Auto-boot directly into Linux on launch",
-            subtitle = "Open the Linux desktop immediately when starting LinuxDroid (dashboard remains accessible via Back -> Quick Menu).",
+            title = "Open Desktop on App Launch",
+            subtitle = "Boot directly into the Linux desktop when opening LinuxDroid. Press Back anytime for the Quick Menu.",
             checked = autoBoot,
             onCheckedChange = onToggleAutoBoot,
         )
@@ -1618,10 +1617,10 @@ private fun SystemTabContent(
                 usernameInput = it
                 onUsernameChange(it)
             },
-            label = { Text("Linux username", maxLines = 1, overflow = TextOverflow.Ellipsis) },
+            label = { Text("Linux Username", maxLines = 1, overflow = TextOverflow.Ellipsis) },
             supportingText = {
                 Text(
-                    if (usernameInput.trim() != username) "Will be created as \"$username\"" else "Has passwordless sudo",
+                    if (usernameInput.trim() != username) "Normalized to \"$username\"" else "Default account with passwordless sudo",
                 )
             },
             singleLine = true,
@@ -1655,7 +1654,7 @@ private fun SystemTabContent(
                     contentAlignment = Alignment.CenterStart,
                 ) {
                     Text(
-                        text = "No extra folder mounts configured. Pick an Android folder below to mount it under /home/$username/Mounts/.",
+                        text = "No additional folders mounted. Add a folder below to access it at /home/$username/Mounts/.",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
@@ -1716,8 +1715,8 @@ private fun SystemTabContent(
     SectionCard {
         SectionHeader("Audio & Diagnostics")
         SettingToggleRow(
-            title = "Microphone Forwarding (PulseAudio Source)",
-            subtitle = "Expose Android microphone input inside Linux for calls and audio recording.",
+            title = "Microphone Input",
+            subtitle = "Forward Android microphone audio into Linux via PulseAudio.",
             checked = micEnabled,
             onCheckedChange = onToggleMic,
         )
@@ -1732,7 +1731,7 @@ private fun SystemTabContent(
             verticalAlignment = Alignment.CenterVertically,
         ) {
             Text(
-                text = "Recent Session Logs",
+                text = "Session Logs",
                 style = MaterialTheme.typography.labelLarge,
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
@@ -1777,7 +1776,7 @@ private fun SystemTabContent(
 
     // 4. About & Open-Source Credits
     SectionCard {
-        SectionHeader("About & Credits")
+        SectionHeader("About LinuxDroid")
         Text(
             text = "LinuxDroid v${com.linuxdroid.app.BuildConfig.VERSION_NAME} (GPL-3.0)",
             style = MaterialTheme.typography.bodyMedium,
@@ -1786,7 +1785,7 @@ private fun SystemTabContent(
         )
         Spacer(Modifier.height(4.dp))
         Text(
-            text = "Special thanks to DroidDeck for foundational runtime components adapted in LinuxDroid — including the native Vulkan/AHardwareBuffer Wayland compositor, PRoot syscall fastpath & preload session shims, RootSpawner privilege bridge, and Adreno KGSL Turnip driver packaging — alongside Mesa 3D, virglrenderer, PRoot, FEX-Emu, PulseAudio, and Termux.",
+            text = "Built on open-source technologies including Mesa 3D (Turnip, Zink, VirGL & Venus), PRoot, FEX-Emu, PulseAudio, Termux, and DroidDeck runtime components.",
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
@@ -1954,7 +1953,7 @@ private fun EditionRow(
                 horizontalArrangement = Arrangement.SpaceBetween,
             ) {
                 Text(
-                    text = if (anotherInstalled) "$sizeLabel • Delete active edition first" else sizeLabel,
+                    text = if (anotherInstalled) "$sizeLabel • Delete current edition to install" else sizeLabel,
                     style = MaterialTheme.typography.labelSmall,
                     color = if (anotherInstalled) MaterialTheme.colorScheme.onSurfaceVariant else MaterialTheme.colorScheme.primary,
                     maxLines = 2,

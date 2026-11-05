@@ -1118,42 +1118,42 @@ private fun QuickMenuOverlay(
     val entries = listOf(
         QuickMenuEntry(
             icon = Icons.Outlined.Keyboard,
-            label = if (imeVisible) "Hide Android Keyboard" else "Show Android Keyboard",
+            label = if (imeVisible) "Hide Keyboard" else "Show Keyboard",
             onClick = onToggleKeyboard,
         ),
         QuickMenuEntry(
             icon = if (touchMode == TouchInputMode.TOUCHSCREEN) Icons.Outlined.Mouse else Icons.Outlined.TouchApp,
-            label = if (touchMode == TouchInputMode.TOUCHSCREEN) "Switch to Virtual Trackpad" else "Switch to Direct Touchscreen",
+            label = if (touchMode == TouchInputMode.TOUCHSCREEN) "Switch to Trackpad" else "Switch to Direct Touch",
             onClick = onToggleTouchMode,
         ),
         QuickMenuEntry(
             icon = Icons.Outlined.VisibilityOff,
-            label = if (showFloatingControls) "Hide Floating Controls Pill" else "Show Floating Controls Pill",
+            label = if (showFloatingControls) "Hide Floating Button" else "Show Floating Button",
             onClick = onToggleFloatingControls,
         ),
         QuickMenuEntry(
             icon = Icons.Outlined.Monitor,
-            label = if (externalOnlyPref) "Disable External Screen Only" else "Enable External Screen Only",
+            label = if (externalOnlyPref) "Use Phone Display" else "External Display Only",
             onClick = onToggleExternalOnlyMode,
         ),
         QuickMenuEntry(
             icon = Icons.Outlined.ScreenRotation,
-            label = "Cycle Screen Orientation",
+            label = "Rotate Screen",
             onClick = onCycleOrientation,
         ),
         QuickMenuEntry(
             icon = Icons.Outlined.Terminal,
-            label = "Open Linux Terminal",
+            label = "Open Terminal",
             onClick = onOpenTerminal,
         ),
         QuickMenuEntry(
             icon = Icons.Outlined.Refresh,
-            label = "Restart Session (Apply)",
+            label = "Restart Desktop",
             onClick = onRestartSession,
         ),
         QuickMenuEntry(
             icon = Icons.Outlined.Pause,
-            label = if (snap.phase == SessionPhase.PAUSED) "Resume Frozen Session" else "Pause Session (0% CPU)",
+            label = if (snap.phase == SessionPhase.PAUSED) "Resume Session" else "Pause Session",
             onClick = onTogglePause,
         ),
     )
@@ -1205,14 +1205,14 @@ private fun QuickMenuOverlay(
                 ) {
                     Column(modifier = Modifier.weight(1f)) {
                         Text(
-                            text = "LinuxDroid Quick Menu",
+                            text = "Quick Menu",
                             style = MaterialTheme.typography.titleMedium,
                             fontWeight = FontWeight.Bold,
                             maxLines = 1,
                             overflow = TextOverflow.Ellipsis,
                         )
                         Text(
-                            text = "${snap.statusText} • ${snap.activeGpuSummary.ifEmpty { "ARM64 Workstation" }}",
+                            text = "${snap.statusText} • ${snap.activeGpuSummary.ifEmpty { "Linux Desktop" }}",
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                             maxLines = 1,
@@ -1296,7 +1296,7 @@ private fun QuickMenuOverlay(
                         )
                         Spacer(Modifier.width(6.dp))
                         Text(
-                            text = "Dashboard & Settings",
+                            text = "Dashboard",
                             maxLines = 1,
                             overflow = TextOverflow.Ellipsis,
                         )
@@ -1319,7 +1319,7 @@ private fun QuickMenuOverlay(
                         )
                         Spacer(Modifier.width(6.dp))
                         Text(
-                            text = "Shut Down Linux",
+                            text = "Shut Down",
                             maxLines = 1,
                             overflow = TextOverflow.Ellipsis,
                         )
@@ -1349,7 +1349,7 @@ private fun BootProgressOverlay(
         label = "bootStepProgress",
     )
     val stageTitle = if (snap.phase == SessionPhase.STOPPED || snap.phase == SessionPhase.STOPPING) {
-        "Preparing display surface & session service..."
+        "Preparing display surface..."
     } else {
         snap.statusText
     }
@@ -1358,17 +1358,17 @@ private fun BootProgressOverlay(
             if (!externalMonitorLabel.isNullOrEmpty()) add("External: $externalMonitorLabel")
             if (snap.activeGpuSummary.isNotEmpty()) add(snap.activeGpuSummary)
             if (snap.resolutionText.isNotEmpty()) add(snap.resolutionText)
-        }.joinToString(" • ").ifEmpty { "Initializing ARM64 container runtime..." }
+        }.joinToString(" • ").ifEmpty { "Initializing Linux environment..." }
     }
 
     val bootChecklist = remember {
         listOf(
-            1 to "Display surface & audio bridge ready",
-            2 to "Wayland compositor & X11 socket online",
-            3 to "SoC GPU hardware acceleration configured",
-            4 to "Ubuntu ARM64 container environment mounted",
-            5 to "Starting desktop window manager & panel",
-            6 to "Waiting for desktop screen output (switches automatically)",
+            1 to "Prepare display surface & audio bridge",
+            2 to "Configure GPU hardware acceleration",
+            3 to "Start Wayland display compositor",
+            4 to "Mount Ubuntu ARM64 environment",
+            5 to "Launch desktop window manager",
+            6 to "Load desktop shell & taskbar",
         )
     }
     val checklistScroll = rememberScrollState()
@@ -1415,9 +1415,9 @@ private fun BootProgressOverlay(
                         )
                         Text(
                             text = if (externalMonitorLabel != null) {
-                                "Starting on External Screen"
+                                "Starting on External Display"
                             } else {
-                                "Starting Linux Workstation"
+                                "Starting Linux Desktop"
                             },
                             style = MaterialTheme.typography.titleMedium,
                             fontWeight = FontWeight.SemiBold,
@@ -1431,7 +1431,7 @@ private fun BootProgressOverlay(
                         color = MaterialTheme.colorScheme.surfaceVariant,
                     ) {
                         Text(
-                            text = "Step $curStep/$totalSteps • ${elapsedSec}s",
+                            text = "Step $curStep of $totalSteps • ${elapsedSec}s",
                             style = MaterialTheme.typography.labelMedium.merge(
                                 TextStyle(fontFeatureSettings = "tnum")
                             ),
@@ -1544,9 +1544,9 @@ private fun BootProgressOverlay(
                 ) {
                     Text(
                         text = if (elapsedSec >= 18) {
-                            "First startup initializes caches — switches to desktop automatically"
+                            "Finishing first-run setup — desktop will open automatically"
                         } else {
-                            "Switches to desktop automatically when screen output is ready"
+                            "Opens automatically as soon as the desktop is ready"
                         },
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
@@ -1736,14 +1736,14 @@ private fun WaitingForExternalMonitorOverlay(
                     )
                     Column(modifier = Modifier.weight(1f)) {
                         Text(
-                            text = "Waiting for External Screen",
+                            text = "Waiting for External Display",
                             style = MaterialTheme.typography.titleMedium,
                             fontWeight = FontWeight.Bold,
                             maxLines = 1,
                             overflow = TextOverflow.Ellipsis,
                         )
                         Text(
-                            text = "External Screen Only mode is enabled",
+                            text = "External Display Only mode is active",
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.primary,
                             maxLines = 1,
@@ -1759,7 +1759,7 @@ private fun WaitingForExternalMonitorOverlay(
                         .verticalScroll(bodyScroll),
                 ) {
                     Text(
-                        text = "Connect a USB-C / HDMI monitor (device must support USB-C DisplayPort Alt Mode video output) or Wireless Display. LinuxDroid will output the desktop fullscreen onto the external monitor without needing Samsung DeX.",
+                        text = "Connect a USB-C / HDMI monitor or wireless display. LinuxDroid will output the desktop fullscreen on the external display while your phone acts as a trackpad and keyboard.",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
@@ -1771,10 +1771,10 @@ private fun WaitingForExternalMonitorOverlay(
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
                     TextButton(onClick = onOpenDashboard) {
-                        Text("Dashboard Settings")
+                        Text("Dashboard")
                     }
                     Button(onClick = onUsePhoneScreenTemporary) {
-                        Text("Use Phone Screen Now")
+                        Text("Use Phone Display")
                     }
                 }
             }
@@ -1818,7 +1818,7 @@ private fun ExternalMonitorTrackpadOverlay(
                 ) {
                     Icon(Icons.Outlined.Monitor, contentDescription = null, modifier = Modifier.size(18.dp))
                     Spacer(Modifier.width(8.dp))
-                    Text("Show display")
+                    Text("Wake Screen")
                 }
             }
         }
@@ -1849,7 +1849,7 @@ private fun ExternalMonitorTrackpadOverlay(
                     modifier = Modifier.size(16.dp),
                 )
                 Text(
-                    text = "Output: $externalMonitorLabel",
+                    text = "Display: $externalMonitorLabel",
                     style = MaterialTheme.typography.labelMedium,
                     color = MaterialTheme.colorScheme.onSurface,
                     maxLines = 1,
@@ -1870,13 +1870,13 @@ private fun ExternalMonitorTrackpadOverlay(
             )
             Spacer(Modifier.height(8.dp))
             Text(
-                text = "Trackpad",
+                text = "Touch Trackpad",
                 style = MaterialTheme.typography.titleMedium,
                 fontWeight = FontWeight.SemiBold,
                 color = MaterialTheme.colorScheme.onBackground,
             )
             Text(
-                text = "Move, tap, two-finger scroll and right-click. A connected mouse works directly.",
+                text = "Slide to move cursor • Tap to click • Two-finger tap to right-click • Two-finger drag to scroll",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
@@ -1903,7 +1903,7 @@ private fun ExternalMonitorTrackpadOverlay(
             ) {
                 Icon(Icons.Outlined.BrightnessLow, contentDescription = null, modifier = Modifier.size(18.dp))
                 Spacer(Modifier.width(6.dp))
-                Text("Black out screen")
+                Text("Dim Screen")
             }
             OutlinedButton(
                 onClick = onOpenTerminal,
@@ -1917,7 +1917,7 @@ private fun ExternalMonitorTrackpadOverlay(
                 onClick = onOpenQuickMenu,
                 contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp),
             ) {
-                Text("Quick Menu")
+                Text("Menu")
             }
         }
     }

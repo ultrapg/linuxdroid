@@ -112,9 +112,12 @@ configure_kde_default_launchers() {
   if [ -f "$panel_js" ] && ! grep -q 'writeConfig("launchers"' "$panel_js" 2>/dev/null; then
     need_sys_patch=1
   fi
+  if grep -q "Theme=org.kde.Breeze" /usr/share/plasma/look-and-feel/*/contents/defaults 2>/dev/null; then
+    need_sys_patch=1
+  fi
   if [ "$need_sys_patch" = 1 ]; then
     local sys_py='
-import os, re, sys
+import glob, os, re, sys
 defaults, tm_xml, panel_js = sys.argv[1], sys.argv[2], sys.argv[3]
 if os.path.isfile(tm_xml):
     txt = open(tm_xml, "r", encoding="utf-8").read()
@@ -136,12 +139,23 @@ if os.path.isfile(panel_js):
         )
         new_txt = txt.replace("panel.addWidget(\"org.kde.plasma.icontasks\")", repl, 1)
         open(panel_js, "w", encoding="utf-8").write(new_txt)
+for lnf_def in glob.glob("/usr/share/plasma/look-and-feel/*/contents/defaults"):
+    try:
+        txt = open(lnf_def, "r", encoding="utf-8").read()
+        new_txt = re.sub(r"(\[KSplash\]\s*\n)Theme=[^\n]+", r"\1Engine=none\nTheme=None", txt)
+        if new_txt != txt:
+            open(lnf_def, "w", encoding="utf-8").write(new_txt)
+    except OSError:
+        pass
 '
     python3 -B -c "$sys_py" "$default_launchers" "$tm_xml" "$panel_js" 2>/dev/null || \
       linuxdroid-root python3 -B -c "$sys_py" "$default_launchers" "$tm_xml" "$panel_js" 2>/dev/null || true
   fi
 
-  mkdir -p "$HOME/.config"
+  mkdir -p "$HOME/.config" "$HOME/.config/kdedefaults"
+  for ksplash_cfg in "$HOME/.config/ksplashrc" "$HOME/.config/kdedefaults/ksplashrc"; do
+    printf '[KSplash]\nEngine=none\nTheme=None\n' > "$ksplash_cfg" 2>/dev/null || true
+  done
   python3 -B - "$HOME/.config/plasma-org.kde.plasma.desktop-appletsrc" "$stamp" "$default_launchers" <<'PY' 2>/dev/null || true
 import glob
 import os
@@ -493,7 +507,7 @@ prune_missing_launchers() {
 
 if [ "$desktop_choice" = "kde" ]; then
   prune_missing_launchers
-  boot_step 5 "Starting KDE Plasma Wayland compositor (${PIXEL_WIDTH}x${PIXEL_HEIGHT}, scale=${SCALE})..."
+  boot_step 5 "Starting KDE Plasma Wayland (${PIXEL_WIDTH}x${PIXEL_HEIGHT}, scale=${SCALE})..."
 
   export XDG_SESSION_TYPE=wayland
   export XDG_CURRENT_DESKTOP=KDE
@@ -547,6 +561,8 @@ ENTRY
     "$KWRITECONFIG" --file kcminputrc --group Mouse --key cursorSize "$cursor_px" 2>/dev/null || true
     "$KWRITECONFIG" --file kscreenlockerrc --group Daemon --key Autolock false 2>/dev/null || true
     "$KWRITECONFIG" --file kscreenlockerrc --group Daemon --key LockOnResume false 2>/dev/null || true
+    "$KWRITECONFIG" --file ksplashrc --group KSplash --key Engine none 2>/dev/null || true
+    "$KWRITECONFIG" --file ksplashrc --group KSplash --key Theme None 2>/dev/null || true
     "$KWRITECONFIG" --file kdeglobals --group KDE --key AnimationDurationFactor 0 2>/dev/null || true
     # KWin Wayland applies native --scale $SCALE directly to Wayland outputs, so forceFontDPI must stay 0
     # to avoid double-multiplying font sizes.
@@ -589,13 +605,15 @@ ENTRY
               break
             fi
           done
-          write_status "6|Loading KDE Plasma desktop shell & panels..." "== [BOOT 6/6] Loading KDE Plasma desktop shell & panels..."
+          pkill -x ksplashqml 2>/dev/null || true
+          write_status "6|Loading KDE Plasma desktop & taskbar..." "== [BOOT 6/6] Loading KDE Plasma desktop & taskbar..."
           break
         fi
         sleep 0.1
       done
       for _ in $(seq 1 300); do
         if dbus-send --session --dest=org.kde.plasmashell --type=method_call --print-reply /PlasmaShell org.freedesktop.DBus.Introspectable.Introspect 2>/dev/null | grep -q "org.kde.PlasmaShell"; then
+          pkill -x ksplashqml 2>/dev/null || true
           dbus-send --session --dest=org.kde.KWin --type=method_call /VirtualKeyboard org.freedesktop.DBus.Properties.Set string:"org.kde.kwin.VirtualKeyboard" string:"enabled" variant:boolean:true >/dev/null 2>&1 || true
           for _ in $(seq 1 40); do
             if sync_live_kde_launchers; then

@@ -38,7 +38,7 @@ if [ -n "${BL_CPU_CORES:-}" ] && command -v taskset >/dev/null 2>&1; then
   fi
 fi
 
-boot_step 4 "Preparing Ubuntu environment, locale & system D-Bus..."
+boot_step 4 "Preparing Ubuntu environment & system services..."
 
 sync_timezone() {
   local zone="${TZ:-}"
@@ -122,8 +122,8 @@ prepare_locale() {
 }
 prepare_locale
 
-# Remove systemd's /bin/false session D-Bus stub and KSplash plasma_waitforname service if present
-# so dbus-daemon answers ServiceUnknown in 0us instead of blocking KDE startup.
+# Remove systemd's /bin/false session D-Bus stub and KSplash plasma_waitforname service if present,
+# and neutralize /usr/bin/ksplashqml so KDE's fullscreen LayerOverlay splash never covers the desktop.
 for stub_svc in \
   /usr/share/dbus-1/services/org.freedesktop.systemd1.service \
   /usr/share/dbus-1/services/org.kde.KSplash.service; do
@@ -131,6 +131,10 @@ for stub_svc in \
     rm -f "$stub_svc" 2>/dev/null || linuxdroid-root rm -f "$stub_svc" 2>/dev/null || true
   fi
 done
+if [ -f /usr/bin/ksplashqml ] && ! grep -q "^# LinuxDroid" /usr/bin/ksplashqml 2>/dev/null; then
+  cp -f /usr/local/bin/ksplashqml /usr/bin/ksplashqml 2>/dev/null || \
+    linuxdroid-root cp -f /usr/local/bin/ksplashqml /usr/bin/ksplashqml 2>/dev/null || true
+fi
 
 # Ensure any existing /opt/blender installation uses the safe wrapper without MESA_NO_ERROR / DRI_PRIME
 if [ -x /opt/blender/blender ]; then
