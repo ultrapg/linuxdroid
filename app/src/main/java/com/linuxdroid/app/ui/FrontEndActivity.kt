@@ -1,6 +1,8 @@
 package com.linuxdroid.app.ui
 
 import android.Manifest
+import android.content.ClipData
+import android.content.ClipboardManager
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.hardware.display.DisplayManager
@@ -9,6 +11,7 @@ import android.os.Build
 import android.os.Bundle
 import android.os.Environment
 import android.provider.DocumentsContract
+import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
@@ -322,7 +325,7 @@ private fun DashboardScreen(
     LaunchedEffect(selectedTab, logRefreshTick, sessionSnap.phase) {
         if (selectedTab == DashboardTab.SYSTEM.ordinal) {
             diagnosticLogPreview = withContext(Dispatchers.IO) {
-                val tail = SessionService.collectDiagnosticLogTail(LinuxRuntime.logDir(context), maxLines = 30)
+                val tail = SessionService.collectDiagnosticLogTail(LinuxRuntime.logDir(context), maxLines = 48)
                 if (tail.isEmpty()) "No session logs recorded yet." else tail.joinToString("\n")
             }
         }
@@ -1821,13 +1824,39 @@ private fun SystemTabContent(
             verticalAlignment = Alignment.CenterVertically,
         ) {
             Text(
-                text = "Session Logs",
+                text = "Session & GPU Diagnostics",
                 style = MaterialTheme.typography.labelLarge,
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
                 modifier = Modifier.weight(1f),
             )
-            Spacer(Modifier.width(8.dp))
+            Spacer(Modifier.width(6.dp))
+            OutlinedButton(
+                onClick = {
+                    val cm = settingsContext.getSystemService(ClipboardManager::class.java)
+                    val text = diagnosticLogPreview.ifBlank { "No session logs recorded yet." }
+                    cm?.setPrimaryClip(ClipData.newPlainText("LinuxDroid Diagnostics", text))
+                    Toast.makeText(settingsContext, "Diagnostics copied to clipboard", Toast.LENGTH_SHORT).show()
+                },
+                contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp),
+                modifier = Modifier.height(34.dp),
+            ) {
+                Text("Copy", softWrap = false, maxLines = 1)
+            }
+            Spacer(Modifier.width(6.dp))
+            OutlinedButton(
+                onClick = {
+                    val count = SessionService.clearGpuFallbacks(settingsContext)
+                    onRefreshLogs()
+                    val msg = if (count > 0) "Cleared $count GPU fallback marker(s)" else "No GPU fallback markers present"
+                    Toast.makeText(settingsContext, msg, Toast.LENGTH_SHORT).show()
+                },
+                contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp),
+                modifier = Modifier.height(34.dp),
+            ) {
+                Text("Reset GPU", softWrap = false, maxLines = 1)
+            }
+            Spacer(Modifier.width(6.dp))
             OutlinedButton(
                 onClick = onRefreshLogs,
                 contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp),

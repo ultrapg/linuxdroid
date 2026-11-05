@@ -99,6 +99,10 @@ class RuntimeStabilityPerformanceTest {
         assertTrue("libblsession.so must export rewind() for live /proc refresh", funcs.contains("rewind"))
         assertTrue("libblsession.so must export readdir() for PRoot .l2s hardlink hiding", funcs.contains("readdir"))
         assertTrue("libblsession.so must export readdir64() for PRoot .l2s hardlink hiding", funcs.contains("readdir64"))
+        assertTrue(
+            "libblsession.so must export drmGetDeviceFromDevId() so KWin 5.27 WaylandEglBackend devId=0 resolves to renderD128",
+            funcs.contains("drmGetDeviceFromDevId"),
+        )
     }
 
     @Test
@@ -165,6 +169,22 @@ class RuntimeStabilityPerformanceTest {
             "MESA_NO_ERROR must not be set globally because _mesa_UniformBlockBinding_no_error crashes OpenGL 4.x apps like Blender 5.x",
             turnipCfg.envVars.containsKey("MESA_NO_ERROR"),
         )
+
+        val maliNoDri = GpuInfo.fromProbeMap(
+            probe = mapOf(
+                "device" to "Mali-G715-Immortalis MC11",
+                "vendor_id" to "0x13b5",
+                "api" to "1.3.250",
+                "ext.VK_ANDROID_external_memory_android_hardware_buffer" to "yes",
+                "ext.VK_EXT_external_memory_dma_buf" to "yes",
+            ),
+            hasMaliNode = true,
+            hasDriRenderNode = false,
+        )
+        val maliCfg = GpuConfigGenerator.resolve(GpuDriverMode.AUTO, maliNoDri, "/run/linuxdroid/virgl_test")
+        assertEquals("unified", maliCfg.activeBackend)
+        assertTrue(maliCfg.enableVenus)
+        assertEquals("virpipe", maliCfg.envVars["GALLIUM_DRIVER"])
     }
 
     @Test

@@ -264,6 +264,9 @@ if [ -r /etc/linuxdroid/gpu.env ]; then
     export VK_ICD_FILENAMES="$resolved_icds"
   fi
   echo "== gpu mode: ${LINUXDROID_GPU_MODE:-auto} (${LINUXDROID_GPU_SUMMARY:-default})"
+  if [ -x /usr/local/bin/linuxdroid-gpu-diag ]; then
+    /usr/local/bin/linuxdroid-gpu-diag >/dev/null 2>&1 &
+  fi
 fi
 
 start_system_bus() {

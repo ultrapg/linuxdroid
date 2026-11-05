@@ -265,8 +265,6 @@ static int64_t g_dirty_since_ns;
 volatile int g_render_on_commit = 1;
 static int64_t g_rendered_tick_ns;
 static int g_tick_held;
-static int64_t g_hold_missed_ns;
-#define HOLD_RETRY_NS 1000000000LL
 #define PACE_BUFFERS 32
 static struct {
     unsigned ticks, ticks_late_2ms, renders, commit_renders, null_attaches, reattaches, presented, replaced, undrawn, distinct;
@@ -288,7 +286,7 @@ static struct wl_event_source *g_fallback_timer;
 static int g_fallback_armed;
 
 volatile int g_fps_limit;
-volatile int g_release_unpaced;
+volatile int g_release_unpaced = 1;
 
 volatile int g_hide_shell;
 
@@ -2473,13 +2471,7 @@ static void on_vsync(int64_t frame_time_ns) {
     if (vkp_apply_window_request()) tick_change = 1;
     if (vkp_effects_sync()) tick_change = 1;
     if (tick_change) g_dirty = 1;
-    if (g_tick_held && g_dirty) g_hold_missed_ns = now;
     g_tick_held = 0;
-    if (!tick_change && commit_renders_on() && g_dirty_since_ns && now - g_dirty_since_ns < g_refresh_ns &&
-        now - g_hold_missed_ns >= HOLD_RETRY_NS) {
-        g_tick_held = 1;
-        return;
-    }
     if (g_dirty && scene_held_for_limit(now, g_scene_due_ns, g_fps_limit, g_release_unpaced)) return;
     if (g_dirty && !scene_waits_for_game(now)) render_scene();
 }

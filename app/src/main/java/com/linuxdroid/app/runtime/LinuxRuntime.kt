@@ -21,6 +21,7 @@ object LinuxRuntime {
     const val GUEST_RUNTIME_DIR = "/run/linuxdroid"
     private const val OVERLAY_STAMP_FILE = "overlay-version"
     private const val KGSL_DEVICE = "/dev/kgsl-3d0"
+    private const val MALI_DEVICE = "/dev/mali0"
     private const val SYSTEM_FONTS = "/system/fonts"
     private const val GUEST_SYSTEM_FONTS = "/usr/local/share/fonts/android"
 
@@ -574,13 +575,32 @@ object LinuxRuntime {
     }
 
     /**
-     * Exposes Qualcomm /dev/kgsl-3d0 as a synthetic DRM render node ONLY when /dev/kgsl-3d0 exists
-     * and native /dev/dri/renderD128 is not already present (preserving native PanVK/Panfrost DRM on Mali).
+     * Exposes Qualcomm `/dev/kgsl-3d0` or Mali `/dev/mali0` as synthetic DRM render nodes
+     * (`/dev/dri/renderD$minor` AND `/dev/dri/renderD128`) ONLY when native `/dev/dri/renderD128`
+     * is not already present on the host.
+     *
+     * Note: KWin 5.27.11 hardcodes `open("/dev/dri/renderD128")` in `WaylandBackend`, and Mesa's
+     * `pipe_loader_drm` only scans `renderD128..renderD191`, while `libdrm`'s `drmGetDeviceNameFromFd2`
+     * reads `/sys/dev/char/$major:$minor/uevent` (`DEVNAME=dri/...`). Binding both `renderD$minor`
+     * and `renderD128` satisfies KWin, Mesa, and `libdrm` simultaneously.
      */
     private fun bindKgslDrmIfNeeded(context: Context, specs: MutableList<String>) {
         if (File("/dev/dri/renderD128").exists()) return
+        val (hostDevPath, ueventDriver, drvTarget) = when {
+            File(KGSL_DEVICE).exists() -> Triple(
+                KGSL_DEVICE,
+                "DRIVER=kgsl-3d0\nMODALIAS=platform:kgsl-3d0\n",
+                "/sys/bus/platform/drivers/msm_drm"
+            )
+            File(MALI_DEVICE).exists() -> Triple(
+                MALI_DEVICE,
+                "DRIVER=mali\nMODALIAS=platform:mali\n",
+                "/sys/bus/platform/drivers/panfrost"
+            )
+            else -> return
+        }
         val st = try {
-            Os.stat(KGSL_DEVICE)
+            Os.stat(hostDevPath)
         } catch (_: ErrnoException) {
             return
         }
@@ -588,31 +608,44 @@ object LinuxRuntime {
         val major = ((dev shr 8) and 0xfffL) or ((dev shr 32) and 0xfffL.inv())
         val minor = (dev and 0xffL) or ((dev shr 12) and 0xffL.inv())
         val node = "renderD$minor"
+        val nodes = linkedSetOf(node, "renderD128")
         val base = File(liveDir(context), "drm")
         val dri = File(base, "dri")
-        val device = File(base, "sys/$major:$minor/device")
-        val drm = File(device, "drm/$node")
+        val charNode = File(base, "sys/$major:$minor")
+        val device = File(charNode, "device")
         try {
             dri.mkdirs()
-            drm.mkdirs()
-            File(dri, node).createNewFile()
-            FileUtils.writeString(File(drm, "dev"), "$major:$minor\n")
-            FileUtils.writeString(File(device, "uevent"), "DRIVER=kgsl-3d0\nMODALIAS=platform:kgsl-3d0\n")
+            for (n in nodes) {
+                val drm = File(device, "drm/$n")
+                drm.mkdirs()
+                File(dri, n).createNewFile()
+                FileUtils.writeString(File(drm, "dev"), "$major:$minor\n")
+            }
+            FileUtils.writeString(
+                File(charNode, "uevent"),
+                "MAJOR=$major\nMINOR=$minor\nDEVNAME=dri/$node\n"
+            )
+            FileUtils.writeString(File(device, "uevent"), ueventDriver)
             val subsys = File(device, "subsystem")
             if (!Files.isSymbolicLink(subsys.toPath())) Os.symlink("/sys/bus/platform", subsys.path)
             val drv = File(device, "driver")
-            if (!Files.isSymbolicLink(drv.toPath())) Os.symlink("/sys/bus/platform/drivers/msm_drm", drv.path)
+            if (Files.isSymbolicLink(drv.toPath())) Files.deleteIfExists(drv.toPath())
+            Os.symlink(drvTarget, drv.path)
         } catch (_: Exception) {
             return
         }
         specs.add("${File(base, "sys").absolutePath}:/sys/dev/char")
         specs.add("${dri.absolutePath}:/dev/dri")
-        specs.add("$KGSL_DEVICE:/dev/dri/$node")
+        for (n in nodes) {
+            specs.add("$hostDevPath:/dev/dri/$n")
+        }
         if (File("/sys/class/drm").list() == null) {
             val drmClass = File(base, "class").apply { mkdirs() }
             runCatching {
                 drmClass.listFiles()?.forEach { Files.deleteIfExists(it.toPath()) }
-                Os.symlink("/sys/dev/char/$major:$minor", File(drmClass, node).path)
+                for (n in nodes) {
+                    Os.symlink("/sys/dev/char/$major:$minor", File(drmClass, n).path)
+                }
                 specs.add("${drmClass.absolutePath}:/sys/class/drm")
             }
         }

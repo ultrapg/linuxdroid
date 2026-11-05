@@ -109,7 +109,7 @@ object GpuConfigGenerator {
                 }.joinToString(":")
 
                 val summary = if (enableVenus) {
-                    "Venus Vulkan + VirGL OpenGL (${gpu.deviceName})"
+                    "Venus Vulkan + VirGL/Zink OpenGL (${gpu.deviceName})"
                 } else {
                     "VirGL OpenGL + Lavapipe Vulkan (${gpu.deviceName})"
                 }
@@ -120,12 +120,20 @@ object GpuConfigGenerator {
                 if (enableVenus) {
                     env["VN_DEBUG"] = "vtest"
                 }
-                if (!gpu.hasDriRenderNode) {
+                if (gpu.hasDriRenderNode || gpu.hasMaliNode) {
                     env["LIBGL_ALWAYS_SOFTWARE"] = "1"
+                    env["GALLIUM_DRIVER"] = "virpipe"
+                    env["MESA_GL_VERSION_OVERRIDE"] = "4.3"
+                    env["MESA_GLSL_VERSION_OVERRIDE"] = "430"
+                    if (gpu.hasDriRenderNode) {
+                        env.remove("LIBGL_ALWAYS_SOFTWARE")
+                    }
+                } else {
+                    env["LIBGL_ALWAYS_SOFTWARE"] = "1"
+                    env["GALLIUM_DRIVER"] = "virpipe"
+                    env["MESA_GL_VERSION_OVERRIDE"] = "4.3"
+                    env["MESA_GLSL_VERSION_OVERRIDE"] = "430"
                 }
-                env["GALLIUM_DRIVER"] = "virpipe"
-                env["MESA_GL_VERSION_OVERRIDE"] = "4.3"
-                env["MESA_GLSL_VERSION_OVERRIDE"] = "430"
                 ResolvedGpuConfig(
                     requestedMode = requested,
                     activeBackend = "unified",

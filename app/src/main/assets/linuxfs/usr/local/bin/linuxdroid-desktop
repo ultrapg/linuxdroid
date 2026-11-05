@@ -532,6 +532,8 @@ if [ "$desktop_choice" = "kde" ]; then
   # Native SoC Vulkan (Turnip / Venus / PanVK) remains active via VK_ICD_FILENAMES, and full
   # hardware OpenGL is available anytime via `linuxdroid-gpu <program>`.
   gpu_fail="${XDG_CACHE_HOME:-$HOME/.cache}/linuxdroid/gpu-desktop-failed"
+  kwin_gpu_log="${XDG_CACHE_HOME:-$HOME/.cache}/linuxdroid/kwin-gpu.log"
+  mkdir -p "${gpu_fail%/*}" 2>/dev/null || true
   gpu_desktop=0
   if [ "${BL_GPU_DESKTOP:-0}" = "1" ] && [ ! -e "$gpu_fail" ]; then
     gpu_desktop=1
@@ -545,18 +547,47 @@ if [ "$desktop_choice" = "kde" ]; then
   export KWIN_SCREENSHOT_NO_PERMISSION_CHECKS=1
   unset MESA_NO_ERROR
   if [ "$gpu_desktop" = 1 ]; then
-    # GPU desktop: KWin composites with OpenGL (Zink/Turnip or Venus/VirGL from gpu.env) and Plasma's
-    # Qt Quick scene graph renders on the GPU. KWin falls back to QPainter by itself if OpenGL fails to
-    # initialise, and an early crash re-launches the desktop in software mode (see below).
-    unset KWIN_COMPOSE QT_QUICK_BACKEND LIBGL_ALWAYS_SOFTWARE
+    # GPU desktop: KWin composites with OpenGL 2.0/GLES (Zink/Turnip or Venus/VirGL from gpu.env) and
+    # Plasma's Qt Quick scene graph renders on the GPU. Wrap /usr/bin/kwin_wayland with GALLIUM_THREAD=0
+    # so KWin's wl_shm client texture upload does not race Gallium's threaded context.
+    unset QT_QUICK_BACKEND LIBGL_ALWAYS_SOFTWARE
+    export KWIN_COMPOSE=O2
+    if [ "${LINUXDROID_GPU_ACTIVE:-}" = "turnip" ]; then
+      export MESA_LOADER_DRIVER_OVERRIDE="${MESA_LOADER_DRIVER_OVERRIDE:-zink}"
+      export GALLIUM_DRIVER="${GALLIUM_DRIVER:-zink}"
+      export LIBGL_KOPPER_DRI2=true
+    else
+      export GALLIUM_DRIVER="${GALLIUM_DRIVER:-virpipe}"
+    fi
+    render_nodes=""
+    for rn in /dev/dri/renderD*; do
+      [ -e "$rn" ] || continue
+      render_nodes="${render_nodes:+$render_nodes:}$rn"
+    done
+    if [ -n "$render_nodes" ]; then
+      export KWIN_RENDER_NODES="$render_nodes"
+      export KWIN_DRM_DEVICES="$render_nodes"
+    fi
+    kwin_wrap_dir="${XDG_RUNTIME_DIR:-/run/linuxdroid}/kwin"
+    mkdir -p "$kwin_wrap_dir" 2>/dev/null || true
+    cat > "$kwin_wrap_dir/kwin_wayland" <<KWINWRAP
+#!/bin/sh
+export GALLIUM_THREAD=0
+exec /usr/bin/kwin_wayland "\$@" 2>>"$kwin_gpu_log"
+KWINWRAP
+    chmod 755 "$kwin_wrap_dir/kwin_wayland" 2>/dev/null || true
+    export PATH="$kwin_wrap_dir:$PATH"
+    : > "$kwin_gpu_log" 2>/dev/null || true
     "$KWRITECONFIG" --file kwinrc --group Compositing --key Backend OpenGL 2>/dev/null || true
-    echo "== linuxdroid-desktop: GPU desktop compositing enabled (${LINUXDROID_GPU_ACTIVE:-gpu})"
+    "$KWRITECONFIG" --file kwinrc --group Compositing --key GLCore false 2>/dev/null || true
+    "$KWRITECONFIG" --file kwinrc --group Compositing --key OpenGLIsUnsafe false 2>/dev/null || true
+    echo "== linuxdroid-desktop: GPU desktop compositing enabled (${LINUXDROID_GPU_ACTIVE:-gpu}, KWIN_RENDER_NODES=${KWIN_RENDER_NODES:-none})"
   else
     # Software desktop: nested KWin uses QPainter wl_shm into LinuxDroid's Vulkan compositor so it
     # starts reliably on any device without DRM/GBM modesetting.
     export KWIN_COMPOSE=Q
     export QT_QUICK_BACKEND=software
-    unset MESA_LOADER_DRIVER_OVERRIDE LIBGL_KOPPER_DRI2 MESA_GL_VERSION_OVERRIDE MESA_GLSL_VERSION_OVERRIDE
+    unset MESA_LOADER_DRIVER_OVERRIDE LIBGL_KOPPER_DRI2 MESA_GL_VERSION_OVERRIDE MESA_GLSL_VERSION_OVERRIDE KWIN_RENDER_NODES KWIN_DRM_DEVICES
     export LIBGL_ALWAYS_SOFTWARE=1
     export GALLIUM_DRIVER=llvmpipe
     "$KWRITECONFIG" --file kwinrc --group Compositing --key Backend QPainter 2>/dev/null || true
@@ -616,8 +647,10 @@ ENTRY
     }
     start_x11_helpers ":0 :1" ""
     (
-      for _ in $(seq 1 150); do
+      wl1_ready=0
+      for i in $(seq 1 150); do
         if [ -S "$XDG_RUNTIME_DIR/wayland-1" ]; then
+          wl1_ready=1
           WAYLAND_DISPLAY=wayland-1 dbus-update-activation-environment WAYLAND_DISPLAY >/dev/null 2>&1 || true
           for kamd in /usr/lib/*/libexec/kactivitymanagerd /usr/lib/kactivitymanagerd /usr/libexec/kactivitymanagerd; do
             if [ -x "$kamd" ]; then
@@ -629,8 +662,17 @@ ENTRY
           write_status "6|Loading KDE Plasma desktop & taskbar..." "== [BOOT 6/6] Loading KDE Plasma desktop & taskbar..."
           break
         fi
+        if [ "'"$gpu_desktop"'" = "1" ] && [ "$i" -ge 100 ]; then
+          echo "== linuxdroid-desktop: wayland-1 did not appear within 10s under GPU desktop; triggering software fallback"
+          printf "wayland-1 timeout after 10s\n" > "'"$gpu_fail"'" 2>/dev/null || true
+          pkill -TERM -f startplasma-wayland 2>/dev/null || true
+          pkill -TERM -x kwin_wayland_wrapper 2>/dev/null || true
+          pkill -TERM -x kwin_wayland 2>/dev/null || true
+          exit 0
+        fi
         sleep 0.1
       done
+      [ "$wl1_ready" = "1" ] || exit 0
       for _ in $(seq 1 300); do
         if dbus-send --session --dest=org.kde.plasmashell --type=method_call --print-reply /PlasmaShell org.freedesktop.DBus.Introspectable.Introspect 2>/dev/null | grep -q "org.kde.PlasmaShell"; then
           pkill -x ksplashqml 2>/dev/null || true
@@ -654,9 +696,13 @@ ENTRY
   '
   rc=$?
   echo "== linuxdroid-desktop: KDE Plasma Wayland exited (code=$rc)"
-  if [ "$gpu_desktop" = 1 ] && [ "$SECONDS" -lt 45 ]; then
+  if [ "$gpu_desktop" = 1 ] && { [ -e "$gpu_fail" ] || [ "$SECONDS" -lt 45 ]; }; then
     echo "== linuxdroid-desktop: GPU desktop exited early; falling back to software compositing"
-    mkdir -p "${gpu_fail%/*}" && : > "$gpu_fail"
+    if [ -s "$kwin_gpu_log" ]; then
+      echo "== kwin-gpu.log tail:"
+      tail -n 25 "$kwin_gpu_log" 2>/dev/null || true
+    fi
+    mkdir -p "${gpu_fail%/*}" && printf 'exited code=%s after %ss\n' "$rc" "$SECONDS" > "$gpu_fail"
     exec "$0" "$@"
   fi
   exit "$rc"

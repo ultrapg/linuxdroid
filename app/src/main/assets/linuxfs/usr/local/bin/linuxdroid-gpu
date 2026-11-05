@@ -13,16 +13,15 @@ if [ -r /etc/linuxdroid/gpu.env ]; then
 fi
 unset MESA_NO_ERROR
 
-if [ "${LINUXDROID_GPU_ACTIVE:-}" = "turnip" ]; then
+if [ "${LINUXDROID_GPU_ACTIVE:-}" = "turnip" ] || [ "${LINUXDROID_GPU_ACTIVE:-}" = "unified" ]; then
   unset LIBGL_ALWAYS_SOFTWARE
   export MOZ_WEBRENDER=1
-  if [ "${XDG_SESSION_TYPE:-}" = "wayland" ] && [ "${KWIN_COMPOSE:-}" = "Q" ]; then
+  export mesa_glthread=true
+  if [ "${XDG_SESSION_TYPE:-}" = "wayland" ]; then
     export GDK_BACKEND=x11
     export QT_QPA_PLATFORM=xcb
     export SDL_VIDEODRIVER=x11
   fi
-elif [ "${LINUXDROID_GPU_ACTIVE:-}" = "unified" ] && [ "${LIBGL_ALWAYS_SOFTWARE:-0}" != "1" ]; then
-  export MOZ_WEBRENDER=1
 fi
 
 if [ "$#" -eq 0 ]; then

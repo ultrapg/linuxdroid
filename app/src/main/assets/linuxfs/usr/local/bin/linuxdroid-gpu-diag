@@ -1,0 +1,105 @@
+#!/bin/bash
+# LinuxDroid GPU Diagnostics: probes DRM/KGSL/Mali nodes, sysfs uevents, Vulkan ICDs,
+# EGL/GBM render node resolution, and active desktop/app GPU fallback flags.
+set -u
+
+CACHE_DIR="${XDG_CACHE_HOME:-${HOME:-/home/linux}/.cache}/linuxdroid"
+mkdir -p "$CACHE_DIR" 2>/dev/null || true
+OUT_FILE="$CACHE_DIR/gpu-diag.txt"
+
+if [ -r /etc/linuxdroid/gpu.env ]; then
+  set -a
+  # shellcheck disable=SC1091
+  . /etc/linuxdroid/gpu.env
+  set +a
+fi
+
+{
+  echo "=== LinuxDroid GPU Diagnostics ($(date -u '+%Y-%m-%d %H:%M:%S UTC')) ==="
+  echo "GPU_MODE=${LINUXDROID_GPU_MODE:-auto}"
+  echo "GPU_ACTIVE=${LINUXDROID_GPU_ACTIVE:-unknown}"
+  echo "GPU_FAMILY=${LINUXDROID_GPU_FAMILY:-unknown}"
+  echo "GPU_SUMMARY=${LINUXDROID_GPU_SUMMARY:-none}"
+  echo "BL_GPU_APPS=${BL_GPU_APPS:-0} BL_GPU_DESKTOP=${BL_GPU_DESKTOP:-0}"
+  echo "VK_DRIVER_FILES=${VK_DRIVER_FILES:-unset}"
+  echo "GALLIUM_DRIVER=${GALLIUM_DRIVER:-unset} MESA_LOADER_DRIVER_OVERRIDE=${MESA_LOADER_DRIVER_OVERRIDE:-unset}"
+
+  echo "--- Device Nodes ---"
+  ls -la /dev/kgsl-3d0 /dev/mali0 /dev/dri /dev/dri/* 2>/dev/null || true
+
+  echo "--- Sysfs DRM & Char Nodes ---"
+  for uev in /sys/dev/char/*/uevent /sys/dev/char/*/device/uevent /sys/dev/char/*/device/drm/*/dev; do
+    [ -r "$uev" ] || continue
+    echo "[$uev]"
+    cat "$uev" 2>/dev/null || true
+  done
+
+  echo "--- libdrm Render Node Resolution ---"
+  python3 - <<'PY' 2>/dev/null || true
+import ctypes, os, stat
+
+class DrmDevice(ctypes.Structure):
+    _fields_ = [
+        ("nodes", ctypes.POINTER(ctypes.c_char_p)),
+        ("available_nodes", ctypes.c_int),
+        ("bustype", ctypes.c_int),
+    ]
+
+try:
+    drm = ctypes.CDLL("libdrm.so.2")
+    drm.drmGetDeviceFromDevId.argtypes = [ctypes.c_ulong, ctypes.c_uint, ctypes.POINTER(ctypes.POINTER(DrmDevice))]
+    drm.drmGetDeviceFromDevId.restype = ctypes.c_int
+    for label, path in [("devId=0 (nested wayland-1 fallback)", None), ("renderD128", "/dev/dri/renderD128"), ("kgsl-3d0", "/dev/kgsl-3d0"), ("mali0", "/dev/mali0")]:
+        rdev = 0
+        if path:
+            if not os.path.exists(path):
+                continue
+            rdev = os.stat(path).st_rdev
+        dev_ptr = ctypes.POINTER(DrmDevice)()
+        rc = drm.drmGetDeviceFromDevId(rdev, 0, ctypes.byref(dev_ptr))
+        node_str = "none"
+        if rc == 0 and bool(dev_ptr) and bool(dev_ptr.contents.nodes):
+            for idx in (2, 0, 1):
+                if dev_ptr.contents.available_nodes & (1 << idx):
+                    raw = dev_ptr.contents.nodes[idx]
+                    if raw:
+                        node_str = raw.decode("utf-8", "replace")
+                        break
+        print(f"drmGetDeviceFromDevId({label}, rdev={rdev}): rc={rc} node={node_str}")
+except Exception as e:
+    print(f"libdrm probe error: {e}")
+PY
+
+  echo "--- Vulkan Probe ---"
+  if command -v vulkaninfo >/dev/null 2>&1; then
+    timeout 5 vulkaninfo --summary 2>&1 | grep -E "GPU[0-9]|deviceName|driverName|driverInfo|apiVersion" | head -n 20 || true
+  else
+    python3 - <<'PY' 2>/dev/null || true
+import ctypes
+try:
+    vk = ctypes.CDLL("libvulkan.so.1")
+    print("libvulkan.so.1 loaded: OK")
+except Exception as e:
+    print(f"libvulkan.so.1 error: {e}")
+PY
+  fi
+
+  echo "--- Fallback Status ---"
+  if [ -e "$CACHE_DIR/gpu-desktop-failed" ]; then
+    echo "gpu-desktop-failed: PRESENT ($(tr '\n' ' ' < "$CACHE_DIR/gpu-desktop-failed" 2>/dev/null))"
+  else
+    echo "gpu-desktop-failed: clean"
+  fi
+  if [ -d "$CACHE_DIR/gpu-fallback" ] && [ -n "$(ls -A "$CACHE_DIR/gpu-fallback" 2>/dev/null)" ]; then
+    echo "app gpu-fallback markers: $(ls "$CACHE_DIR/gpu-fallback" 2>/dev/null | tr '\n' ' ')"
+  else
+    echo "app gpu-fallback markers: none"
+  fi
+  if [ -s "$CACHE_DIR/kwin-gpu.log" ]; then
+    echo "--- kwin-gpu.log (last 15 lines) ---"
+    tail -n 15 "$CACHE_DIR/kwin-gpu.log" 2>/dev/null || true
+  fi
+} > "${OUT_FILE}.tmp" 2>&1
+
+mv -f "${OUT_FILE}.tmp" "$OUT_FILE" 2>/dev/null || true
+cat "$OUT_FILE" 2>/dev/null || true

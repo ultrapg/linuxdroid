@@ -165,6 +165,31 @@ int drmCloseBufferHandle(int fd, uint32_t handle) {
   return release_handle(fd, handle) ? 0 : -EINVAL;
 }
 
+int drmGetDeviceFromDevId(dev_t find_rdev, uint32_t flags, void *device) {
+  int (*fn)(dev_t, uint32_t, void *) =
+      (int (*)(dev_t, uint32_t, void *)) real("drmGetDeviceFromDevId");
+  if (!fn) {
+    return -ENOSYS;
+  }
+  if (find_rdev == 0) {
+    static const char *fallback_nodes[] = {
+      "/dev/dri/renderD128",
+      "/dev/dri/renderD129",
+      "/dev/kgsl-3d0",
+      "/dev/mali0",
+      "/dev/dri/card0",
+    };
+    struct stat st;
+    for (size_t i = 0; i < sizeof(fallback_nodes) / sizeof(fallback_nodes[0]); i++) {
+      if (stat(fallback_nodes[i], &st) == 0 && S_ISCHR(st.st_mode) && st.st_rdev != 0) {
+        find_rdev = st.st_rdev;
+        break;
+      }
+    }
+  }
+  return fn(find_rdev, flags, device);
+}
+
 __attribute__((visibility("hidden"))) int bl_drm_gem_close(int fd, unsigned long request, void *arg, int *rc) {
   if (request != GEM_CLOSE || !arg || !is_kgsl(fd)) {
     return 0;

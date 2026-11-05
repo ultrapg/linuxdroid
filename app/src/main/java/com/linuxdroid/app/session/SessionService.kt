@@ -853,7 +853,47 @@ class SessionService : Service() {
             for (l in sessionLines) combined.add(l)
             for (l in waylandLines) combined.add("[wayland] $l")
 
+            val filesDir = logDir.parentFile
+            if (filesDir != null) {
+                val root = File(filesDir, LinuxRuntime.DIR)
+                val cacheDirs = buildList {
+                    add(File(root, "home/linux/.cache/linuxdroid"))
+                    File(root, "home").listFiles()?.forEach { homeChild ->
+                        if (homeChild.isDirectory && homeChild.name != "linux") {
+                            add(File(homeChild, ".cache/linuxdroid"))
+                        }
+                    }
+                    add(File(root, "root/.cache/linuxdroid"))
+                }
+                for (cacheDir in cacheDirs) {
+                    val diagLines = tailNonEmptyLines(File(cacheDir, "gpu-diag.txt"), 14)
+                    for (l in diagLines) combined.add("[gpu-diag] $l")
+                    val kwinGpuLines = tailNonEmptyLines(File(cacheDir, "kwin-gpu.log"), 8)
+                    for (l in kwinGpuLines) combined.add("[kwin-gpu] $l")
+                    if (diagLines.isNotEmpty() || kwinGpuLines.isNotEmpty()) break
+                }
+            }
+
             return if (combined.size <= maxLines) combined else combined.takeLast(maxLines)
+        }
+
+        fun clearGpuFallbacks(context: Context): Int {
+            val root = LinuxRuntime.rootDir(context)
+            var cleared = 0
+            val homes = buildList {
+                File(root, "home").listFiles()?.forEach { if (it.isDirectory) add(it) }
+                add(File(root, "root"))
+            }
+            for (h in homes) {
+                val cache = File(h, ".cache/linuxdroid")
+                val deskFail = File(cache, "gpu-desktop-failed")
+                if (deskFail.exists() && deskFail.delete()) cleared++
+                val appFallbackDir = File(cache, "gpu-fallback")
+                appFallbackDir.listFiles()?.forEach { f ->
+                    if (f.delete()) cleared++
+                }
+            }
+            return cleared
         }
 
         private fun tailNonEmptyLines(file: File, count: Int): List<String> {
