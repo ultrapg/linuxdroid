@@ -161,7 +161,10 @@ class RuntimeStabilityPerformanceTest {
         val turnipCfg = GpuConfigGenerator.resolve(GpuDriverMode.AUTO, adreno, "/run/linuxdroid/virgl_test")
         assertEquals("1", turnipCfg.envVars["MESA_DISK_CACHE_DATABASE"])
         assertEquals("lazy", turnipCfg.envVars["ZINK_DESCRIPTORS"])
-        assertEquals("1", turnipCfg.envVars["MESA_NO_ERROR"])
+        assertFalse(
+            "MESA_NO_ERROR must not be set globally because _mesa_UniformBlockBinding_no_error crashes OpenGL 4.x apps like Blender 5.x",
+            turnipCfg.envVars.containsKey("MESA_NO_ERROR"),
+        )
     }
 
     @Test
@@ -255,6 +258,8 @@ class RuntimeStabilityPerformanceTest {
         val appsSh = File(assetsRoot, "usr/local/bin/linuxdroid-apps").readText()
         assertTrue(appsSh.contains("flatpak --user install -y --or-update flathub io.github.flattool.Warehouse"))
         assertTrue(appsSh.contains("lfdevs/blender-linux-arm64/releases/latest"))
+        assertTrue("Blender wrapper must unset MESA_NO_ERROR and DRI_PRIME", appsSh.contains("unset MESA_NO_ERROR DRI_PRIME"))
+        assertTrue("Blender desktop file must strip PrefersNonDefaultGPU", appsSh.contains("/^PrefersNonDefaultGPU=/d"))
         assertTrue(appsSh.contains("ubuntuhandbook1/gimp-3/ubuntu"))
         assertTrue(appsSh.contains("ubuntuhandbook1/krita/ubuntu"))
         assertTrue(appsSh.contains("libreoffice/ppa/ubuntu"))
@@ -305,6 +310,23 @@ desktop_script = sys.argv[1]
 expected_kde = "applications:systemsettings.desktop,applications:org.kde.dolphin.desktop,applications:firefox.desktop"
 
 with tempfile.TemporaryDirectory(prefix="ld-taskbar-test-") as tmp:
+    # 0. Brand-new fresh KDE user home with NO plasma-org.kde.plasma.desktop-appletsrc yet
+    home0 = os.path.join(tmp, "home_fresh")
+    os.makedirs(home0, exist_ok=True)
+    env0 = dict(os.environ, HOME=home0)
+    r0 = subprocess.run(
+        ["/bin/bash", "-c", f'source <(sed -n "/^configure_kde_default_launchers()/,/^sync_live_kde_launchers()/p" {desktop_script!r} | sed "${'$'}d"); configure_kde_default_launchers'],
+        env=env0, capture_output=True, text=True, timeout=5,
+    )
+    assert r0.returncode == 0, r0.stderr
+    rc0 = os.path.join(home0, ".config/plasma-org.kde.plasma.desktop-appletsrc")
+    assert os.path.isfile(rc0), "Expected pre-seeded appletsrc on first boot"
+    txt0 = open(rc0).read()
+    assert "plugin=org.kde.panel\n" in txt0, txt0
+    assert "[Containments][2][Applets][5][Configuration][General]\nlaunchers=" + expected_kde in txt0, txt0
+    assert os.path.isfile(os.path.join(home0, ".config/plasmashellrc")), "Expected pre-seeded plasmashellrc"
+    assert os.path.isfile(os.path.join(home0, ".config/kactivitymanagerdrc")), "Expected pre-seeded kactivitymanagerdrc"
+
     # 1. KDE appletsrc with NO [Configuration][General] section (exact v1.0.24 bug)
     home1 = os.path.join(tmp, "home_no_cfg")
     os.makedirs(os.path.join(home1, ".config"), exist_ok=True)

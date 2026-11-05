@@ -11,6 +11,7 @@ if [ -r /etc/linuxdroid/gpu.env ]; then
   . /etc/linuxdroid/gpu.env
   set +a
 fi
+unset MESA_NO_ERROR
 
 if [ "${LINUXDROID_GPU_ACTIVE:-}" = "turnip" ]; then
   unset LIBGL_ALWAYS_SOFTWARE

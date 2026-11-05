@@ -86,7 +86,6 @@ object GpuConfigGenerator {
                 env["MESA_LOADER_DRIVER_OVERRIDE"] = "zink"
                 env["GALLIUM_DRIVER"] = "zink"
                 env["ZINK_DESCRIPTORS"] = "lazy"
-                env["MESA_NO_ERROR"] = "1"
                 env["LIBGL_KOPPER_DRI2"] = "1"
                 env["MESA_GL_VERSION_OVERRIDE"] = "4.6"
                 env["MESA_GLSL_VERSION_OVERRIDE"] = "460"
@@ -125,7 +124,6 @@ object GpuConfigGenerator {
                     env["LIBGL_ALWAYS_SOFTWARE"] = "1"
                 }
                 env["GALLIUM_DRIVER"] = "virpipe"
-                env["MESA_NO_ERROR"] = "1"
                 env["MESA_GL_VERSION_OVERRIDE"] = "4.3"
                 env["MESA_GLSL_VERSION_OVERRIDE"] = "430"
                 ResolvedGpuConfig(

@@ -143,19 +143,204 @@ if os.path.isfile(panel_js):
 
   mkdir -p "$HOME/.config"
   python3 -B - "$HOME/.config/plasma-org.kde.plasma.desktop-appletsrc" "$stamp" "$default_launchers" <<'PY' 2>/dev/null || true
+import glob
 import os
 import re
 import sys
 
 rc_path, stamp_path, defaults = sys.argv[1], sys.argv[2], sys.argv[3]
-if not os.path.isfile(rc_path):
+cfg_dir = os.path.dirname(rc_path)
+os.makedirs(cfg_dir, exist_ok=True)
+
+# Pre-seed kconf_updaterc if missing so kconf_update does not stall 30s on first start
+kconf_rc = os.path.join(cfg_dir, "kconf_updaterc")
+if not os.path.isfile(kconf_rc):
+    upd_files = sorted(glob.glob("/usr/share/kconf_update/*.upd"))
+    if upd_files:
+        upd_lines = []
+        for p in upd_files:
+            try:
+                st = os.stat(p)
+                ids = []
+                with open(p, "r", encoding="utf-8", errors="ignore") as uf:
+                    for uln in uf:
+                        if uln.startswith("Id="):
+                            ids.append(uln.split("=", 1)[1].strip())
+                if ids:
+                    upd_lines.append(
+                        f"[{os.path.basename(p)}]\nctime={int(st.st_ctime)}\ndone={','.join(ids)}\nmtime={int(st.st_mtime)}\n\n"
+                    )
+            except OSError:
+                pass
+        if upd_lines:
+            with open(kconf_rc, "w", encoding="utf-8") as kf:
+                kf.writelines(upd_lines)
+
+# Pre-seed plasmashellrc if missing so first start does not stall on 13 JS migration scripts
+pshell_rc = os.path.join(cfg_dir, "plasmashellrc")
+if not os.path.isfile(pshell_rc):
+    js_updates = sorted(glob.glob("/usr/share/plasma/shells/org.kde.plasma.desktop/contents/updates/*.js"))
+    with open(pshell_rc, "w", encoding="utf-8") as pf:
+        pf.write("[PlasmaViews][Panel 2][Defaults]\nthickness=44\n")
+        if js_updates:
+            pf.write("\n[Updates]\nperformed=" + ",".join(js_updates) + "\n")
+
+# Ensure kactivitymanagerdrc has a deterministic default activity UUID before seeding appletsrc
+kamd_rc = os.path.join(cfg_dir, "kactivitymanagerdrc")
+act_id = "9001631a-e1b7-46bd-8e06-7dab8d8032a4"
+if os.path.isfile(kamd_rc):
+    try:
+        with open(kamd_rc, "r", encoding="utf-8", errors="ignore") as af:
+            for aln in af:
+                if aln.startswith("currentActivity="):
+                    val = aln.split("=", 1)[1].strip()
+                    if val:
+                        act_id = val
+                    break
+    except OSError:
+        pass
+else:
+    with open(kamd_rc, "w", encoding="utf-8") as af:
+        af.write(f"[activities]\n{act_id}=Default\n\n[main]\ncurrentActivity={act_id}\n")
+
+# If appletsrc does not exist yet on first start (or lacks a panel from an interrupted boot),
+# pre-seed the complete desktop + bottom taskbar panel
+raw_lines = []
+if os.path.isfile(rc_path):
+    with open(rc_path, "r", encoding="utf-8", errors="surrogateescape") as f:
+        raw_lines = f.readlines()
+
+has_panel_or_tasks = any(
+    ln.strip() in (
+        "plugin=org.kde.panel",
+        "plugin=org.kde.plasma.icontasks",
+        "plugin=org.kde.plasma.taskmanager",
+    )
+    for ln in raw_lines
+)
+
+if not raw_lines or not has_panel_or_tasks:
+    seed_appletsrc = f"""[ActionPlugins][0]
+RightButton;NoModifier=org.kde.contextmenu
+wheel:Vertical;NoModifier=org.kde.switchdesktop
+
+[ActionPlugins][1]
+RightButton;NoModifier=org.kde.contextmenu
+
+[Containments][1]
+ItemGeometriesHorizontal=
+activityId={act_id}
+formfactor=0
+immutability=1
+lastScreen=0
+location=0
+plugin=org.kde.plasma.folder
+wallpaperplugin=org.kde.image
+
+[Containments][2]
+activityId=
+formfactor=2
+immutability=1
+lastScreen=0
+location=4
+plugin=org.kde.panel
+wallpaperplugin=org.kde.image
+
+[Containments][2][Applets][15]
+immutability=1
+plugin=org.kde.plasma.digitalclock
+
+[Containments][2][Applets][16]
+immutability=1
+plugin=org.kde.plasma.showdesktop
+
+[Containments][2][Applets][3]
+immutability=1
+plugin=org.kde.plasma.kickoff
+
+[Containments][2][Applets][3][Configuration][General]
+favoritesPortedToKAstats=true
+
+[Containments][2][Applets][3][Configuration][Shortcuts]
+global=Alt+F1
+
+[Containments][2][Applets][3][Shortcuts]
+global=Alt+F1
+
+[Containments][2][Applets][4]
+immutability=1
+plugin=org.kde.plasma.pager
+
+[Containments][2][Applets][5]
+immutability=1
+plugin=org.kde.plasma.icontasks
+
+[Containments][2][Applets][5][Configuration][General]
+launchers={defaults}
+
+[Containments][2][Applets][6]
+immutability=1
+plugin=org.kde.plasma.marginsseparator
+
+[Containments][2][Applets][7]
+immutability=1
+plugin=org.kde.plasma.systemtray
+
+[Containments][2][Applets][7][Configuration]
+SystrayContainmentId=8
+
+[Containments][2][General]
+AppletOrder=3;4;5;6;7;15;16
+
+[Containments][8]
+activityId=
+formfactor=2
+immutability=1
+lastScreen=0
+location=4
+plugin=org.kde.plasma.private.systemtray
+wallpaperplugin=org.kde.image
+
+[Containments][8][Applets][10]
+immutability=1
+plugin=org.kde.plasma.keyboardlayout
+
+[Containments][8][Applets][11]
+immutability=1
+plugin=org.kde.plasma.devicenotifier
+
+[Containments][8][Applets][12]
+immutability=1
+plugin=org.kde.plasma.volume
+
+[Containments][8][Applets][13]
+immutability=1
+plugin=org.kde.plasma.manage-inputmethod
+
+[Containments][8][Applets][14]
+immutability=1
+plugin=org.kde.plasma.notifications
+
+[Containments][8][Applets][9]
+immutability=1
+plugin=org.kde.plasma.clipboard
+
+[Containments][8][General]
+extraItems=org.kde.plasma.clipboard,org.kde.plasma.mediacontroller,org.kde.plasma.keyboardlayout,org.kde.plasma.battery,org.kde.plasma.devicenotifier,org.kde.plasma.volume,org.kde.plasma.manage-inputmethod,org.kde.plasma.networkmanagement,org.kde.plasma.notifications
+knownItems=org.kde.plasma.clipboard,org.kde.plasma.mediacontroller,org.kde.plasma.keyboardlayout,org.kde.plasma.battery,org.kde.plasma.devicenotifier,org.kde.plasma.volume,org.kde.plasma.manage-inputmethod,org.kde.plasma.networkmanagement,org.kde.plasma.notifications
+
+[ScreenMapping]
+itemsOnDisabledScreens=
+screenMapping=
+"""
+    tmp_path = rc_path + ".tmp"
+    with open(tmp_path, "w", encoding="utf-8") as f:
+        f.write(seed_appletsrc)
+    os.replace(tmp_path, rc_path)
     raise SystemExit(0)
 
 first_run = not os.path.exists(stamp_path)
 drop_discover = not os.path.exists("/usr/share/applications/org.kde.discover.desktop")
-
-with open(rc_path, "r", encoding="utf-8", errors="surrogateescape") as f:
-    raw_lines = f.readlines()
 
 sections = []
 cur_hdr = ""
@@ -268,11 +453,13 @@ sync_live_kde_launchers() {
         if (w.type == "org.kde.plasma.icontasks" || w.type == "org.kde.plasma.taskmanager") {
           matched++;
           w.currentConfigGroup = ["General"];
+          var cur = String(w.readConfig("launchers", ""));
           if (forceReset) {
-            w.writeConfig("launchers", defaults);
+            if (cur != defaults) {
+              w.writeConfig("launchers", defaults);
+            }
             continue;
           }
-          var cur = String(w.readConfig("launchers", defaults));
           if (cur.length == 0 || cur.indexOf("preferred://") >= 0) {
             w.writeConfig("launchers", defaults);
             continue;
@@ -282,7 +469,7 @@ sync_live_kde_launchers() {
           });
           if (keep.length == 0) {
             w.writeConfig("launchers", defaults);
-          } else if (keep.join(",") != cur || String(w.readConfig("launchers", "")).length == 0) {
+          } else if (keep.join(",") != cur) {
             w.writeConfig("launchers", keep.join(","));
           }
         }
@@ -337,11 +524,9 @@ if [ "$desktop_choice" = "kde" ]; then
   export KWIN_EFFECTS_FORCE_ANIMATIONS=0
   export KWIN_WAYLAND_NO_PERMISSION_CHECKS=1
   export KWIN_SCREENSHOT_NO_PERMISSION_CHECKS=1
-  if [ "${GALLIUM_DRIVER:-}" = "zink" ]; then
-    unset MESA_LOADER_DRIVER_OVERRIDE LIBGL_KOPPER_DRI2
-    export LIBGL_ALWAYS_SOFTWARE=1
-    export GALLIUM_DRIVER=llvmpipe
-  fi
+  unset MESA_NO_ERROR MESA_LOADER_DRIVER_OVERRIDE LIBGL_KOPPER_DRI2 MESA_GL_VERSION_OVERRIDE MESA_GLSL_VERSION_OVERRIDE
+  export LIBGL_ALWAYS_SOFTWARE=1
+  export GALLIUM_DRIVER=llvmpipe
 
   mkdir -p "$HOME/.local/share/applications" "$HOME/.config"
   cat > "$HOME/.local/share/applications/linuxdroid-ime.desktop" <<'ENTRY'
@@ -412,13 +597,13 @@ ENTRY
       for _ in $(seq 1 300); do
         if dbus-send --session --dest=org.kde.plasmashell --type=method_call --print-reply /PlasmaShell org.freedesktop.DBus.Introspectable.Introspect 2>/dev/null | grep -q "org.kde.PlasmaShell"; then
           dbus-send --session --dest=org.kde.KWin --type=method_call /VirtualKeyboard org.freedesktop.DBus.Properties.Set string:"org.kde.kwin.VirtualKeyboard" string:"enabled" variant:boolean:true >/dev/null 2>&1 || true
-          write_status "READY|KDE Plasma desktop ready" "== [BOOT READY] KDE Plasma desktop ready"
-          for _ in $(seq 1 60); do
+          for _ in $(seq 1 40); do
             if sync_live_kde_launchers; then
               break
             fi
             sleep 0.25
           done
+          write_status "READY|KDE Plasma desktop ready" "== [BOOT READY] KDE Plasma desktop ready"
           break
         fi
         sleep 0.2
@@ -426,6 +611,7 @@ ENTRY
     ) &
     watcher_pid=$!
     trap "kill $watcher_pid 2>/dev/null || true" EXIT TERM INT
+    export -n start_x11_helpers configure_kde_default_launchers sync_live_kde_launchers prune_missing_launchers 2>/dev/null || true
     startplasma-wayland
   '
   rc=$?

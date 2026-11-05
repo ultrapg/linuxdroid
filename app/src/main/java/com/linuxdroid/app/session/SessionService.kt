@@ -243,7 +243,9 @@ class SessionService : Service() {
         fun completeDesktopReadyIfEligible() {
             if (bootGeneration.get() != generation) return
             val wfMs = waylandFirstFrameAtMs.get()
-            if (wfMs <= 0L && !guestShellReady.get()) return
+            val shellReady = guestShellReady.get()
+            if (wfMs <= 0L && !shellReady) return
+            if (!shellReady && System.currentTimeMillis() - wfMs < 12_000L) return
             SessionState.update {
                 if (it.firstFrameReady || it.phase == SessionPhase.FAILED || it.phase == SessionPhase.STOPPING) {
                     it

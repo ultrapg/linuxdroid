@@ -475,6 +475,16 @@ print(fallback)
   sudo sh -c '
     cat > /usr/local/bin/blender <<'\''WRAP'\''
 #!/bin/sh
+unset MESA_NO_ERROR DRI_PRIME
+if [ "${KWIN_COMPOSE:-}" = "Q" ]; then
+  unset MESA_LOADER_DRIVER_OVERRIDE LIBGL_KOPPER_DRI2 MESA_GL_VERSION_OVERRIDE MESA_GLSL_VERSION_OVERRIDE
+  export LIBGL_ALWAYS_SOFTWARE=1
+  export GALLIUM_DRIVER=llvmpipe
+fi
+if [ -x /opt/blender/blender-launcher ]; then
+  exec /opt/blender/blender-launcher "$@"
+fi
+export LD_LIBRARY_PATH="/opt/blender/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
 exec /opt/blender/blender "$@"
 WRAP
     chmod 755 /usr/local/bin/blender
@@ -489,7 +499,7 @@ WRAP
       chmod 644 /usr/share/icons/hicolor/symbolic/apps/blender-symbolic.svg
     fi
     if [ -f /opt/blender/blender.desktop ]; then
-      sed "s#^Exec=blender#Exec=/usr/local/bin/blender#" /opt/blender/blender.desktop > /usr/share/applications/blender.desktop
+      sed -e "s#^Exec=blender#Exec=/usr/local/bin/blender#" -e "/^PrefersNonDefaultGPU=/d" /opt/blender/blender.desktop > /usr/share/applications/blender.desktop
       chmod 644 /usr/share/applications/blender.desktop
     fi
   '

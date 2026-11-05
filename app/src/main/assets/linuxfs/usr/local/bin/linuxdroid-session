@@ -122,11 +122,42 @@ prepare_locale() {
 }
 prepare_locale
 
-# Remove systemd's /bin/false session D-Bus stub if present so dbus-daemon answers ServiceUnknown
-# in 0us instead of fork/exec'ing /bin/false 15+ times during KDE/desktop startup.
-if [ -f /usr/share/dbus-1/services/org.freedesktop.systemd1.service ]; then
-  rm -f /usr/share/dbus-1/services/org.freedesktop.systemd1.service 2>/dev/null || \
-    linuxdroid-root rm -f /usr/share/dbus-1/services/org.freedesktop.systemd1.service 2>/dev/null || true
+# Remove systemd's /bin/false session D-Bus stub and KSplash plasma_waitforname service if present
+# so dbus-daemon answers ServiceUnknown in 0us instead of blocking KDE startup.
+for stub_svc in \
+  /usr/share/dbus-1/services/org.freedesktop.systemd1.service \
+  /usr/share/dbus-1/services/org.kde.KSplash.service; do
+  if [ -f "$stub_svc" ]; then
+    rm -f "$stub_svc" 2>/dev/null || linuxdroid-root rm -f "$stub_svc" 2>/dev/null || true
+  fi
+done
+
+# Ensure any existing /opt/blender installation uses the safe wrapper without MESA_NO_ERROR / DRI_PRIME
+if [ -x /opt/blender/blender ]; then
+  refresh_blender_wrapper='
+    cat > /usr/local/bin/blender <<'\''WRAP'\''
+#!/bin/sh
+unset MESA_NO_ERROR DRI_PRIME
+if [ "${KWIN_COMPOSE:-}" = "Q" ]; then
+  unset MESA_LOADER_DRIVER_OVERRIDE LIBGL_KOPPER_DRI2 MESA_GL_VERSION_OVERRIDE MESA_GLSL_VERSION_OVERRIDE
+  export LIBGL_ALWAYS_SOFTWARE=1
+  export GALLIUM_DRIVER=llvmpipe
+fi
+if [ -x /opt/blender/blender-launcher ]; then
+  exec /opt/blender/blender-launcher "$@"
+fi
+export LD_LIBRARY_PATH="/opt/blender/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+exec /opt/blender/blender "$@"
+WRAP
+    chmod 755 /usr/local/bin/blender
+    if [ -f /opt/blender/blender.desktop ]; then
+      sed -e "s#^Exec=blender#Exec=/usr/local/bin/blender#" -e "/^PrefersNonDefaultGPU=/d" /opt/blender/blender.desktop > /usr/share/applications/blender.desktop
+      chmod 644 /usr/share/applications/blender.desktop
+    fi
+  '
+  if ! grep -q "unset MESA_NO_ERROR" /usr/local/bin/blender 2>/dev/null || grep -q "^PrefersNonDefaultGPU=" /usr/share/applications/blender.desktop 2>/dev/null; then
+    sh -c "$refresh_blender_wrapper" 2>/dev/null || linuxdroid-root sh -c "$refresh_blender_wrapper" 2>/dev/null || true
+  fi
 fi
 
 rm -f /tmp/.bl-clock
@@ -190,6 +221,7 @@ if [ -r /etc/linuxdroid/gpu.env ]; then
   # shellcheck disable=SC1091
   . /etc/linuxdroid/gpu.env
   set +a
+  unset MESA_NO_ERROR
   if [ -n "${VK_DRIVER_FILES:-}" ]; then
     resolved_icds=""
     IFS=':' read -ra icd_entries <<< "$VK_DRIVER_FILES"
