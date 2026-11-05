@@ -142,6 +142,15 @@ if [ -x /opt/blender/blender ]; then
     cat > /usr/local/bin/blender <<'\''WRAP'\''
 #!/bin/sh
 unset MESA_NO_ERROR DRI_PRIME
+export LP_NUM_THREADS="${BL_CPU_COUNT:-4}"
+if [ "${LIBGL_ALWAYS_SOFTWARE:-}" = "1" ]; then
+  set -- --python-expr "import bpy
+try:
+    bpy.context.preferences.system.viewport_aa = \"OFF\"
+    bpy.context.preferences.system.anisotropic_filter = \"FILTER_0\"
+except Exception:
+    pass" "$@"
+fi
 if [ "${KWIN_COMPOSE:-}" = "Q" ]; then
   unset MESA_LOADER_DRIVER_OVERRIDE LIBGL_KOPPER_DRI2 MESA_GL_VERSION_OVERRIDE MESA_GLSL_VERSION_OVERRIDE
   export LIBGL_ALWAYS_SOFTWARE=1
@@ -159,7 +168,7 @@ WRAP
       chmod 644 /usr/share/applications/blender.desktop
     fi
   '
-  if ! grep -q "unset MESA_NO_ERROR" /usr/local/bin/blender 2>/dev/null || grep -q "^PrefersNonDefaultGPU=" /usr/share/applications/blender.desktop 2>/dev/null; then
+  if ! grep -q "LP_NUM_THREADS" /usr/local/bin/blender 2>/dev/null || grep -q "^PrefersNonDefaultGPU=" /usr/share/applications/blender.desktop 2>/dev/null; then
     sh -c "$refresh_blender_wrapper" 2>/dev/null || linuxdroid-root sh -c "$refresh_blender_wrapper" 2>/dev/null || true
   fi
 fi

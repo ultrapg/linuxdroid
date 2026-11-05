@@ -114,6 +114,7 @@ import com.linuxdroid.app.session.ExternalDisplayMode
 import com.linuxdroid.app.session.ResolutionPreset
 import com.linuxdroid.app.session.ScreenOrientationPref
 import com.linuxdroid.app.session.SessionPhase
+import com.linuxdroid.app.session.BackgroundMode
 import com.linuxdroid.app.session.SessionPrefs
 import com.linuxdroid.app.session.SessionService
 import com.linuxdroid.app.session.SessionState
@@ -137,8 +138,9 @@ class FrontEndActivity : ComponentActivity() {
             return
         }
 
+        ThemeState.current.value = SessionPrefs.appTheme(this)
         setContent {
-            LinuxDroidTheme(dynamic = true) {
+            LinuxDroidTheme {
                 DashboardScreen(
                     onLaunchDesktop = { openDesktopSession() },
                     onOpenTerminal = { root ->
@@ -181,7 +183,7 @@ private enum class DashboardTab(val label: String, val icon: ImageVector) {
     WORKSTATION("Home", Icons.Outlined.Computer),
     HARDWARE("Hardware", Icons.Outlined.Memory),
     DISPLAY("Display", Icons.Outlined.Monitor),
-    SYSTEM("System", Icons.Outlined.Settings),
+    SYSTEM("Settings", Icons.Outlined.Settings),
 }
 
 @OptIn(ExperimentalLayoutApi::class, ExperimentalMaterial3Api::class)
@@ -1585,6 +1587,7 @@ private fun DisplayTabContent(
     }
 }
 
+@OptIn(ExperimentalLayoutApi::class)
 @Composable
 private fun SystemTabContent(
     autoBoot: Boolean,
@@ -1600,6 +1603,61 @@ private fun SystemTabContent(
     diagnosticLogPreview: String,
     onRefreshLogs: () -> Unit,
 ) {
+    // 0. Appearance & Background behavior
+    val settingsContext = androidx.compose.ui.platform.LocalContext.current
+    var appTheme by remember { mutableStateOf(SessionPrefs.appTheme(settingsContext)) }
+    var bgMode by remember { mutableStateOf(SessionPrefs.backgroundMode(settingsContext)) }
+    var bgDelay by remember { mutableStateOf(SessionPrefs.backgroundDelaySec(settingsContext)) }
+    SectionCard {
+        SectionHeader("Appearance")
+        Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            for (theme in AppTheme.entries) {
+                SelectableOptionCard(
+                    selected = appTheme == theme,
+                    title = theme.label,
+                    subtitle = theme.description,
+                    onClick = {
+                        appTheme = theme
+                        SessionPrefs.setAppTheme(settingsContext, theme)
+                        ThemeState.current.value = theme
+                    },
+                )
+            }
+        }
+    }
+    SectionCard {
+        SectionHeader("When App Is in Background")
+        Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            for (mode in BackgroundMode.entries) {
+                SelectableOptionCard(
+                    selected = bgMode == mode,
+                    title = mode.label,
+                    subtitle = mode.description,
+                    onClick = {
+                        bgMode = mode
+                        SessionPrefs.setBackgroundMode(settingsContext, mode)
+                    },
+                )
+            }
+        }
+        if (bgMode != BackgroundMode.KEEP_RUNNING) {
+            Spacer(Modifier.height(10.dp))
+            Text("Delay", style = MaterialTheme.typography.labelLarge)
+            FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                for ((sec, label) in listOf(0 to "Immediately", 30 to "30 s", 60 to "1 min", 300 to "5 min", 900 to "15 min")) {
+                    FilterChip(
+                        selected = bgDelay == sec,
+                        onClick = {
+                            bgDelay = sec
+                            SessionPrefs.setBackgroundDelaySec(settingsContext, sec)
+                        },
+                        label = { Text(label) },
+                    )
+                }
+            }
+        }
+    }
+
     // 1. Startup & Workstation Account
     SectionCard {
         SectionHeader("Startup & User Account")

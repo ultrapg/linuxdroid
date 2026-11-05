@@ -129,12 +129,44 @@ data class SessionConfigSignature(
     val customMountsHash: Int,
 )
 
+enum class BackgroundMode(val id: String, val label: String, val description: String) {
+    KEEP_RUNNING("keep", "Keep Running", "Linux keeps running while the app is in the background"),
+    PAUSE("pause", "Pause", "Freeze Linux (0% CPU) after the delay and resume when you return"),
+    SHUT_DOWN("shutdown", "Shut Down", "Stop Linux after the delay");
+
+    companion object {
+        fun fromId(id: String?): BackgroundMode = entries.firstOrNull { it.id == id } ?: KEEP_RUNNING
+    }
+}
+
 object SessionPrefs {
     private const val PREFS_NAME = "linuxdroid_prefs"
     const val GLIBC_TUNABLES = "glibc.pthread.rseq=0:glibc.malloc.top_pad=16777216"
 
     private fun prefs(context: Context) =
         context.applicationContext.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+
+    fun appTheme(context: Context): com.linuxdroid.app.ui.AppTheme =
+        com.linuxdroid.app.ui.AppTheme.fromId(prefs(context).getString("app_theme", "dark"))
+
+    fun setAppTheme(context: Context, theme: com.linuxdroid.app.ui.AppTheme) {
+        prefs(context).edit().putString("app_theme", theme.id).apply()
+    }
+
+    fun backgroundMode(context: Context): BackgroundMode =
+        BackgroundMode.fromId(prefs(context).getString("background_mode", "keep"))
+
+    fun setBackgroundMode(context: Context, mode: BackgroundMode) {
+        prefs(context).edit().putString("background_mode", mode.id).apply()
+    }
+
+    /** Seconds the app may stay in the background before the chosen background action runs. */
+    fun backgroundDelaySec(context: Context): Int =
+        prefs(context).getInt("background_delay_sec", 30).coerceIn(0, 3600)
+
+    fun setBackgroundDelaySec(context: Context, sec: Int) {
+        prefs(context).edit().putInt("background_delay_sec", sec.coerceIn(0, 3600)).apply()
+    }
 
     fun autoBootOnLaunch(context: Context): Boolean =
         prefs(context).getBoolean("auto_boot_on_launch", false)

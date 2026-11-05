@@ -104,28 +104,32 @@ flatpak_app_installed() {
 }
 
 ALL_ITEMS=(
-  "warehouse|Warehouse (Flatpak Store) — Flatpak + Flathub + Warehouse GUI"
-  "fex-rootfs|FEX-Emu Ubuntu 24.04 x86_64 RootFS (Run x86_64 Linux Apps)"
-  "chromium|Chromium (Latest Web Browser, ARM64)"
-  "vscode|Visual Studio Code (Latest Official ARM64)"
-  "vscodium|VSCodium (Latest Open-Source ARM64)"
-  "blender|Blender 5.x (Latest 3D Creation Suite, ARM64)"
-  "krita|Krita 5.3+ (Latest Digital Painting Studio, ARM64)"
-  "obs-studio|OBS Studio (Latest Screen Recording & Streaming)"
-  "kdenlive|Kdenlive 26.x (Latest Non-Linear Video Editor, Flathub ARM64)"
-  "libreoffice|LibreOffice Fresh 26.x (Latest Writer, Calc, Impress)"
-  "gimp|GIMP 3.x (Latest Image Editor, ARM64)"
-  "devtools|C/C++, CMake, Python & Node.js 22 LTS Toolchain"
-  "rust|Rust Toolchain (Latest Stable via rustup)"
-  "golang|Go Toolchain (Latest Official go.dev ARM64)"
-  "openjdk|OpenJDK 25 LTS SDK (Latest Java Development Kit)"
-  "docker-cli|Docker CLI (Latest Official docker-ce-cli, buildx, compose)"
-  "podman|Podman (Rootless Container Engine)"
+  "media-codecs|Media Codecs — video & audio playback (YouTube)"
+  "warehouse|Warehouse — Flatpak app store"
+  "fex-rootfs|FEX RootFS — run x86_64 apps"
+  "chromium|Chromium — web browser"
+  "vscode|VS Code — code editor"
+  "vscodium|VSCodium — open-source code editor"
+  "blender|Blender — 3D creation"
+  "krita|Krita — digital painting"
+  "obs-studio|OBS Studio — recording & streaming"
+  "kdenlive|Kdenlive — video editor"
+  "libreoffice|LibreOffice — office suite"
+  "gimp|GIMP — image editor"
+  "devtools|Dev Tools — C/C++, CMake, Python, Node.js"
+  "rust|Rust — toolchain"
+  "golang|Go — toolchain"
+  "openjdk|OpenJDK 25 — Java SDK"
+  "docker-cli|Docker CLI — with buildx & compose"
+  "podman|Podman — rootless containers"
 )
 
 is_installed() {
   local id="$1"
   case "$id" in
+    media-codecs)
+      pkg_not_broken libavcodec60 && compgen -G "/usr/lib/*/libavcodec.so.60" >/dev/null 2>&1
+      ;;
     warehouse)
       pkg_not_broken flatpak && [ -x /usr/bin/flatpak ] && flatpak_app_installed "io.github.flattool.Warehouse"
       ;;
@@ -476,6 +480,15 @@ print(fallback)
     cat > /usr/local/bin/blender <<'\''WRAP'\''
 #!/bin/sh
 unset MESA_NO_ERROR DRI_PRIME
+export LP_NUM_THREADS="${BL_CPU_COUNT:-4}"
+if [ "${LIBGL_ALWAYS_SOFTWARE:-}" = "1" ]; then
+  set -- --python-expr "import bpy
+try:
+    bpy.context.preferences.system.viewport_aa = \"OFF\"
+    bpy.context.preferences.system.anisotropic_filter = \"FILTER_0\"
+except Exception:
+    pass" "$@"
+fi
 if [ "${KWIN_COMPOSE:-}" = "Q" ]; then
   unset MESA_LOADER_DRIVER_OVERRIDE LIBGL_KOPPER_DRI2 MESA_GL_VERSION_OVERRIDE MESA_GLSL_VERSION_OVERRIDE
   export LIBGL_ALWAYS_SOFTWARE=1
@@ -707,8 +720,14 @@ install_podman() {
   apt_install podman
 }
 
+install_media_codecs() {
+  echo "==> Installing media codecs (FFmpeg libraries for Firefox video & audio)..."
+  apt_install libavcodec60 libavformat60 libavutil58 libswresample4 ffmpeg
+  echo "==> Done. Restart Firefox to play YouTube videos."
+}
+
 print_list() {
-  echo "LinuxDroid Workstation Setup — Available Components:"
+  echo "LinuxDroid Workstation Setup"
   for entry in "${ALL_ITEMS[@]}"; do
     local id="${entry%%|*}"
     local desc="${entry#*|}"
@@ -718,6 +737,7 @@ print_list() {
 
 run_action() {
   case "${1:-}" in
+    media-codecs|codecs|ffmpeg) install_media_codecs ;;
     warehouse|flatpak|flathub) install_warehouse ;;
     fex-rootfs) install_fex_rootfs ;;
     chromium|chrome) install_chromium ;;
@@ -749,7 +769,7 @@ run_action() {
       return 0
       ;;
     *)
-      echo "Usage: linuxdroid-apps [warehouse | fex-rootfs | chromium | vscode | vscodium | blender | krita | obs-studio | kdenlive | libreoffice | gimp | devtools | rust | golang | openjdk | docker-cli | podman | --repair | --list]"
+      echo "Usage: linuxdroid-apps [media-codecs | warehouse | fex-rootfs | chromium | vscode | vscodium | blender | krita | obs-studio | kdenlive | libreoffice | gimp | devtools | rust | golang | openjdk | docker-cli | podman | --repair | --list]"
       return 1
       ;;
   esac
@@ -770,7 +790,7 @@ if [ -n "${DISPLAY:-}${WAYLAND_DISPLAY:-}" ]; then
 
   if command -v kdialog >/dev/null 2>&1; then
     choice=$(kdialog --title "LinuxDroid Workstation Setup" --geometry 760x580 \
-      --menu "Select a workstation application or toolchain to install (latest ARM64 releases):" \
+      --menu "Choose something to install:" \
       "${menu_args[@]}" 2>/dev/null || true)
   elif command -v zenity >/dev/null 2>&1; then
     choice=$(zenity --list --title="LinuxDroid Workstation Setup" --width=760 --height=580 \

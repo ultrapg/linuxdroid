@@ -55,31 +55,70 @@ private val DarkScheme = darkColorScheme(
     tertiary = Color(0xFFFFB86B),
 )
 
+enum class AppTheme(val id: String, val label: String, val description: String) {
+    DARK("dark", "Dark", "Deep slate with cyan accents"),
+    AMOLED("amoled", "AMOLED Black", "Pure black to save battery on OLED screens"),
+    LIGHT("light", "Light", "Bright surfaces"),
+    SYSTEM("system", "Follow System", "Match your phone's light or dark mode"),
+    DYNAMIC("dynamic", "Dynamic Colors", "Use your wallpaper colors (Android 12+)");
+
+    companion object {
+        fun fromId(id: String?): AppTheme = entries.firstOrNull { it.id == id } ?: DARK
+    }
+}
+
+/** Shared theme selection so the dashboard, session overlays and terminal always match. */
+object ThemeState {
+    val current = androidx.compose.runtime.mutableStateOf(AppTheme.DARK)
+}
+
+private val AmoledScheme = darkColorScheme(
+    primary = CyanPrimary,
+    onPrimary = CyanOnPrimary,
+    primaryContainer = Color(0xFF0C4A6E),
+    onPrimaryContainer = Color(0xFFE0F2FE),
+    secondary = Color(0xFF34D399),
+    onSecondary = Color(0xFF032016),
+    background = Color.Black,
+    onBackground = SlateOnSurface,
+    surface = Color.Black,
+    onSurface = SlateOnSurface,
+    surfaceVariant = Color(0xFF111111),
+    onSurfaceVariant = SlateMuted,
+    surfaceContainer = Color(0xFF0A0A0A),
+    surfaceContainerLow = Color(0xFF050505),
+    surfaceContainerLowest = Color.Black,
+    surfaceContainerHigh = Color(0xFF141414),
+    surfaceContainerHighest = Color(0xFF1C1C1C),
+    outline = Color(0xFF2A2A2A),
+    error = ErrorRed,
+)
+
 @Composable
 fun LinuxDroidTheme(dynamic: Boolean = false, content: @Composable () -> Unit) {
-    val colorScheme = if (!dynamic) {
-        LinuxDroidColorScheme
-    } else {
-        val dark = isSystemInDarkTheme()
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+    val selected = ThemeState.current.value
+    val systemDark = isSystemInDarkTheme()
+    val colorScheme = when (selected) {
+        AppTheme.DARK -> LinuxDroidColorScheme
+        AppTheme.AMOLED -> AmoledScheme
+        AppTheme.LIGHT -> LightScheme
+        AppTheme.SYSTEM -> if (systemDark) LinuxDroidColorScheme else LightScheme
+        AppTheme.DYNAMIC -> if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
             val ctx = LocalContext.current
-            if (dark) dynamicDarkColorScheme(ctx) else dynamicLightColorScheme(ctx)
+            if (systemDark) dynamicDarkColorScheme(ctx) else dynamicLightColorScheme(ctx)
         } else {
-            if (dark) DarkScheme else LightScheme
+            if (systemDark) DarkScheme else LightScheme
         }
     }
-    if (dynamic) {
-        // Keep status/navigation bar icons readable: dark icons on light backgrounds, light icons on dark.
-        val view = LocalView.current
-        val lightBackground = colorScheme.background.luminance() > 0.5f
-        if (!view.isInEditMode) {
-            SideEffect {
-                val window = (view.context as? Activity)?.window
-                if (window != null) {
-                    val controller = WindowCompat.getInsetsController(window, view)
-                    controller.isAppearanceLightStatusBars = lightBackground
-                    controller.isAppearanceLightNavigationBars = lightBackground
-                }
+    val view = LocalView.current
+    val lightBackground = colorScheme.background.luminance() > 0.5f
+    if (!view.isInEditMode) {
+        SideEffect {
+            val window = (view.context as? Activity)?.window
+            if (window != null) {
+                val controller = WindowCompat.getInsetsController(window, view)
+                controller.isAppearanceLightStatusBars = lightBackground
+                controller.isAppearanceLightNavigationBars = lightBackground
             }
         }
     }

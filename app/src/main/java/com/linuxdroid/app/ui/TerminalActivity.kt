@@ -66,6 +66,7 @@ class TerminalActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
+        ThemeState.current.value = com.linuxdroid.app.session.SessionPrefs.appTheme(this)
         activeRoot = intent?.getBooleanExtra(EXTRA_AS_ROOT, false) == true
 
         setContent {

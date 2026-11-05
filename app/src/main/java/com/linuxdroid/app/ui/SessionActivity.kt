@@ -392,8 +392,23 @@ class SessionActivity : ComponentActivity() {
         }
     }
 
+    private val bgHandler = android.os.Handler(android.os.Looper.getMainLooper())
+    private val bgAction = Runnable {
+        when (SessionPrefs.backgroundMode(this)) {
+            com.linuxdroid.app.session.BackgroundMode.PAUSE ->
+                if (!SessionState.isPaused && SessionState.isRunningOrPaused) SessionService.togglePause(this)
+            com.linuxdroid.app.session.BackgroundMode.SHUT_DOWN -> SessionService.shutdown(this)
+            else -> Unit
+        }
+    }
+
     override fun onStart() {
         super.onStart()
+        bgHandler.removeCallbacks(bgAction)
+        ThemeState.current.value = SessionPrefs.appTheme(this)
+        if (SessionPrefs.backgroundMode(this) == com.linuxdroid.app.session.BackgroundMode.PAUSE && SessionState.isPaused) {
+            SessionService.togglePause(this)
+        }
         imeBridge.start()
         vsyncRunning = true
         Choreographer.getInstance().postFrameCallback(vsyncCallback)
@@ -420,6 +435,9 @@ class SessionActivity : ComponentActivity() {
         imeBridge.stop()
         setPhoneDimmed(false)
         dismissExternalPresentation()
+        if (!isChangingConfigurations && SessionPrefs.backgroundMode(this) != com.linuxdroid.app.session.BackgroundMode.KEEP_RUNNING) {
+            bgHandler.postDelayed(bgAction, SessionPrefs.backgroundDelaySec(this) * 1000L)
+        }
         super.onStop()
     }
 
@@ -1179,9 +1197,8 @@ private fun QuickMenuOverlay(
         val useTwoColumns = cardWidth >= 420.dp
 
         Card(
-            shape = RoundedCornerShape(16.dp),
-            colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
-            border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline),
+            shape = RoundedCornerShape(24.dp),
+            colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainer),
             modifier = Modifier
                 .width(cardWidth)
                 .heightIn(max = cardMaxHeight)
@@ -1978,12 +1995,15 @@ private fun QuickMenuTile(
     onClick: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
-    OutlinedButton(
+    FilledTonalButton(
         onClick = onClick,
-        shape = RoundedCornerShape(10.dp),
-        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline.copy(alpha = 0.75f)),
+        shape = RoundedCornerShape(12.dp),
+        colors = ButtonDefaults.filledTonalButtonColors(
+            containerColor = MaterialTheme.colorScheme.surfaceContainerHigh,
+            contentColor = MaterialTheme.colorScheme.onSurface,
+        ),
         contentPadding = PaddingValues(horizontal = 12.dp, vertical = 8.dp),
-        modifier = modifier.heightIn(min = 42.dp),
+        modifier = modifier.heightIn(min = 46.dp),
     ) {
         Row(
             modifier = Modifier.fillMaxWidth(),

@@ -416,8 +416,9 @@ try:
     apps_bin = os.path.join(bin_dir, "linuxdroid-apps")
     r_apps = subprocess.run([apps_bin, "--list"], capture_output=True, text=True, timeout=5)
     assert r_apps.returncode == 0, f"linuxdroid-apps --list failed: {r_apps.stderr}"
-    assert "Warehouse (Flatpak Store)" in r_apps.stdout
+    assert "Warehouse" in r_apps.stdout
     for expected_id in (
+        "media-codecs",
         "warehouse",
         "chromium",
         "fex-rootfs",
