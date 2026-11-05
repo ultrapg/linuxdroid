@@ -321,7 +321,7 @@ object SessionPrefs {
 
     /** GPU compositing for the KDE desktop itself (KWin OpenGL + GPU Qt Quick). Falls back to software on failure. */
     fun gpuDesktop(context: Context): Boolean =
-        prefs(context).getBoolean("gpu_desktop", true)
+        prefs(context).getBoolean("gpu_desktop", false)
 
     fun setGpuDesktop(context: Context, enabled: Boolean) {
         prefs(context).edit().putBoolean("gpu_desktop", enabled).apply()
