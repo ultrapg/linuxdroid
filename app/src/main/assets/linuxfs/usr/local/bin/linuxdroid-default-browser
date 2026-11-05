@@ -1,7 +1,7 @@
 #!/bin/bash
 # Make Chromium the default web browser when it is installed (once, so later user choices are kept).
 # Pass --force to apply again.
-stamp="${XDG_DATA_HOME:-$HOME/.local/share}/linuxdroid/chromium-default-v1"
+stamp="${XDG_DATA_HOME:-$HOME/.local/share}/linuxdroid/chromium-default-v2"
 [ "${1:-}" = "--force" ] && rm -f "$stamp"
 [ -e "$stamp" ] && exit 0
 desktop=""
@@ -9,12 +9,25 @@ for d in chromium.desktop chromium-browser.desktop; do
   [ -f "/usr/share/applications/$d" ] && { desktop="$d"; break; }
 done
 [ -n "$desktop" ] || exit 0
-[ -x /usr/bin/chromium ] || [ -x /usr/bin/chromium-browser ] || exit 0
-for mime in x-scheme-handler/http x-scheme-handler/https text/html application/xhtml+xml; do
+[ -x /usr/bin/chromium ] || [ -x /usr/bin/chromium-browser ] || [ -x /usr/lib/chromium/chromium ] || exit 0
+for mime in \
+  x-scheme-handler/http \
+  x-scheme-handler/https \
+  text/html \
+  application/xhtml+xml \
+  application/x-extension-htm \
+  application/x-extension-html \
+  application/x-extension-shtml \
+  application/x-extension-xhtml \
+  application/x-extension-xht; do
   xdg-mime default "$desktop" "$mime" 2>/dev/null || true
 done
 xdg-settings set default-web-browser "$desktop" 2>/dev/null || true
 for kw in kwriteconfig6 kwriteconfig5; do
-  command -v "$kw" >/dev/null 2>&1 && "$kw" --file kdeglobals --group General --key BrowserApplication "${desktop%.desktop}" 2>/dev/null
+  command -v "$kw" >/dev/null 2>&1 && "$kw" --file kdeglobals --group General --key BrowserApplication "$desktop" 2>/dev/null
 done
+if [ -d "${XDG_CONFIG_HOME:-$HOME/.config}/xfce4" ] || [ "${XDG_CURRENT_DESKTOP:-}" = "XFCE" ] || [ -x /usr/bin/startxfce4 ]; then
+  mkdir -p "${XDG_CONFIG_HOME:-$HOME/.config}/xfce4" 2>/dev/null || true
+  printf 'WebBrowser=%s\n' "${desktop%.desktop}" > "${XDG_CONFIG_HOME:-$HOME/.config}/xfce4/helpers.rc" 2>/dev/null || true
+fi
 mkdir -p "${stamp%/*}" && : > "$stamp"

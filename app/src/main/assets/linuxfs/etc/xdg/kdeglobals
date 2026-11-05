@@ -1,3 +1,6 @@
+[General]
+BrowserApplication=chromium.desktop
+
 [KDE]
 AnimationDurationFactor=0
 SingleClick=false

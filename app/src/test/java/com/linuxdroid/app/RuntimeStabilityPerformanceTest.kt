@@ -293,29 +293,29 @@ class RuntimeStabilityPerformanceTest {
 
         val desktopSh = File(assetsRoot, "usr/local/bin/linuxdroid-desktop").readText()
         assertTrue(
-            "KDE taskbar default pins must be Settings, Dolphin, and Firefox only",
-            desktopSh.contains("applications:systemsettings.desktop,applications:org.kde.dolphin.desktop,applications:firefox.desktop"),
+            "KDE taskbar default pins must be Settings, Dolphin, and Chromium only",
+            desktopSh.contains("applications:systemsettings.desktop,applications:org.kde.dolphin.desktop,applications:chromium.desktop"),
         )
         assertTrue(
-            "KDE taskbar migration must use launchers-v4 stamp after live panel sync",
-            desktopSh.contains("launchers-v4") && desktopSh.contains("LAUNCHERS_READY:"),
+            "KDE taskbar migration must use launchers-v5 stamp after live panel sync",
+            desktopSh.contains("launchers-v5") && desktopSh.contains("LAUNCHERS_READY:"),
         )
         assertFalse(
             "KDE taskbar default pins must not include preferred:// or Discover",
             desktopSh.contains("applications:systemsettings.desktop,applications:org.kde.discover.desktop,preferred://filemanager,preferred://browser"),
         )
         assertTrue(
-            "XFCE taskbar default pins must be Settings, Thunar, and Firefox only",
-            desktopSh.contains("[\"xfce-settings-manager.desktop\", \"thunar.desktop\", \"firefox.desktop\"]"),
+            "XFCE taskbar default pins must be Settings, Thunar, and Chromium only",
+            desktopSh.contains("[\"xfce-settings-manager.desktop\", \"thunar.desktop\", \"chromium.desktop\"]"),
         )
         assertTrue(
-            "XFCE taskbar migration must use xfce-launchers-v4 stamp",
-            desktopSh.contains("xfce-launchers-v4"),
+            "XFCE taskbar migration must use xfce-launchers-v5 stamp",
+            desktopSh.contains("xfce-launchers-v5"),
         )
     }
 
     @Test
-    fun kdeAndXfceTaskbarMigrationDeterministicallyPinsSettingsFileExplorerAndFirefox() {
+    fun kdeAndXfceTaskbarMigrationDeterministicallyPinsSettingsFileExplorerAndChromium() {
         val assetsRoot = findAssetsLinuxfs().canonicalFile
         val desktopScript = File(assetsRoot, "usr/local/bin/linuxdroid-desktop").canonicalPath
 
@@ -327,7 +327,7 @@ import tempfile
 import xml.etree.ElementTree as ET
 
 desktop_script = sys.argv[1]
-expected_kde = "applications:systemsettings.desktop,applications:org.kde.dolphin.desktop,applications:firefox.desktop"
+expected_kde = "applications:systemsettings.desktop,applications:org.kde.dolphin.desktop,applications:chromium.desktop"
 
 with tempfile.TemporaryDirectory(prefix="ld-taskbar-test-") as tmp:
     # 0. Brand-new fresh KDE user home with NO plasma-org.kde.plasma.desktop-appletsrc yet
@@ -354,7 +354,7 @@ with tempfile.TemporaryDirectory(prefix="ld-taskbar-test-") as tmp:
     home1 = os.path.join(tmp, "home_no_cfg")
     os.makedirs(os.path.join(home1, ".config"), exist_ok=True)
     os.makedirs(os.path.join(home1, ".local/share/linuxdroid"), exist_ok=True)
-    open(os.path.join(home1, ".local/share/linuxdroid/launchers-v3"), "w").close()
+    open(os.path.join(home1, ".local/share/linuxdroid/launchers-v4"), "w").close()
     rc1 = os.path.join(home1, ".config/plasma-org.kde.plasma.desktop-appletsrc")
     with open(rc1, "w") as f:
         f.write(
@@ -373,7 +373,7 @@ with tempfile.TemporaryDirectory(prefix="ld-taskbar-test-") as tmp:
     txt1 = open(rc1).read()
     assert "[Containments][2][Applets][5][Configuration][General]\nlaunchers=" + expected_kde in txt1, f"Missing created section in:\n{txt1}"
 
-    # 2. KDE appletsrc with old preferred://browser & Discover -> overwritten on first v4 run, then user pin preserved once v4 stamp exists
+    # 2. KDE appletsrc with old preferred://browser & Discover -> overwritten on first v5 run, then user pin preserved once v5 stamp exists
     home2 = os.path.join(tmp, "home_old_cfg")
     os.makedirs(os.path.join(home2, ".config"), exist_ok=True)
     rc2 = os.path.join(home2, ".config/plasma-org.kde.plasma.desktop-appletsrc")
@@ -393,8 +393,8 @@ with tempfile.TemporaryDirectory(prefix="ld-taskbar-test-") as tmp:
     assert f"launchers={expected_kde}\n" in txt2 and "groupingStrategy=0\n" in txt2, txt2
     assert "preferred://" not in txt2 and "discover" not in txt2, txt2
 
-    # Stamp v4 and add custom user pin (blender.desktop) -> must be preserved!
-    stamp2 = os.path.join(home2, ".local/share/linuxdroid/launchers-v4")
+    # Stamp v5 and add custom user pin (blender.desktop) -> must be preserved!
+    stamp2 = os.path.join(home2, ".local/share/linuxdroid/launchers-v5")
     os.makedirs(os.path.dirname(stamp2), exist_ok=True)
     open(stamp2, "w").close()
     custom = expected_kde + ",applications:blender.desktop"
@@ -443,7 +443,7 @@ with tempfile.TemporaryDirectory(prefix="ld-taskbar-test-") as tmp:
         for lp in plugins.findall("property")
         if lp.get("value") == "launcher"
     ]
-    assert launchers == ["xfce-settings-manager.desktop", "thunar.desktop", "firefox.desktop"], f"Unexpected XFCE launchers: {launchers}"
+    assert launchers == ["xfce-settings-manager.desktop", "thunar.desktop", "chromium.desktop"], f"Unexpected XFCE launchers: {launchers}"
 """.trimIndent()
 
         val proc = ProcessBuilder("python3", "-B", "-c", pyTest, desktopScript)

@@ -11,7 +11,12 @@ for d in "${dirs[@]}"; do
         --version|-v|--help|-h) exec "$d/$name" "$@" ;;
       esac
     done
-    exec "$d/$name" --no-sandbox --no-zygote --disable-gpu-sandbox --disable-dev-shm-usage "$@"
+    flags=(--no-sandbox --no-zygote --disable-gpu-sandbox --disable-dev-shm-usage)
+    if [ "${BL_GPU_APPS:-0}" = "1" ]; then
+      flags+=(--ignore-gpu-blocklist --enable-gpu-rasterization --enable-zero-copy)
+      exec /usr/local/bin/linuxdroid-gpu-launch "$d/$name" "${flags[@]}" "$@"
+    fi
+    exec "$d/$name" "${flags[@]}" "$@"
   fi
 done
 echo "$name: command not found" >&2

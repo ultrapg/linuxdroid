@@ -14,7 +14,7 @@ OUT_DIR="${OUT_DIR:-$REPO_ROOT/dist}"
 WORK_DIR="${WORK_DIR:-/tmp/linuxdroid-rootfs-build}"
 CACHE_DIR="${CACHE_DIR:-$WORK_DIR/cache}"
 GITHUB_REPO="${GITHUB_REPO:-ultrapg/linuxdroid}"
-RELEASE_TAG="${RELEASE_TAG:-v1.0.36}"
+RELEASE_TAG="${RELEASE_TAG:-v1.0.37}"
 
 UBUNTU_BASE_URL="https://cdimage.ubuntu.com/ubuntu-base/releases/24.04/release/ubuntu-base-24.04.5-base-arm64.tar.gz"
 UBUNTU_BASE_SHA256="a91d5a93010193712d346d761372b7c9db6dfcf093893161c64ca107f05914f2"
@@ -29,6 +29,7 @@ TALLOC_SHA256="dc46c40b9f46bb34dd97fe41f548b0e8b247b77a918576733c528e83abd854dd"
 
 FEX_PPA_FPR="EDB98BFE8A2310DC9C4A376E76DBFEBEA206F5AC"
 KISAK_PPA_FPR="EB8B81E14DA65431D7504EA8F63F0F2B90935439"
+XTRADEB_PPA_FPR="5301FA4FD93244FBC6F6149982BB6851C64F6880"
 MOZILLA_APT_FPR="35BAA0B33E9EB396F59CA838C0BA5CE6DC6315A3"
 
 log() {
@@ -260,6 +261,7 @@ smoke_test_rootfs() {
     test -x '$desktop_bin'
     test -x /usr/bin/FEXInterpreter
     test -x /usr/bin/FEXRootFSFetcher
+    test -x /usr/bin/chromium
     test -x /usr/bin/firefox
     test -f /usr/lib/firefox/defaults/pref/linuxdroid.js
     test -f /usr/lib/firefox/linuxdroid.cfg
@@ -290,6 +292,7 @@ smoke_test_rootfs() {
     uptime >/dev/null
     fastfetch --pipe >/dev/null
     mpv --version >/dev/null
+    chromium --version >/dev/null
     firefox --version >/dev/null
     bwrap --version | grep -q 'bubblewrap'
     /usr/bin/bwrap --version | grep -q 'bubblewrap'
@@ -495,11 +498,24 @@ Pin-Priority: -1
 Package: firefox*
 Pin: origin packages.mozilla.org
 Pin-Priority: 1000
+
+Package: *
+Pin: release o=LP-PPA-xtradeb-apps
+Pin-Priority: 100
+
+Package: chromium*
+Pin: release o=LP-PPA-xtradeb-apps
+Pin-Priority: 1001
+
+Package: chromium-browser
+Pin: release *
+Pin-Priority: -1
 APTPIN
 
-  log "Installing verified GPG keys for FEX-Emu PPA, Kisak Fresh Mesa PPA, and Mozilla APT..."
+  log "Installing verified GPG keys for FEX-Emu PPA, Kisak Fresh Mesa PPA, xtradeb PPA, and Mozilla APT..."
   fetch_key_by_fpr "$FEX_PPA_FPR" "$WORK_DIR/base/usr/share/keyrings/fex-emu-archive-keyring.gpg"
   fetch_key_by_fpr "$KISAK_PPA_FPR" "$WORK_DIR/base/usr/share/keyrings/kisak-mesa-archive-keyring.gpg"
+  fetch_key_by_fpr "$XTRADEB_PPA_FPR" "$WORK_DIR/base/usr/share/keyrings/xtradeb-apps.gpg"
   fetch_mozilla_key "$WORK_DIR/base/etc/apt/keyrings/packages.mozilla.org.asc"
 
   log "Bootstrapping HTTPS certificates & APT repositories in base ARM64 rootfs..."
@@ -516,11 +532,15 @@ FEXLIST
 deb [arch=arm64 signed-by=/usr/share/keyrings/kisak-mesa-archive-keyring.gpg] https://ppa.launchpadcontent.net/kisak/kisak-mesa/ubuntu noble main
 MESALIST
 
+  cat <<'XTRADEBLIST' | sudo tee "$WORK_DIR/base/etc/apt/sources.list.d/xtradeb-apps.list" >/dev/null
+deb [arch=arm64 signed-by=/usr/share/keyrings/xtradeb-apps.gpg] https://ppa.launchpadcontent.net/xtradeb/apps/ubuntu noble main
+XTRADEBLIST
+
   cat <<'MOZLIST' | sudo tee "$WORK_DIR/base/etc/apt/sources.list.d/mozilla.list" >/dev/null
 deb [arch=arm64 signed-by=/etc/apt/keyrings/packages.mozilla.org.asc] https://packages.mozilla.org/apt mozilla main
 MOZLIST
 
-  log "Upgrading Ubuntu 24.04 base & installing shared GPU, FEX-Emu, Firefox, MPV & workstation stack..."
+  log "Upgrading Ubuntu 24.04 base & installing shared GPU, FEX-Emu, Chromium, Firefox, MPV & workstation stack..."
   run_in_rootfs "$WORK_DIR/base" /bin/bash -euxc '
     apt-get update
     apt-get full-upgrade -y
@@ -540,7 +560,7 @@ MOZLIST
       libxshmfence1 libwayland-client0 \
       mesa-utils vulkan-tools \
       pulseaudio-utils libpulse0 pavucontrol alsa-utils \
-      firefox mpv \
+      chromium firefox mpv \
       fex-emu-armv8.0 \
       fonts-noto-core fonts-noto-color-emoji fonts-dejavu-core fonts-liberation
 
@@ -556,6 +576,29 @@ MOZLIST
         ln -sfn "${icd}_icd.json" "/usr/share/vulkan/icd.d/${icd}_icd.aarch64.json"
       fi
     done
+
+    mkdir -p /etc/chromium.d /etc/xdg
+    printf "%s\n" "export CHROMIUM_FLAGS=\"\$CHROMIUM_FLAGS --no-sandbox --no-zygote --disable-gpu-sandbox --disable-dev-shm-usage --ozone-platform-hint=auto\"" \
+      > /etc/chromium.d/linuxdroid
+    if [ -f /usr/share/applications/chromium.desktop ] && ! grep -q -- "--no-sandbox" /usr/share/applications/chromium.desktop; then
+      sed -i "s#^Exec=\\([^ ]*chromium[^ ]*\\)#Exec=\\1 --no-sandbox --no-zygote --disable-gpu-sandbox --disable-dev-shm-usage --ozone-platform-hint=auto#" /usr/share/applications/chromium.desktop
+    fi
+    update-alternatives --install /usr/bin/x-www-browser x-www-browser /usr/bin/chromium 200 || true
+    update-alternatives --install /usr/bin/gnome-www-browser gnome-www-browser /usr/bin/chromium 200 || true
+    update-alternatives --set x-www-browser /usr/bin/chromium || true
+    update-alternatives --set gnome-www-browser /usr/bin/chromium || true
+    cat > /etc/xdg/mimeapps.list <<MIME
+[Default Applications]
+x-scheme-handler/http=chromium.desktop
+x-scheme-handler/https=chromium.desktop
+text/html=chromium.desktop
+application/xhtml+xml=chromium.desktop
+application/x-extension-htm=chromium.desktop
+application/x-extension-html=chromium.desktop
+application/x-extension-shtml=chromium.desktop
+application/x-extension-xhtml=chromium.desktop
+application/x-extension-xht=chromium.desktop
+MIME
   '
 
   log "Installing Fastfetch (ARM64)..."
@@ -604,9 +647,9 @@ MOZLIST
     '
   fi
   stage_linuxfs_overlay "$WORK_DIR/kde" "Ubuntu 24.04 LTS — KDE Plasma (Wayland)"
-  sudo sed -i -E 's#<default>[^<]*systemsettings\.desktop[^<]*</default>#<default>applications:systemsettings.desktop,applications:org.kde.dolphin.desktop,applications:firefox.desktop</default>#g' \
+  sudo sed -i -E 's#<default>[^<]*systemsettings\.desktop[^<]*</default>#<default>applications:systemsettings.desktop,applications:org.kde.dolphin.desktop,applications:chromium.desktop</default>#g' \
     "$WORK_DIR/kde/usr/share/plasma/plasmoids/org.kde.plasma.taskmanager/contents/config/main.xml" || true
-  sudo sed -i 's#panel\.addWidget("org\.kde\.plasma\.icontasks")#var icontasks = panel.addWidget("org.kde.plasma.icontasks"); icontasks.currentConfigGroup = ["General"]; icontasks.writeConfig("launchers", "applications:systemsettings.desktop,applications:org.kde.dolphin.desktop,applications:firefox.desktop");#' \
+  sudo sed -i 's#panel\.addWidget("org\.kde\.plasma\.icontasks")#var icontasks = panel.addWidget("org.kde.plasma.icontasks"); icontasks.currentConfigGroup = ["General"]; icontasks.writeConfig("launchers", "applications:systemsettings.desktop,applications:org.kde.dolphin.desktop,applications:chromium.desktop");#' \
     "$WORK_DIR/kde/usr/share/plasma/layout-templates/org.kde.plasma.desktop.defaultPanel/contents/layout.js" || true
   smoke_test_rootfs "$WORK_DIR/kde" "/usr/bin/startplasma-wayland"
   local kde_archive="$OUT_DIR/linuxdroid-ubuntu-kde-arm64.tar.zst"
@@ -651,7 +694,7 @@ catalog = {
             "id": "ubuntu-kde-arm64",
             "title": "Ubuntu 24.04 LTS — KDE Plasma (Wayland)",
             "desktop": "kde",
-            "description": "Full KDE Plasma Breeze desktop with Konsole, Dolphin, Kate, Okular, Firefox, MPV, FEX-Emu, and hardware SoC Vulkan/OpenGL.",
+            "description": "Full KDE Plasma Breeze desktop with Konsole, Dolphin, Kate, Okular, Chromium, MPV, FEX-Emu, and hardware SoC Vulkan/OpenGL.",
             "url": f"{base}/linuxdroid-ubuntu-kde-arm64.tar.zst",
             "sha256": kde_sha,
             "size_bytes": int(kde_size),
@@ -660,7 +703,7 @@ catalog = {
             "id": "ubuntu-xfce-arm64",
             "title": "Ubuntu 24.04 LTS — XFCE4 Workstation",
             "desktop": "xfce",
-            "description": "Lightweight XFCE4 desktop with Thunar, XFCE Terminal, Mousepad, Atril, Firefox, MPV, FEX-Emu, and hardware SoC Vulkan/OpenGL.",
+            "description": "Lightweight XFCE4 desktop with Thunar, XFCE Terminal, Mousepad, Atril, Chromium, MPV, FEX-Emu, and hardware SoC Vulkan/OpenGL.",
             "url": f"{base}/linuxdroid-ubuntu-xfce-arm64.tar.zst",
             "sha256": xfce_sha,
             "size_bytes": int(xfce_size),
