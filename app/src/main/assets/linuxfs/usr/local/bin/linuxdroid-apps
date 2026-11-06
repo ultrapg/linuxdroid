@@ -108,6 +108,7 @@ ALL_ITEMS=(
   "warehouse|Warehouse — Flatpak app store"
   "fex-rootfs|FEX RootFS — run x86_64 apps"
   "chromium|Chromium — web browser"
+  "firefox|Firefox — web browser"
   "vscode|VS Code — code editor"
   "vscodium|VSCodium — open-source code editor"
   "blender|Blender — 3D creation"
@@ -147,6 +148,9 @@ is_installed() {
         [ -x /usr/lib/chromium/chromium ] || \
         [ -x /usr/lib/chromium-browser/chromium-browser ]
       }
+      ;;
+    firefox)
+      pkg_not_broken firefox && [ -x /usr/lib/firefox/firefox ]
       ;;
     vscode)
       pkg_not_broken code && command -v code >/dev/null 2>&1
@@ -351,6 +355,23 @@ install_chromium() {
   '
   /usr/local/bin/linuxdroid-default-browser --force || true
   echo "==> Chromium installed and set as the default browser."
+}
+
+install_firefox() {
+  echo "==> Installing Firefox (native ARM64 .deb from packages.mozilla.org, no Snap)..."
+  ensure_repo_prereqs
+  sudo sh -c '
+    set -e
+    install -d -m 0755 /etc/apt/keyrings
+    curl -fsSL --retry 3 https://packages.mozilla.org/apt/repo-signing-key.gpg -o /etc/apt/keyrings/packages.mozilla.org.asc
+    chmod 644 /etc/apt/keyrings/packages.mozilla.org.asc
+    echo "deb [arch=arm64 signed-by=/etc/apt/keyrings/packages.mozilla.org.asc] https://packages.mozilla.org/apt mozilla main" \
+      > /etc/apt/sources.list.d/mozilla.list
+    printf "%s\n" "Package: firefox*" "Pin: origin packages.mozilla.org" "Pin-Priority: 1000" \
+      > /etc/apt/preferences.d/linuxdroid-firefox
+  '
+  apt_install firefox
+  echo "==> Firefox installed."
 }
 
 install_vscodium() {
@@ -742,6 +763,7 @@ run_action() {
     warehouse|flatpak|flathub) install_warehouse ;;
     fex-rootfs) install_fex_rootfs ;;
     chromium|chrome) install_chromium ;;
+    firefox) install_firefox ;;
     vscode) install_vscode ;;
     vscodium) install_vscodium ;;
     blender) install_blender ;;
@@ -770,7 +792,7 @@ run_action() {
       return 0
       ;;
     *)
-      echo "Usage: linuxdroid-apps [media-codecs | warehouse | fex-rootfs | chromium | vscode | vscodium | blender | krita | obs-studio | kdenlive | libreoffice | gimp | devtools | rust | golang | openjdk | docker-cli | podman | --repair | --list]"
+      echo "Usage: linuxdroid-apps [media-codecs | warehouse | fex-rootfs | chromium | firefox | vscode | vscodium | blender | krita | obs-studio | kdenlive | libreoffice | gimp | devtools | rust | golang | openjdk | docker-cli | podman | --repair | --list]"
       return 1
       ;;
   esac

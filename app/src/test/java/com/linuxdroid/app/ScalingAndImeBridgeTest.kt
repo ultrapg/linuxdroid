@@ -86,9 +86,10 @@ class ScalingAndImeBridgeTest {
     }
 
     @Test
-    fun fallbackDesktopCatalogUsesChromiumBrowser() {
+    fun fallbackDesktopCatalogHasNoPreinstalledBrowser() {
         for (edition in DesktopCatalog.FALLBACK_EDITIONS) {
-            assertTrue(edition.description.contains("Chromium"))
+            assertFalse(edition.description.contains("Firefox", ignoreCase = true))
+            assertFalse(edition.description.contains("Chromium", ignoreCase = true))
         }
     }
 }
