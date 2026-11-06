@@ -320,7 +320,7 @@ object SessionPrefs {
 
     /** GPU acceleration for apps that support it (browser, video, creative tools). The desktop shell stays software-composited. */
     fun gpuApps(context: Context): Boolean =
-        prefs(context).getBoolean("gpu_apps", true)
+        prefs(context).getBoolean("gpu_apps", false)
 
     fun setGpuApps(context: Context, enabled: Boolean) {
         prefs(context).edit().putBoolean("gpu_apps", enabled).apply()

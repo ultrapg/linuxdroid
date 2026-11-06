@@ -17,28 +17,20 @@ if [ "${LINUXDROID_GPU_ACTIVE:-}" = "turnip" ] || [ "${LINUXDROID_GPU_ACTIVE:-}"
   unset LIBGL_ALWAYS_SOFTWARE
   export MOZ_WEBRENDER=1
   export mesa_glthread=true
-  if [ "${XDG_SESSION_TYPE:-}" = "wayland" ]; then
-    export GDK_BACKEND=x11
-    export QT_QPA_PLATFORM=xcb
-    export SDL_VIDEODRIVER=x11
-  fi
 fi
 
-# Per-application profiles. Blender does not honour GDK/QT/SDL backend hints and would pick Wayland+dmabuf,
-# which software-composited KWin cannot accept (black window). Force X11 (Xwayland) with the shm present path.
+# Per-application profiles: apps stay on native Wayland (no X11 forcing).
 if [ "$#" -gt 0 ]; then
   case "$(basename "$1")" in
     blender|blender-launcher)
-      unset WAYLAND_DISPLAY
-      export DISPLAY="${DISPLAY:-:0}" GHOST_BACKEND=X11 XDG_SESSION_TYPE=x11
-      export ZINK_DESCRIPTORS=lazy GALLIUM_THREAD=0 MESA_VK_WSI_DEBUG=sw
+      export ZINK_DESCRIPTORS=lazy GALLIUM_THREAD=0
       ;;
     chromium|chromium-browser|google-chrome|google-chrome-stable|brave-browser)
       export GALLIUM_THREAD=0
-      set -- "$1" --ozone-platform=x11 --use-angle=vulkan --enable-features=Vulkan "${@:2}"
+      set -- "$1" --ozone-platform=wayland "${@:2}"
       ;;
     firefox)
-      export MOZ_ENABLE_WAYLAND=0 MOZ_WEBRENDER=1 GALLIUM_THREAD=0
+      export MOZ_ENABLE_WAYLAND=1 MOZ_WEBRENDER=1 GALLIUM_THREAD=0
       ;;
   esac
 fi
