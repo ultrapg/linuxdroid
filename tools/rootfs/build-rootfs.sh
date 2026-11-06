@@ -4,7 +4,7 @@
 #   - Fresh Mesa Vulkan & OpenGL stack (Venus, VirGL, PanVK/Panfrost, Zink, Lavapipe/LLVMpipe)
 #   - Qualcomm Adreno KGSL Mesa Turnip (DD-Turnip-v0.3.4, protected via dpkg-divert)
 #   - FEX-Emu (fex-emu-armv8.0) preferred for x86/x86_64 Linux binary translation
-#   - No preinstalled browser: Chromium and Firefox install on demand via linuxdroid-apps; MPV included
+#   - Chromium (xtradeb PPA, default browser) & MPV preinstalled; Firefox installs on demand via linuxdroid-apps
 #   - LinuxDroid guest workstation bridges (D-Bus UPower/NetworkManager, IME, clipboard, root)
 
 set -euo pipefail
@@ -14,7 +14,7 @@ OUT_DIR="${OUT_DIR:-$REPO_ROOT/dist}"
 WORK_DIR="${WORK_DIR:-/tmp/linuxdroid-rootfs-build}"
 CACHE_DIR="${CACHE_DIR:-$WORK_DIR/cache}"
 GITHUB_REPO="${GITHUB_REPO:-ultrapg/linuxdroid}"
-RELEASE_TAG="${RELEASE_TAG:-v1.0.40}"
+RELEASE_TAG="${RELEASE_TAG:-v1.0.42}"
 
 UBUNTU_BASE_URL="https://cdimage.ubuntu.com/ubuntu-base/releases/24.04/release/ubuntu-base-24.04.5-base-arm64.tar.gz"
 UBUNTU_BASE_SHA256="a91d5a93010193712d346d761372b7c9db6dfcf093893161c64ca107f05914f2"
@@ -29,6 +29,7 @@ TALLOC_SHA256="dc46c40b9f46bb34dd97fe41f548b0e8b247b77a918576733c528e83abd854dd"
 
 FEX_PPA_FPR="EDB98BFE8A2310DC9C4A376E76DBFEBEA206F5AC"
 KISAK_PPA_FPR="EB8B81E14DA65431D7504EA8F63F0F2B90935439"
+XTRADEB_PPA_FPR="5301FA4FD93244FBC6F6149982BB6851C64F6880"
 MOZILLA_APT_FPR="35BAA0B33E9EB396F59CA838C0BA5CE6DC6315A3"
 
 log() {
@@ -261,7 +262,7 @@ smoke_test_rootfs() {
     test -x /usr/bin/FEXInterpreter
     test -x /usr/bin/FEXRootFSFetcher
     ! test -e /usr/bin/firefox
-    ! test -e /usr/bin/chromium
+    test -x /usr/bin/chromium
     test -x /usr/bin/mpv
     test -x /usr/bin/Xwayland
     test -x /usr/bin/vulkaninfo
@@ -498,6 +499,7 @@ APTPIN
   log "Installing verified GPG keys for FEX-Emu PPA and Kisak Fresh Mesa PPA..."
   fetch_key_by_fpr "$FEX_PPA_FPR" "$WORK_DIR/base/usr/share/keyrings/fex-emu-archive-keyring.gpg"
   fetch_key_by_fpr "$KISAK_PPA_FPR" "$WORK_DIR/base/usr/share/keyrings/kisak-mesa-archive-keyring.gpg"
+  fetch_key_by_fpr "$XTRADEB_PPA_FPR" "$WORK_DIR/base/usr/share/keyrings/xtradeb-apps.gpg"
 
   log "Bootstrapping HTTPS certificates & APT repositories in base ARM64 rootfs..."
   run_in_rootfs "$WORK_DIR/base" /bin/bash -euxc '
@@ -509,11 +511,17 @@ APTPIN
 deb [arch=arm64 signed-by=/usr/share/keyrings/fex-emu-archive-keyring.gpg] https://ppa.launchpadcontent.net/fex-emu/fex/ubuntu noble main
 FEXLIST
 
+  cat <<'XTRADEBLIST' | sudo tee "$WORK_DIR/base/etc/apt/sources.list.d/xtradeb-apps.list" >/dev/null
+deb [arch=arm64 signed-by=/usr/share/keyrings/xtradeb-apps.gpg] https://ppa.launchpadcontent.net/xtradeb/apps/ubuntu noble main
+XTRADEBLIST
+  printf '%s\n' "Package: *" "Pin: release o=LP-PPA-xtradeb-apps" "Pin-Priority: 100" "" "Package: chromium*" "Pin: release o=LP-PPA-xtradeb-apps" "Pin-Priority: 1001" "" "Package: chromium-browser" "Pin: release *" "Pin-Priority: -1" \
+    | sudo tee "$WORK_DIR/base/etc/apt/preferences.d/linuxdroid-chromium" >/dev/null
+
   cat <<'MESALIST' | sudo tee "$WORK_DIR/base/etc/apt/sources.list.d/kisak-mesa.list" >/dev/null
 deb [arch=arm64 signed-by=/usr/share/keyrings/kisak-mesa-archive-keyring.gpg] https://ppa.launchpadcontent.net/kisak/kisak-mesa/ubuntu noble main
 MESALIST
 
-  log "Upgrading Ubuntu 24.04 base & installing shared GPU, FEX-Emu, MPV & workstation stack..."
+  log "Upgrading Ubuntu 24.04 base & installing shared GPU, FEX-Emu, Chromium, MPV & workstation stack..."
   run_in_rootfs "$WORK_DIR/base" /bin/bash -euxc '
     apt-get update
     apt-get full-upgrade -y
@@ -533,7 +541,7 @@ MESALIST
       libxshmfence1 libwayland-client0 \
       mesa-utils vulkan-tools \
       pulseaudio-utils libpulse0 pavucontrol alsa-utils \
-      mpv \
+      chromium mpv \
       fex-emu-armv8.0 \
       fonts-noto-core fonts-noto-color-emoji fonts-dejavu-core fonts-liberation
 
@@ -544,6 +552,11 @@ MESALIST
       ln -sfn FEX /usr/bin/FEXInterpreter
       ln -sfn FEX /usr/bin/FEXLoader
     fi
+    mkdir -p /etc/chromium.d /etc/xdg
+    printf "%s\n" "export CHROMIUM_FLAGS=\"\$CHROMIUM_FLAGS --no-sandbox --no-zygote --disable-gpu-sandbox --disable-dev-shm-usage --ozone-platform-hint=auto\"" > /etc/chromium.d/linuxdroid
+    update-alternatives --install /usr/bin/x-www-browser x-www-browser /usr/bin/chromium 200
+    update-alternatives --set x-www-browser /usr/bin/chromium
+    printf "[Default Applications]\nx-scheme-handler/http=chromium.desktop\nx-scheme-handler/https=chromium.desktop\ntext/html=chromium.desktop\napplication/xhtml+xml=chromium.desktop\n" > /etc/xdg/mimeapps.list
     for icd in virtio freedreno panfrost lvp; do
       if [ -f "/usr/share/vulkan/icd.d/${icd}_icd.json" ] && [ ! -e "/usr/share/vulkan/icd.d/${icd}_icd.aarch64.json" ]; then
         ln -sfn "${icd}_icd.json" "/usr/share/vulkan/icd.d/${icd}_icd.aarch64.json"
@@ -644,7 +657,7 @@ catalog = {
             "id": "ubuntu-kde-arm64",
             "title": "Ubuntu 24.04 LTS — KDE Plasma (Wayland)",
             "desktop": "kde",
-            "description": "Full KDE Plasma Breeze desktop with Konsole, Dolphin, Kate, Okular, MPV, FEX-Emu, and hardware SoC Vulkan/OpenGL.",
+            "description": "Full KDE Plasma Breeze desktop with Konsole, Dolphin, Kate, Okular, Chromium, MPV, FEX-Emu, and hardware SoC Vulkan/OpenGL.",
             "url": f"{base}/linuxdroid-ubuntu-kde-arm64.tar.zst",
             "sha256": kde_sha,
             "size_bytes": int(kde_size),
@@ -653,7 +666,7 @@ catalog = {
             "id": "ubuntu-xfce-arm64",
             "title": "Ubuntu 24.04 LTS — XFCE4 Workstation",
             "desktop": "xfce",
-            "description": "Lightweight XFCE4 desktop with Thunar, XFCE Terminal, Mousepad, Atril, MPV, FEX-Emu, and hardware SoC Vulkan/OpenGL.",
+            "description": "Lightweight XFCE4 desktop with Thunar, XFCE Terminal, Mousepad, Atril, Chromium, MPV, FEX-Emu, and hardware SoC Vulkan/OpenGL.",
             "url": f"{base}/linuxdroid-ubuntu-xfce-arm64.tar.zst",
             "sha256": xfce_sha,
             "size_bytes": int(xfce_size),
