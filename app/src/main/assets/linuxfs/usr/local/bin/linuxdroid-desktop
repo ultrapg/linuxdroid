@@ -454,8 +454,23 @@ sync_live_kde_launchers() {
   local default_launchers="applications:systemsettings.desktop,applications:org.kde.dolphin.desktop,applications:chromium.desktop"
   local stamp="$HOME/.local/share/linuxdroid/launchers-v5" first=1
   [ -e "$stamp" ] && first=0
+  # Browsers are installed on demand: never pin a missing one (it renders as a blank icon), and pin an
+  # installed one exactly once so it shows up in the taskbar after the user installs it.
+  local missing_csv="" add_csv="" b
+  for b in chromium firefox; do
+    if [ -f "/usr/share/applications/$b.desktop" ]; then
+      if [ ! -e "$HOME/.local/share/linuxdroid/pinned-$b" ]; then
+        add_csv="${add_csv:+$add_csv,}applications:$b.desktop"
+      fi
+    else
+      missing_csv="${missing_csv:+$missing_csv,}applications:$b.desktop"
+    fi
+  done
   local js='
-    var defaults = "'"$default_launchers"'";
+    var missing = "'"$missing_csv"'".split(",").filter(function (x) { return x.length > 0; });
+    var addList = "'"$add_csv"'".split(",").filter(function (x) { return x.length > 0; });
+    function isMissing(l) { return missing.indexOf(l) >= 0; }
+    var defaults = "'"$default_launchers"'".split(",").filter(function (l) { return !isMissing(l); }).join(",");
     var forceReset = '"$([ "$first" = 1 ] && echo true || echo false)"';
     var dropDiscover = '"$([ -e /usr/share/applications/org.kde.discover.desktop ] && echo false || echo true)"';
     var ps = panels();
@@ -479,8 +494,11 @@ sync_live_kde_launchers() {
             continue;
           }
           var keep = cur.split(",").filter(function (l) {
-            return l.length > 0 && !(dropDiscover && l.indexOf("org.kde.discover.desktop") >= 0);
+            return l.length > 0 && !isMissing(l) && !(dropDiscover && l.indexOf("org.kde.discover.desktop") >= 0);
           });
+          for (var a = 0; a < addList.length; a++) {
+            if (keep.indexOf(addList[a]) < 0) { keep.push(addList[a]); }
+          }
           if (keep.length == 0) {
             w.writeConfig("launchers", defaults);
           } else if (keep.join(",") != cur) {
@@ -495,6 +513,9 @@ sync_live_kde_launchers() {
     org.kde.PlasmaShell.evaluateScript string:"$js" 2>/dev/null || true)"
   if printf '%s' "$reply" | grep -q "LAUNCHERS_READY:"; then
     mkdir -p "$HOME/.local/share/linuxdroid" && : > "$stamp"
+    for b in chromium firefox; do
+      [ -f "/usr/share/applications/$b.desktop" ] && : > "$HOME/.local/share/linuxdroid/pinned-$b"
+    done
     return 0
   fi
   return 1
@@ -799,6 +820,9 @@ if not os.path.exists(xfce_stamp) or not os.path.isfile(panel_target):
         "/etc/xdg/xfce4/panel/default.xml",
     )
     pinned_desktops = ["xfce-settings-manager.desktop", "thunar.desktop", "chromium.desktop"]
+    # Browsers install on demand: on a real XFCE image, do not pin launchers whose .desktop file is missing.
+    if os.path.exists("/usr/share/applications/xfce-settings-manager.desktop"):
+        pinned_desktops = [d for d in pinned_desktops if os.path.exists("/usr/share/applications/" + d)]
     plugins_el = None
     panels_el = None
     for child in panel_root.findall("property"):
