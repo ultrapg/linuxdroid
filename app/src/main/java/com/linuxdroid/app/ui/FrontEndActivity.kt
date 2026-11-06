@@ -1457,8 +1457,8 @@ private fun HardwareTabContent(
     SectionCard {
         SectionHeader("Execution Engine")
         SettingToggleRow(
-            title = "GPU Desktop Compositing",
-            subtitle = "Draw the desktop, panels and window UIs on the GPU for smoother scrolling and animations. If it fails to start, LinuxDroid falls back to software automatically.",
+            title = "GPU Desktop (Hybrid)",
+            subtitle = "Render the Plasma desktop UI on the GPU while window compositing stays software for stability. If the shell fails to start on the GPU, LinuxDroid falls back to software automatically.",
             checked = gpuDesktopEnabled,
             onCheckedChange = onToggleGpuDesktop,
         )

@@ -141,7 +141,7 @@ class SessionBootStateTest {
         assertTrue("linuxdroid-desktop must disable KWin PRoot permission mismatch checks", desktopScript.contains("KWIN_WAYLAND_NO_PERMISSION_CHECKS=1"))
         assertTrue("linuxdroid-desktop must export MOZ_FORCE_DISABLE_E10S=1", desktopScript.contains("MOZ_FORCE_DISABLE_E10S=1"))
         assertTrue("linuxdroid-desktop must export ELECTRON_DISABLE_SANDBOX=1", desktopScript.contains("ELECTRON_DISABLE_SANDBOX=1"))
-        assertTrue("linuxdroid-desktop must set KWIN_COMPOSE=O2 and GALLIUM_THREAD=0 wrapper when GPU desktop is enabled", desktopScript.contains("KWIN_COMPOSE=O2") && desktopScript.contains("GALLIUM_THREAD=0"))
+        assertTrue("linuxdroid-desktop must run the hybrid GPU desktop (software KWin, GPU Plasma UI) with GALLIUM_THREAD=0", desktopScript.contains("hybrid GPU desktop") && desktopScript.contains("GALLIUM_THREAD=0"))
 
         val sessionScript = File(assetsRoot, "usr/local/bin/linuxdroid-session").readText()
         assertTrue("linuxdroid-session must preserve keymap.xkb in XDG_RUNTIME_DIR", sessionScript.contains("keymap.xkb"))

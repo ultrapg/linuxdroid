@@ -568,41 +568,23 @@ if [ "$desktop_choice" = "kde" ]; then
   export KWIN_SCREENSHOT_NO_PERMISSION_CHECKS=1
   unset MESA_NO_ERROR
   if [ "$gpu_desktop" = 1 ]; then
-    # GPU desktop: KWin composites with OpenGL 2.0/GLES (Zink/Turnip or Venus/VirGL from gpu.env) and
-    # Plasma's Qt Quick scene graph renders on the GPU. Wrap /usr/bin/kwin_wayland with GALLIUM_THREAD=0
-    # so KWin's wl_shm client texture upload does not race Gallium's threaded context.
+    # Hybrid GPU desktop: KWin keeps compositing with QPainter/wl_shm (stable on every device, no DRM/GBM
+    # needed), while Plasma's Qt Quick UI renders on the GPU (Zink/Turnip or Venus/VirGL from gpu.env).
+    # Apps use the GPU via linuxdroid-gpu. If the shell dies early the desktop restarts in full software mode.
+    export KWIN_COMPOSE=Q
     unset QT_QUICK_BACKEND LIBGL_ALWAYS_SOFTWARE
-    export KWIN_COMPOSE=O2
+    export GALLIUM_THREAD=0
     if [ "${LINUXDROID_GPU_ACTIVE:-}" = "turnip" ]; then
       export MESA_LOADER_DRIVER_OVERRIDE="${MESA_LOADER_DRIVER_OVERRIDE:-zink}"
       export GALLIUM_DRIVER="${GALLIUM_DRIVER:-zink}"
       export LIBGL_KOPPER_DRI2=true
+      export MESA_VK_WSI_DEBUG=sw
     else
       export GALLIUM_DRIVER="${GALLIUM_DRIVER:-virpipe}"
     fi
-    render_nodes=""
-    for rn in /dev/dri/renderD*; do
-      [ -e "$rn" ] || continue
-      render_nodes="${render_nodes:+$render_nodes:}$rn"
-    done
-    if [ -n "$render_nodes" ]; then
-      export KWIN_RENDER_NODES="$render_nodes"
-      export KWIN_DRM_DEVICES="$render_nodes"
-    fi
-    kwin_wrap_dir="${XDG_RUNTIME_DIR:-/run/linuxdroid}/kwin"
-    mkdir -p "$kwin_wrap_dir" 2>/dev/null || true
-    cat > "$kwin_wrap_dir/kwin_wayland" <<KWINWRAP
-#!/bin/sh
-export GALLIUM_THREAD=0
-exec /usr/bin/kwin_wayland "\$@" 2>>"$kwin_gpu_log"
-KWINWRAP
-    chmod 755 "$kwin_wrap_dir/kwin_wayland" 2>/dev/null || true
-    export PATH="$kwin_wrap_dir:$PATH"
-    : > "$kwin_gpu_log" 2>/dev/null || true
-    "$KWRITECONFIG" --file kwinrc --group Compositing --key Backend OpenGL 2>/dev/null || true
-    "$KWRITECONFIG" --file kwinrc --group Compositing --key GLCore false 2>/dev/null || true
-    "$KWRITECONFIG" --file kwinrc --group Compositing --key OpenGLIsUnsafe false 2>/dev/null || true
-    echo "== linuxdroid-desktop: GPU desktop compositing enabled (${LINUXDROID_GPU_ACTIVE:-gpu}, KWIN_RENDER_NODES=${KWIN_RENDER_NODES:-none})"
+    unset KWIN_RENDER_NODES KWIN_DRM_DEVICES
+    "$KWRITECONFIG" --file kwinrc --group Compositing --key Backend QPainter 2>/dev/null || true
+    echo "== linuxdroid-desktop: hybrid GPU desktop (KWin software compositing + GPU Plasma UI, ${LINUXDROID_GPU_ACTIVE:-gpu})"
   else
     # Software desktop: nested KWin uses QPainter wl_shm into LinuxDroid's Vulkan compositor so it
     # starts reliably on any device without DRM/GBM modesetting.
@@ -696,6 +678,7 @@ ENTRY
         sleep 0.1
       done
       [ "$wl1_ready" = "1" ] || exit 0
+      shell_up=0
       for _ in $(seq 1 300); do
         if dbus-send --session --dest=org.kde.plasmashell --type=method_call --print-reply /PlasmaShell org.freedesktop.DBus.Introspectable.Introspect 2>/dev/null | grep -q "org.kde.PlasmaShell"; then
           pkill -x ksplashqml 2>/dev/null || true
@@ -707,10 +690,18 @@ ENTRY
             sleep 0.25
           done
           write_status "READY|KDE Plasma desktop ready" "== [BOOT READY] KDE Plasma desktop ready"
+          shell_up=1
           break
         fi
         sleep 0.2
       done
+      if [ "'"$gpu_desktop"'" = "1" ] && [ "$shell_up" = "0" ]; then
+        echo "== linuxdroid-desktop: Plasma shell did not start with the GPU UI; falling back to software"
+        printf "plasmashell did not start within 60s on the GPU\n" > "'"$gpu_fail"'" 2>/dev/null || true
+        pkill -TERM -f startplasma-wayland 2>/dev/null || true
+        pkill -TERM -x kwin_wayland_wrapper 2>/dev/null || true
+        pkill -TERM -x kwin_wayland 2>/dev/null || true
+      fi
     ) &
     watcher_pid=$!
     trap "kill $watcher_pid 2>/dev/null || true" EXIT TERM INT

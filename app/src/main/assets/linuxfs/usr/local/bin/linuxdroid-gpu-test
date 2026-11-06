@@ -1,0 +1,39 @@
+#!/bin/bash
+# LinuxDroid GPU self-test: runs headless probes under the active GPU stack and records which stage fails.
+# Output: ~/.cache/linuxdroid/gpu-test.txt (shown in Settings > Diagnostics). Safe to run any time.
+set -u
+CACHE_DIR="${XDG_CACHE_HOME:-${HOME:-/home/linux}/.cache}/linuxdroid"
+mkdir -p "$CACHE_DIR" 2>/dev/null || true
+OUT="$CACHE_DIR/gpu-test.txt"
+if [ -r /etc/linuxdroid/gpu.env ]; then set -a; . /etc/linuxdroid/gpu.env; set +a; fi
+unset MESA_NO_ERROR LIBGL_ALWAYS_SOFTWARE
+export GALLIUM_THREAD=0
+
+step() {
+  local name="$1"; shift
+  local t0 rc
+  t0=$(date +%s)
+  local log; log="$(timeout 25 "$@" 2>&1)"; rc=$?
+  printf '[%s] rc=%s (%ss)\n' "$name" "$rc" "$(( $(date +%s) - t0 ))"
+  printf '%s\n' "$log" | head -n 12 | sed 's/^/    /'
+}
+
+{
+  echo "=== LinuxDroid GPU self-test ($(date -u '+%Y-%m-%d %H:%M:%S UTC')) ==="
+  echo "GPU_ACTIVE=${LINUXDROID_GPU_ACTIVE:-unknown} FAMILY=${LINUXDROID_GPU_FAMILY:-unknown} BL_GPU_APPS=${BL_GPU_APPS:-0}"
+  echo "KWIN_COMPOSE=${KWIN_COMPOSE:-unset} session=${XDG_SESSION_TYPE:-unset} DISPLAY=${DISPLAY:-unset} WAYLAND_DISPLAY=${WAYLAND_DISPLAY:-unset}"
+  command -v vulkaninfo >/dev/null 2>&1 && step "vulkan" vulkaninfo --summary
+  if command -v eglinfo >/dev/null 2>&1; then
+    step "egl-surfaceless" eglinfo -B -p surfaceless
+    step "egl-gbm" eglinfo -B -p gbm
+  fi
+  command -v glxinfo >/dev/null 2>&1 && [ -n "${DISPLAY:-}" ] && step "glx-zink" glxinfo -B
+  if command -v blender >/dev/null 2>&1 || [ -x /opt/blender/blender ]; then
+    b="$(command -v blender 2>/dev/null || echo /opt/blender/blender)"
+    step "blender-version" "$b" --version
+    step "blender-gpu-offscreen" "$b" -b --python-expr "import bpy,gpu;print('GPU backend:',gpu.platform.backend_type_get());print('GPU device:',gpu.platform.renderer_get())"
+  fi
+  echo "--- verdict ---"
+  if grep -q "rc=[1-9]" "$OUT.tmp" 2>/dev/null; then echo "Some GPU stages failed (see rc!=0 above)."; else echo "All headless GPU stages passed."; fi
+} > "$OUT.tmp" 2>&1
+mv -f "$OUT.tmp" "$OUT"

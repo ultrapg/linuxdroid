@@ -24,6 +24,26 @@ if [ "${LINUXDROID_GPU_ACTIVE:-}" = "turnip" ] || [ "${LINUXDROID_GPU_ACTIVE:-}"
   fi
 fi
 
+# Per-application profiles. Blender does not honour GDK/QT/SDL backend hints and would pick Wayland+dmabuf,
+# which software-composited KWin cannot accept (black window). Force X11 (Xwayland) with the shm present path.
+if [ "$#" -gt 0 ]; then
+  case "$(basename "$1")" in
+    blender|blender-launcher)
+      unset WAYLAND_DISPLAY
+      export DISPLAY="${DISPLAY:-:0}" GHOST_BACKEND=X11 XDG_SESSION_TYPE=x11
+      export ZINK_DESCRIPTORS=lazy GALLIUM_THREAD=0 MESA_VK_WSI_DEBUG=sw
+      ;;
+    chromium|chromium-browser|google-chrome|google-chrome-stable|brave-browser)
+      export GALLIUM_THREAD=0
+      set -- "$1" --ozone-platform=x11 --use-angle=vulkan --enable-features=Vulkan "${@:2}"
+      ;;
+    firefox)
+      export MOZ_ENABLE_WAYLAND=0 MOZ_WEBRENDER=1 GALLIUM_THREAD=0
+      ;;
+  esac
+fi
+export GALLIUM_THREAD=0
+
 if [ "$#" -eq 0 ]; then
   echo "usage: linuxdroid-gpu PROGRAM [ARGS...]" >&2
   exit 2
