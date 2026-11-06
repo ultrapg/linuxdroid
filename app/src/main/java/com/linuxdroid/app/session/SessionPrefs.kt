@@ -170,6 +170,13 @@ object SessionPrefs {
         prefs(context).edit().putInt("background_delay_sec", sec.coerceIn(0, 3600)).apply()
     }
 
+    fun permissionAsked(context: Context): Boolean =
+        prefs(context).getBoolean("permission_asked", false)
+
+    fun setPermissionAsked(context: Context) {
+        prefs(context).edit().putBoolean("permission_asked", true).apply()
+    }
+
     fun autoBootOnLaunch(context: Context): Boolean =
         prefs(context).getBoolean("auto_boot_on_launch", false)
 

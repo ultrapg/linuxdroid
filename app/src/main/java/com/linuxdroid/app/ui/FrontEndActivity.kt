@@ -133,8 +133,6 @@ class FrontEndActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
 
-        requestBasePermissionsIfNeeded()
-
         val skipAutoBoot = intent?.getBooleanExtra(EXTRA_SKIP_AUTOBOOT, false) == true
         if (savedInstanceState == null && !skipAutoBoot && SessionPrefs.autoBootOnLaunch(this) && LinuxRuntime.isReady(this)) {
             openDesktopSession()
@@ -161,19 +159,81 @@ class FrontEndActivity : ComponentActivity() {
         startActivity(Intent(this, SessionActivity::class.java))
     }
 
+    private var permissionFlowRunning = false
+    private var askedAllFilesAccess = false
+    private var askedNotificationSettings = false
+    private var askedAppSettings = false
+
+    private val permissionLauncher = registerForActivityResult(
+        androidx.activity.result.contract.ActivityResultContracts.RequestMultiplePermissions(),
+    ) {
+        permissionFlowRunning = false
+        // Continue with the next missing permission (or settings screen) once the dialog closed.
+        window.decorView.post { requestBasePermissionsIfNeeded() }
+    }
+
+    override fun onResume() {
+        super.onResume()
+        // Post so the window is attached and focused; this makes the system dialog show reliably on app start.
+        window.decorView.postDelayed({ requestBasePermissionsIfNeeded() }, 300L)
+    }
+
     private fun requestBasePermissionsIfNeeded() {
-        val needed = ArrayList<String>()
-        if (checkSelfPermission(Manifest.permission.WRITE_EXTERNAL_STORAGE) != PackageManager.PERMISSION_GRANTED) {
-            needed.add(Manifest.permission.READ_EXTERNAL_STORAGE)
-            needed.add(Manifest.permission.WRITE_EXTERNAL_STORAGE)
+        if (isFinishing || isDestroyed || permissionFlowRunning) return
+        val runtimeNeeded = ArrayList<String>()
+        if (Build.VERSION.SDK_INT < 30 &&
+            checkSelfPermission(Manifest.permission.WRITE_EXTERNAL_STORAGE) != PackageManager.PERMISSION_GRANTED
+        ) {
+            runtimeNeeded.add(Manifest.permission.READ_EXTERNAL_STORAGE)
+            runtimeNeeded.add(Manifest.permission.WRITE_EXTERNAL_STORAGE)
         }
         if (Build.VERSION.SDK_INT >= 33 &&
             checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED
         ) {
-            needed.add(Manifest.permission.POST_NOTIFICATIONS)
+            runtimeNeeded.add(Manifest.permission.POST_NOTIFICATIONS)
         }
-        if (needed.isNotEmpty()) {
-            requestPermissions(needed.toTypedArray(), 100)
+        if (runtimeNeeded.isNotEmpty()) {
+            val canAsk = runtimeNeeded.any { shouldShowRequestPermissionRationale(it) } ||
+                !SessionPrefs.permissionAsked(this)
+            if (canAsk) {
+                SessionPrefs.setPermissionAsked(this)
+                permissionFlowRunning = true
+                permissionLauncher.launch(runtimeNeeded.toTypedArray())
+                return
+            }
+            // The system no longer shows its dialog (denied twice): send the user to the app settings once.
+            if (!askedAppSettings) {
+                askedAppSettings = true
+                runCatching {
+                    startActivity(
+                        Intent(android.provider.Settings.ACTION_APPLICATION_DETAILS_SETTINGS)
+                            .setData(android.net.Uri.parse("package:$packageName")),
+                    )
+                }
+                return
+            }
+        }
+        if (Build.VERSION.SDK_INT >= 30 && !android.os.Environment.isExternalStorageManager() && !askedAllFilesAccess) {
+            askedAllFilesAccess = true
+            runCatching {
+                startActivity(
+                    Intent(android.provider.Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION)
+                        .setData(android.net.Uri.parse("package:$packageName")),
+                )
+            }.onFailure {
+                runCatching { startActivity(Intent(android.provider.Settings.ACTION_MANAGE_ALL_FILES_ACCESS_PERMISSION)) }
+            }
+            return
+        }
+        val nm = getSystemService(android.app.NotificationManager::class.java)
+        if (nm != null && !nm.areNotificationsEnabled() && !askedNotificationSettings) {
+            askedNotificationSettings = true
+            runCatching {
+                startActivity(
+                    Intent(android.provider.Settings.ACTION_APP_NOTIFICATION_SETTINGS)
+                        .putExtra(android.provider.Settings.EXTRA_APP_PACKAGE, packageName),
+                )
+            }
         }
     }
 
@@ -1907,6 +1967,49 @@ private fun SystemTabContent(
             text = "Built on open-source technologies including Mesa 3D (Turnip, Zink, VirGL & Venus), PRoot, FEX-Emu, PulseAudio, Termux, and DroidDeck runtime components.",
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+    }
+
+    // 5. Optional: battery optimization exemption for reliable background usage
+    var batteryUnrestricted by remember { mutableStateOf(isIgnoringBatteryOptimizations(settingsContext)) }
+    androidx.compose.runtime.LaunchedEffect(Unit) {
+        while (true) {
+            batteryUnrestricted = isIgnoringBatteryOptimizations(settingsContext)
+            kotlinx.coroutines.delay(1000L)
+        }
+    }
+    SectionCard {
+        SectionHeader("Battery (Optional)")
+        SettingToggleRow(
+            title = "Disable Battery Optimization",
+            subtitle = "Optional. Lets Linux keep running reliably in the background without Android stopping it. Only needed if you use Keep Running while the app is in the background.",
+            checked = batteryUnrestricted,
+            onCheckedChange = { want ->
+                if (want) requestIgnoreBatteryOptimizations(settingsContext) else openBatteryOptimizationSettings(settingsContext)
+            },
+        )
+    }
+}
+
+private fun isIgnoringBatteryOptimizations(context: android.content.Context): Boolean =
+    context.getSystemService(android.os.PowerManager::class.java)?.isIgnoringBatteryOptimizations(context.packageName) == true
+
+@android.annotation.SuppressLint("BatteryLife")
+private fun requestIgnoreBatteryOptimizations(context: android.content.Context) {
+    runCatching {
+        context.startActivity(
+            Intent(android.provider.Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS)
+                .setData(android.net.Uri.parse("package:${context.packageName}"))
+                .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK),
+        )
+    }.onFailure { openBatteryOptimizationSettings(context) }
+}
+
+private fun openBatteryOptimizationSettings(context: android.content.Context) {
+    runCatching {
+        context.startActivity(
+            Intent(android.provider.Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS)
+                .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK),
         )
     }
 }
