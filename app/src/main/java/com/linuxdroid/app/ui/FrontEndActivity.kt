@@ -160,8 +160,6 @@ class FrontEndActivity : ComponentActivity() {
     }
 
     private var permissionFlowRunning = false
-    private var askedAllFilesAccess = false
-    private var askedNotificationSettings = false
     private var askedAppSettings = false
 
     private val permissionLauncher = registerForActivityResult(
@@ -181,8 +179,8 @@ class FrontEndActivity : ComponentActivity() {
     private fun requestBasePermissionsIfNeeded() {
         if (isFinishing || isDestroyed || permissionFlowRunning) return
         val runtimeNeeded = ArrayList<String>()
-        if (Build.VERSION.SDK_INT < 30 &&
-            checkSelfPermission(Manifest.permission.WRITE_EXTERNAL_STORAGE) != PackageManager.PERMISSION_GRANTED
+        // targetSdk 28: the classic system popup is shown for storage on every Android version.
+        if (checkSelfPermission(Manifest.permission.WRITE_EXTERNAL_STORAGE) != PackageManager.PERMISSION_GRANTED
         ) {
             runtimeNeeded.add(Manifest.permission.READ_EXTERNAL_STORAGE)
             runtimeNeeded.add(Manifest.permission.WRITE_EXTERNAL_STORAGE)
@@ -211,28 +209,6 @@ class FrontEndActivity : ComponentActivity() {
                     )
                 }
                 return
-            }
-        }
-        if (Build.VERSION.SDK_INT >= 30 && !android.os.Environment.isExternalStorageManager() && !askedAllFilesAccess) {
-            askedAllFilesAccess = true
-            runCatching {
-                startActivity(
-                    Intent(android.provider.Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION)
-                        .setData(android.net.Uri.parse("package:$packageName")),
-                )
-            }.onFailure {
-                runCatching { startActivity(Intent(android.provider.Settings.ACTION_MANAGE_ALL_FILES_ACCESS_PERMISSION)) }
-            }
-            return
-        }
-        val nm = getSystemService(android.app.NotificationManager::class.java)
-        if (nm != null && !nm.areNotificationsEnabled() && !askedNotificationSettings) {
-            askedNotificationSettings = true
-            runCatching {
-                startActivity(
-                    Intent(android.provider.Settings.ACTION_APP_NOTIFICATION_SETTINGS)
-                        .putExtra(android.provider.Settings.EXTRA_APP_PACKAGE, packageName),
-                )
             }
         }
     }
