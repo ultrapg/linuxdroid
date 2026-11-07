@@ -243,6 +243,31 @@ int drmGetDeviceFromDevId(dev_t find_rdev, uint32_t flags, void *device) {
   return fn(find_rdev, flags, device);
 }
 
+int drmGetDevice2(int fd, uint32_t flags, void *device) {
+  struct stat st;
+  if (fd >= 0 && fstat(fd, &st) == 0 && S_ISCHR(st.st_mode) && synth_drm_kind_dev(st.st_rdev) != 0) {
+    return drmGetDeviceFromDevId(st.st_rdev, flags, device);
+  }
+  int (*fn)(int, uint32_t, void *) = (int (*)(int, uint32_t, void *)) real("drmGetDevice2");
+  return fn ? fn(fd, flags, device) : -ENOSYS;
+}
+
+char *drmGetRenderDeviceNameFromFd(int fd) {
+  if (synth_drm_kind_fd(fd) != 0) {
+    return strdup("/dev/dri/renderD128");
+  }
+  char *(*fn)(int) = (char *(*)(int)) real("drmGetRenderDeviceNameFromFd");
+  return fn ? fn(fd) : NULL;
+}
+
+char *drmGetDeviceNameFromFd2(int fd) {
+  if (synth_drm_kind_fd(fd) != 0) {
+    return strdup("/dev/dri/renderD128");
+  }
+  char *(*fn)(int) = (char *(*)(int)) real("drmGetDeviceNameFromFd2");
+  return fn ? fn(fd) : NULL;
+}
+
 static void copy_drm_field(char *dst, size_t *dst_len, const char *src) {
   size_t len = strlen(src);
   if (dst && *dst_len > 0) {

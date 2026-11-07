@@ -86,9 +86,8 @@ object GpuConfigGenerator {
                 env["MESA_LOADER_DRIVER_OVERRIDE"] = "zink"
                 env["GALLIUM_DRIVER"] = "zink"
                 env["ZINK_DESCRIPTORS"] = "lazy"
-                env["LIBGL_KOPPER_DRI2"] = "1"
-                env["MESA_GL_VERSION_OVERRIDE"] = "4.6"
-                env["MESA_GLSL_VERSION_OVERRIDE"] = "460"
+                env["LIBGL_KOPPER_DRI2"] = "true"
+                env["QT_WAYLAND_FORCE_NONBLOCKING_SWAP_SUPPORT"] = "1"
                 ResolvedGpuConfig(
                     requestedMode = requested,
                     activeBackend = "turnip",
@@ -123,7 +122,7 @@ object GpuConfigGenerator {
                 if (gpu.hasDriRenderNode || gpu.hasMaliNode) {
                     env["LIBGL_ALWAYS_SOFTWARE"] = "1"
                     env["GALLIUM_DRIVER"] = "virpipe"
-                    env["MESA_GL_VERSION_OVERRIDE"] = "4.3"
+                    env["MESA_GL_VERSION_OVERRIDE"] = "4.3COMPAT"
                     env["MESA_GLSL_VERSION_OVERRIDE"] = "430"
                     if (gpu.hasDriRenderNode) {
                         env.remove("LIBGL_ALWAYS_SOFTWARE")
@@ -131,7 +130,7 @@ object GpuConfigGenerator {
                 } else {
                     env["LIBGL_ALWAYS_SOFTWARE"] = "1"
                     env["GALLIUM_DRIVER"] = "virpipe"
-                    env["MESA_GL_VERSION_OVERRIDE"] = "4.3"
+                    env["MESA_GL_VERSION_OVERRIDE"] = "4.3COMPAT"
                     env["MESA_GLSL_VERSION_OVERRIDE"] = "430"
                 }
                 ResolvedGpuConfig(

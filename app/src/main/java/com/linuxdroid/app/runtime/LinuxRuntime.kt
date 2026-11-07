@@ -576,15 +576,17 @@ object LinuxRuntime {
     }
 
     /**
-     * Exposes Qualcomm `/dev/kgsl-3d0` or Mali `/dev/mali0` as synthetic DRM render and primary nodes
-     * (`/dev/dri/renderD128` and `/dev/dri/card0`) whenever native `/dev/dri/renderD128` is missing
+     * Exposes Qualcomm `/dev/kgsl-3d0` or Mali `/dev/mali0` as synthetic DRM render nodes
+     * (`/dev/dri/renderD128` and `/dev/dri/renderD0`) whenever native `/dev/dri/renderD128` is missing
      * or blocked by SELinux (`EACCES`).
      *
-     * Note: Do NOT create `renderD0` alongside `renderD128`: `libdrm`'s `drmFoldDuplicatedDevices()`
-     * folds devices sharing the same sysfs realpath and overwrites `nodes[DRM_NODE_RENDER]` with the
-     * last render node visited (`renderD0`), breaking callers that expect `/dev/dri/renderD128`.
-     * Similarly, `drmParsePlatformBusInfo()` and `drmParsePlatformDeviceInfo()` in `libdrm` require
-     * `OF_FULLNAME`, `OF_COMPATIBLE_N`, and `OF_COMPATIBLE_0` in `/sys/dev/char/$major:$minor/device/uevent`.
+     * Important `libdrm` internals:
+     * - `drmGetNodeTypeFromDevId(rdev)` computes `min = minor(rdev)` (`0` for `/dev/kgsl-3d0`) and
+     *   checks `access("/dev/dri/card0")`, `access("/dev/dri/controlD0")`, `access("/dev/dri/renderD0")`.
+     *   Binding `/dev/dri/renderD0` (and NOT `/dev/dri/card0`) ensures `libdrm` classifies `rdev` as
+     *   `DRM_NODE_RENDER (2)` instead of `DRM_NODE_PRIMARY (0)`.
+     * - `drmProcessPlatformDevice()` enumerates `/sys/dev/char/$major:$minor/device/drm`; keeping only
+     *   `renderD128` in `drm/` ensures `dev->nodes[DRM_NODE_RENDER]` resolves to `/dev/dri/renderD128`.
      */
     private fun bindKgslDrmIfNeeded(context: Context, specs: MutableList<String>) {
         if (GpuInfo.isAccessibleCharDevice("/dev/dri/renderD128")) return
@@ -617,7 +619,8 @@ object LinuxRuntime {
         val dev = st.st_rdev
         val major = ((dev shr 8) and 0xfffL) or ((dev shr 32) and 0xfffL.inv())
         val minor = (dev and 0xffL) or ((dev shr 12) and 0xffL.inv())
-        val nodes = linkedSetOf("card0", "renderD128")
+        val devNodes = linkedSetOf("renderD128", "renderD$minor")
+        val sysNodes = linkedSetOf("renderD128")
         val base = File(liveDir(context), "drm")
         val dri = File(base, "dri")
         val charNode = File(base, "sys/$major:$minor")
@@ -627,10 +630,12 @@ object LinuxRuntime {
             if (dri.exists()) dri.deleteRecursively()
             if (drmDir.exists()) drmDir.deleteRecursively()
             dri.mkdirs()
-            for (n in nodes) {
+            for (n in devNodes) {
+                File(dri, n).createNewFile()
+            }
+            for (n in sysNodes) {
                 val drm = File(drmDir, n)
                 drm.mkdirs()
-                File(dri, n).createNewFile()
                 FileUtils.writeString(File(drm, "dev"), "$major:$minor\n")
             }
             FileUtils.writeString(
@@ -653,14 +658,14 @@ object LinuxRuntime {
         }
         specs.add("${File(base, "sys").absolutePath}:/sys/dev/char")
         specs.add("${dri.absolutePath}:/dev/dri")
-        for (n in nodes) {
+        for (n in devNodes) {
             specs.add("$hostDevPath:/dev/dri/$n")
         }
         val drmClass = File(base, "class")
         runCatching {
             if (drmClass.exists()) drmClass.deleteRecursively()
             drmClass.mkdirs()
-            for (n in nodes) {
+            for (n in sysNodes) {
                 Os.symlink("/sys/dev/char/$major:$minor/device/drm/$n", File(drmClass, n).path)
             }
             specs.add("${drmClass.absolutePath}:/sys/class/drm")

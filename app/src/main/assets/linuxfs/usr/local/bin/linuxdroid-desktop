@@ -568,22 +568,16 @@ if [ "$desktop_choice" = "kde" ]; then
   export KWIN_SCREENSHOT_NO_PERMISSION_CHECKS=1
   unset MESA_NO_ERROR
   if [ "$gpu_desktop" = 1 ]; then
-    # Hybrid GPU desktop: KWin keeps compositing with QPainter/wl_shm (stable on every device, no DRM/GBM
-    # needed), while Plasma's Qt Quick UI renders on the GPU (Zink/Turnip or Venus/VirGL from gpu.env).
-    # Apps use the GPU via linuxdroid-gpu. If the shell dies early the desktop restarts in full software mode.
+    # Hybrid GPU desktop: KWin and Xwayland keep compositing with QPainter/wl_shm + software QML
+    # (stable on every device, no DRM/GBM needed), while /usr/local/bin/plasmashell enables GPU
+    # acceleration specifically for Plasma's Qt Quick shell on wayland-1 after verifying live pixel
+    # rendering. Apps use the GPU via linuxdroid-gpu.
     export KWIN_COMPOSE=Q
-    unset QT_QUICK_BACKEND LIBGL_ALWAYS_SOFTWARE
+    export QT_QUICK_BACKEND=software
+    unset MESA_LOADER_DRIVER_OVERRIDE LIBGL_KOPPER_DRI2 MESA_GL_VERSION_OVERRIDE MESA_GLSL_VERSION_OVERRIDE KWIN_RENDER_NODES KWIN_DRM_DEVICES
+    export LIBGL_ALWAYS_SOFTWARE=1
+    export GALLIUM_DRIVER=llvmpipe
     export GALLIUM_THREAD=0
-    export MESA_LOG=null
-    if [ "${LINUXDROID_GPU_ACTIVE:-}" = "turnip" ]; then
-      export MESA_LOADER_DRIVER_OVERRIDE="${MESA_LOADER_DRIVER_OVERRIDE:-zink}"
-      export GALLIUM_DRIVER="${GALLIUM_DRIVER:-zink}"
-      export LIBGL_KOPPER_DRI2=true
-      export MESA_VK_WSI_DEBUG=sw
-    else
-      export GALLIUM_DRIVER="${GALLIUM_DRIVER:-virpipe}"
-    fi
-    unset KWIN_RENDER_NODES KWIN_DRM_DEVICES
     "$KWRITECONFIG" --file kwinrc --group Compositing --key Backend QPainter 2>/dev/null || true
     echo "== linuxdroid-desktop: hybrid GPU desktop (KWin software compositing + GPU Plasma UI, ${LINUXDROID_GPU_ACTIVE:-gpu})"
   else
@@ -937,9 +931,13 @@ run_xwayland_desktop() {
   export QT_ACCESSIBILITY=1
   export QT_LINUX_ACCESSIBILITY_ALWAYS_ON=1
   if [ "${BL_GPU_DESKTOP:-0}" = "1" ]; then
-    unset LIBGL_ALWAYS_SOFTWARE
+    unset LIBGL_ALWAYS_SOFTWARE MESA_GL_VERSION_OVERRIDE MESA_GLSL_VERSION_OVERRIDE
     export GALLIUM_THREAD=0
     export MESA_LOG=null
+    if [ "${LINUXDROID_GPU_ACTIVE:-}" = "turnip" ]; then
+      export LIBGL_KOPPER_DRI2=true
+      export MESA_VK_WSI_DEBUG=sw
+    fi
   else
     unset MESA_LOADER_DRIVER_OVERRIDE LIBGL_KOPPER_DRI2 MESA_GL_VERSION_OVERRIDE MESA_GLSL_VERSION_OVERRIDE
     export LIBGL_ALWAYS_SOFTWARE=1

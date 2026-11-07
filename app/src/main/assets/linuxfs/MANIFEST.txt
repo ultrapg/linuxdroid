@@ -49,6 +49,7 @@
 0755 usr/local/bin/linuxdroid-session
 0755 usr/local/bin/linuxdroid-systembus
 0755 usr/local/bin/pkexec
+0755 usr/local/bin/plasmashell
 0755 usr/local/bin/su
 0755 usr/local/bin/sudo
 0755 usr/local/bin/systemctl

@@ -71,6 +71,11 @@ class DrmDevice(ctypes.Structure):
     ]
 
 try:
+    if os.path.exists("/usr/local/lib/libblsession.so"):
+        try:
+            ctypes.CDLL("/usr/local/lib/libblsession.so", mode=ctypes.RTLD_GLOBAL)
+        except Exception:
+            pass
     drm = ctypes.CDLL("libdrm.so.2")
     drm.drmGetDeviceFromDevId.argtypes = [ctypes.c_ulong, ctypes.c_uint, ctypes.POINTER(ctypes.POINTER(DrmDevice))]
     drm.drmGetDeviceFromDevId.restype = ctypes.c_int
@@ -83,14 +88,16 @@ try:
         dev_ptr = ctypes.POINTER(DrmDevice)()
         rc = drm.drmGetDeviceFromDevId(rdev, 0, ctypes.byref(dev_ptr))
         node_str = "none"
+        avail = 0
         if rc == 0 and bool(dev_ptr) and bool(dev_ptr.contents.nodes):
+            avail = dev_ptr.contents.available_nodes
             for idx in (2, 0, 1):
-                if dev_ptr.contents.available_nodes & (1 << idx):
+                if avail & (1 << idx):
                     raw = dev_ptr.contents.nodes[idx]
                     if raw:
                         node_str = raw.decode("utf-8", "replace")
                         break
-        print(f"drmGetDeviceFromDevId({label}, rdev={rdev}): rc={rc} node={node_str}")
+        print(f"drmGetDeviceFromDevId({label}, rdev={rdev}): rc={rc} avail=0x{avail:x} node={node_str}")
     if os.path.exists("/dev/dri/renderD128"):
         fd = os.open("/dev/dri/renderD128", os.O_RDWR | os.O_CLOEXEC)
         try:
@@ -162,6 +169,8 @@ except Exception as e:
 
 try:
     egl = ctypes.CDLL("libEGL.so.1")
+    egl.eglGetPlatformDisplay.argtypes = [ctypes.c_uint, ctypes.c_void_p, ctypes.c_void_p]
+    egl.eglGetPlatformDisplay.restype = ctypes.c_void_p
     egl.eglGetDisplay.argtypes = [ctypes.c_void_p]
     egl.eglGetDisplay.restype = ctypes.c_void_p
     egl.eglInitialize.argtypes = [ctypes.c_void_p, ctypes.POINTER(ctypes.c_int), ctypes.POINTER(ctypes.c_int)]
@@ -169,15 +178,15 @@ try:
     egl.eglQueryString.argtypes = [ctypes.c_void_p, ctypes.c_int]
     egl.eglQueryString.restype = ctypes.c_char_p
     egl.eglGetError.restype = ctypes.c_int
-    dpy = egl.eglGetDisplay(None)
+    dpy = egl.eglGetPlatformDisplay(0x31DD, None, None) or egl.eglGetDisplay(None)
     maj, mn = ctypes.c_int(0), ctypes.c_int(0)
     ok = egl.eglInitialize(dpy, ctypes.byref(maj), ctypes.byref(mn)) if dpy else 0
     if ok:
         vendor = (egl.eglQueryString(dpy, 0x3053) or b"").decode("utf-8", "replace")
         ver = (egl.eglQueryString(dpy, 0x3054) or b"").decode("utf-8", "replace")
-        print(f"EGL default display: OK ({maj.value}.{mn.value}) vendor='{vendor}' version='{ver}'")
+        print(f"EGL surfaceless display: OK ({maj.value}.{mn.value}) vendor='{vendor}' version='{ver}'")
     else:
-        print(f"EGL default display: init failed (dpy={dpy}, err=0x{egl.eglGetError():x})")
+        print(f"EGL surfaceless display: init failed (dpy={dpy}, err=0x{egl.eglGetError():x})")
 except Exception as e:
     print(f"EGL ctypes probe error: {e}")
 PY

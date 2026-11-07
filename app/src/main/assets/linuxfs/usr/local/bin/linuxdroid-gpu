@@ -15,6 +15,14 @@ unset MESA_NO_ERROR
 
 if [ "${LINUXDROID_GPU_ACTIVE:-}" = "turnip" ] || [ "${LINUXDROID_GPU_ACTIVE:-}" = "unified" ]; then
   unset LIBGL_ALWAYS_SOFTWARE
+  if [ "${LINUXDROID_GPU_ACTIVE:-}" = "turnip" ]; then
+    # Never override GL version to 4.6 without COMPAT; Mesa forces Core Profile and breaks
+    # QWaylandBlitter / Qt Quick / legacy GL shaders. Zink + Turnip natively supports 4.6 Compat.
+    unset MESA_GL_VERSION_OVERRIDE MESA_GLSL_VERSION_OVERRIDE
+    export LIBGL_KOPPER_DRI2=true
+    export MESA_VK_WSI_DEBUG=sw
+    export QT_WAYLAND_FORCE_NONBLOCKING_SWAP_SUPPORT=1
+  fi
   export MOZ_WEBRENDER=1
   export mesa_glthread=true
 fi

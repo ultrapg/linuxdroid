@@ -7,6 +7,11 @@ mkdir -p "$CACHE_DIR" 2>/dev/null || true
 OUT="$CACHE_DIR/gpu-test.txt"
 if [ -r /etc/linuxdroid/gpu.env ]; then set -a; . /etc/linuxdroid/gpu.env; set +a; fi
 unset MESA_NO_ERROR LIBGL_ALWAYS_SOFTWARE
+if [ "${LINUXDROID_GPU_ACTIVE:-}" = "turnip" ]; then
+  unset MESA_GL_VERSION_OVERRIDE MESA_GLSL_VERSION_OVERRIDE
+  export LIBGL_KOPPER_DRI2=true
+  export MESA_VK_WSI_DEBUG=sw
+fi
 export GALLIUM_THREAD=0
 
 step() {
@@ -58,6 +63,124 @@ apis = (egl.eglQueryString(dpy, 0x308D) or b"").decode("utf-8", "replace")
 print(f"Surfaceless EGL {maj.value}.{mn.value} vendor='{vendor}' version='{ver}' apis='{apis}'")
 PY
   fi
+
+  step "egl-pixel-render" python3 - <<'PY'
+import ctypes, os, sys
+
+if os.path.exists("/usr/local/lib/libblsession.so"):
+    try:
+        ctypes.CDLL("/usr/local/lib/libblsession.so", mode=ctypes.RTLD_GLOBAL)
+    except Exception:
+        pass
+
+egl = ctypes.CDLL("libEGL.so.1")
+gl = ctypes.CDLL("libGL.so.1")
+
+egl.eglGetPlatformDisplay.argtypes = [ctypes.c_uint, ctypes.c_void_p, ctypes.c_void_p]
+egl.eglGetPlatformDisplay.restype = ctypes.c_void_p
+egl.eglInitialize.argtypes = [ctypes.c_void_p, ctypes.POINTER(ctypes.c_int), ctypes.POINTER(ctypes.c_int)]
+egl.eglInitialize.restype = ctypes.c_uint
+egl.eglBindAPI.argtypes = [ctypes.c_uint]
+egl.eglBindAPI.restype = ctypes.c_uint
+egl.eglChooseConfig.argtypes = [ctypes.c_void_p, ctypes.POINTER(ctypes.c_int), ctypes.POINTER(ctypes.c_void_p), ctypes.c_int, ctypes.POINTER(ctypes.c_int)]
+egl.eglChooseConfig.restype = ctypes.c_uint
+egl.eglCreateContext.argtypes = [ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p, ctypes.POINTER(ctypes.c_int)]
+egl.eglCreateContext.restype = ctypes.c_void_p
+egl.eglCreatePbufferSurface.argtypes = [ctypes.c_void_p, ctypes.c_void_p, ctypes.POINTER(ctypes.c_int)]
+egl.eglCreatePbufferSurface.restype = ctypes.c_void_p
+egl.eglMakeCurrent.argtypes = [ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p]
+egl.eglMakeCurrent.restype = ctypes.c_uint
+egl.eglGetError.restype = ctypes.c_int
+
+dpy = egl.eglGetPlatformDisplay(0x31DD, None, None)
+maj, mn = ctypes.c_int(0), ctypes.c_int(0)
+if not dpy or not egl.eglInitialize(dpy, ctypes.byref(maj), ctypes.byref(mn)):
+    raise SystemExit(f"eglInitialize(surfaceless) failed err=0x{egl.eglGetError():x}")
+egl.eglBindAPI(0x30A2)
+cfg_attr = (ctypes.c_int * 13)(0x3033, 0x0001, 0x3024, 8, 0x3023, 8, 0x3022, 8, 0x3021, 8, 0x3040, 0x0008, 0x3038)
+cfg = ctypes.c_void_p()
+ncfg = ctypes.c_int(0)
+if not egl.eglChooseConfig(dpy, cfg_attr, ctypes.byref(cfg), 1, ctypes.byref(ncfg)) or ncfg.value < 1:
+    raise SystemExit(f"eglChooseConfig failed ncfg={ncfg.value} err=0x{egl.eglGetError():x}")
+pbuf_attr = (ctypes.c_int * 5)(0x3057, 64, 0x3056, 64, 0x3038)
+surf = egl.eglCreatePbufferSurface(dpy, cfg, pbuf_attr)
+ctx_attr = (ctypes.c_int * 1)(0x3038)
+ctx = egl.eglCreateContext(dpy, cfg, None, ctx_attr)
+if not ctx or not egl.eglMakeCurrent(dpy, surf, surf, ctx):
+    raise SystemExit(f"eglMakeCurrent failed ctx={ctx} surf={surf} err=0x{egl.eglGetError():x}")
+
+gl.glGetString.argtypes = [ctypes.c_uint]
+gl.glGetString.restype = ctypes.c_char_p
+gl.glGetIntegerv.argtypes = [ctypes.c_uint, ctypes.POINTER(ctypes.c_int)]
+gl.glViewport.argtypes = [ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_int]
+gl.glClearColor.argtypes = [ctypes.c_float, ctypes.c_float, ctypes.c_float, ctypes.c_float]
+gl.glClear.argtypes = [ctypes.c_uint]
+gl.glCreateShader.argtypes = [ctypes.c_uint]
+gl.glCreateShader.restype = ctypes.c_uint
+gl.glShaderSource.argtypes = [ctypes.c_uint, ctypes.c_int, ctypes.POINTER(ctypes.c_char_p), ctypes.POINTER(ctypes.c_int)]
+gl.glCompileShader.argtypes = [ctypes.c_uint]
+gl.glGetShaderiv.argtypes = [ctypes.c_uint, ctypes.c_uint, ctypes.POINTER(ctypes.c_int)]
+gl.glCreateProgram.restype = ctypes.c_uint
+gl.glAttachShader.argtypes = [ctypes.c_uint, ctypes.c_uint]
+gl.glBindAttribLocation.argtypes = [ctypes.c_uint, ctypes.c_uint, ctypes.c_char_p]
+gl.glLinkProgram.argtypes = [ctypes.c_uint]
+gl.glGetProgramiv.argtypes = [ctypes.c_uint, ctypes.c_uint, ctypes.POINTER(ctypes.c_int)]
+gl.glUseProgram.argtypes = [ctypes.c_uint]
+gl.glEnableVertexAttribArray.argtypes = [ctypes.c_uint]
+gl.glVertexAttribPointer.argtypes = [ctypes.c_uint, ctypes.c_int, ctypes.c_uint, ctypes.c_ubyte, ctypes.c_int, ctypes.c_void_p]
+gl.glDrawArrays.argtypes = [ctypes.c_uint, ctypes.c_int, ctypes.c_int]
+gl.glFinish.argtypes = []
+gl.glReadPixels.argtypes = [ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_uint, ctypes.c_uint, ctypes.c_void_p]
+
+renderer = (gl.glGetString(0x1F01) or b"").decode("utf-8", "replace")
+version = (gl.glGetString(0x1F02) or b"").decode("utf-8", "replace")
+glsl = (gl.glGetString(0x8B8C) or b"").decode("utf-8", "replace")
+pmask = ctypes.c_int(0)
+gl.glGetIntegerv(0x9126, ctypes.byref(pmask))
+profile = "CORE" if (pmask.value & 1) else ("COMPAT" if (pmask.value & 2) else f"mask={pmask.value}")
+
+vs_src = b"attribute vec4 position;\nvoid main() { gl_Position = position; }\n"
+fs_src = b"void main() { gl_FragColor = vec4(0.18, 0.76, 0.45, 1.0); }\n"
+vs = gl.glCreateShader(0x8B31)
+vs_p = ctypes.c_char_p(vs_src)
+gl.glShaderSource(vs, 1, ctypes.byref(vs_p), None)
+gl.glCompileShader(vs)
+st = ctypes.c_int(0)
+gl.glGetShaderiv(vs, 0x8B81, ctypes.byref(st))
+if not st.value:
+    raise SystemExit(f"legacy VS compile failed under profile={profile} glsl='{glsl}'")
+fs = gl.glCreateShader(0x8B30)
+fs_p = ctypes.c_char_p(fs_src)
+gl.glShaderSource(fs, 1, ctypes.byref(fs_p), None)
+gl.glCompileShader(fs)
+gl.glGetShaderiv(fs, 0x8B81, ctypes.byref(st))
+if not st.value:
+    raise SystemExit(f"legacy FS compile failed under profile={profile} glsl='{glsl}'")
+prog = gl.glCreateProgram()
+gl.glAttachShader(prog, vs)
+gl.glAttachShader(prog, fs)
+gl.glBindAttribLocation(prog, 0, b"position")
+gl.glLinkProgram(prog)
+gl.glGetProgramiv(prog, 0x8B82, ctypes.byref(st))
+if not st.value:
+    raise SystemExit("shader link failed")
+
+gl.glViewport(0, 0, 64, 64)
+gl.glClearColor(0.0, 0.0, 0.0, 1.0)
+gl.glClear(0x4000)
+gl.glUseProgram(prog)
+verts = (ctypes.c_float * 8)(-1.0, -1.0, 1.0, -1.0, -1.0, 1.0, 1.0, 1.0)
+gl.glEnableVertexAttribArray(0)
+gl.glVertexAttribPointer(0, 2, 0x1406, 0, 0, ctypes.cast(verts, ctypes.c_void_p))
+gl.glDrawArrays(0x0005, 0, 4)
+gl.glFinish()
+px = (ctypes.c_ubyte * 4)(0, 0, 0, 0)
+gl.glReadPixels(32, 32, 1, 1, 0x1908, 0x1401, ctypes.cast(px, ctypes.c_void_p))
+rgba = (px[0], px[1], px[2], px[3])
+print(f"GL renderer='{renderer}' version='{version}' glsl='{glsl}' profile={profile} pixel={rgba}")
+if rgba[1] < 150 or rgba[3] < 200:
+    raise SystemExit(f"VAO=0 legacy draw produced invalid pixel {rgba}")
+PY
 
   command -v glxinfo >/dev/null 2>&1 && [ -n "${DISPLAY:-}" ] && step "glx-zink" glxinfo -B
   if command -v blender >/dev/null 2>&1 || [ -x /opt/blender/blender ]; then
