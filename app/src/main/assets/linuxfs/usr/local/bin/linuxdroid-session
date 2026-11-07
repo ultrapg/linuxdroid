@@ -267,8 +267,8 @@ if [ -r /etc/linuxdroid/gpu.env ]; then
   if [ -x /usr/local/bin/linuxdroid-gpu-diag ]; then
     /usr/local/bin/linuxdroid-gpu-diag >/dev/null 2>&1 &
   fi
-  if [ "${BL_GPU_APPS:-0}" = "1" ] && [ -x /usr/local/bin/linuxdroid-gpu-test ]; then
-    ( sleep 40; /usr/local/bin/linuxdroid-gpu-test >/dev/null 2>&1 ) &
+  if [ -x /usr/local/bin/linuxdroid-gpu-test ]; then
+    ( sleep 8; /usr/local/bin/linuxdroid-gpu-test >/dev/null 2>&1 ) &
   fi
 fi
 

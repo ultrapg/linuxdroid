@@ -155,5 +155,41 @@ class SessionBootStateTest {
             "LinuxRuntime.prootPrefix must never pass -q to host Android PRoot",
             runtimeSource.contains("cmd.add(\"-q\")")
         )
+
+        val frontEndSource = listOf(
+            File("src/main/java/com/linuxdroid/app/ui/FrontEndActivity.kt"),
+            File("app/src/main/java/com/linuxdroid/app/ui/FrontEndActivity.kt"),
+        ).first { it.isFile }.readText()
+        assertTrue(
+            "Settings tab must include a Debug menu collapsed by default",
+            frontEndSource.contains("var debugExpanded by rememberSaveable { mutableStateOf(false) }") &&
+                frontEndSource.contains("text = \"Debug\"")
+        )
+    }
+
+    @Test
+    fun debugLoggerReadsTailAndFindsGuestCacheDirsCleanly() {
+        val tempRoot = Files.createTempDirectory("linuxdroid-debug-test").toFile()
+        try {
+            val cacheDir = File(tempRoot, "home/linux/.cache/linuxdroid").apply { mkdirs() }
+            val sampleLog = File(cacheDir, "gpu-apps.log")
+            sampleLog.writeText(
+                "[2026-11-07 01:00:00 UTC] [blender] Launching with hardware GPU acceleration\n" +
+                    "[2026-11-07 01:00:02 UTC] [blender] stderr: EGL_BAD_DISPLAY\n"
+            )
+            val tail = com.linuxdroid.app.session.DebugLogger.readTailOrPlaceholder(
+                sampleLog,
+                maxBytes = 4096,
+                maxLines = 10,
+                placeholder = "(empty)",
+            )
+            assertTrue(tail.contains("Launching with hardware GPU acceleration"))
+            assertTrue(tail.contains("EGL_BAD_DISPLAY"))
+
+            val dirs = com.linuxdroid.app.session.DebugLogger.findGuestCacheDirs(tempRoot)
+            assertTrue(dirs.any { it.absolutePath.endsWith("home/linux/.cache/linuxdroid") })
+        } finally {
+            tempRoot.deleteRecursively()
+        }
     }
 }

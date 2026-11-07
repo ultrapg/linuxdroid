@@ -42,10 +42,14 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.Add
+import androidx.compose.material.icons.outlined.BugReport
 import androidx.compose.material.icons.outlined.CheckCircle
 import androidx.compose.material.icons.outlined.CloudDownload
 import androidx.compose.material.icons.outlined.Computer
+import androidx.compose.material.icons.outlined.ContentCopy
 import androidx.compose.material.icons.outlined.DeleteOutline
+import androidx.compose.material.icons.outlined.ExpandLess
+import androidx.compose.material.icons.outlined.ExpandMore
 import androidx.compose.material.icons.outlined.FolderOpen
 import androidx.compose.material.icons.outlined.Memory
 import androidx.compose.material.icons.outlined.Monitor
@@ -54,7 +58,10 @@ import androidx.compose.material.icons.outlined.PlayArrow
 import androidx.compose.material.icons.outlined.PowerSettingsNew
 import androidx.compose.material.icons.outlined.Refresh
 import androidx.compose.material.icons.outlined.Settings
+import androidx.compose.material.icons.outlined.Share
 import androidx.compose.material.icons.outlined.Terminal
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
@@ -118,12 +125,17 @@ import com.linuxdroid.app.session.ResolutionPreset
 import com.linuxdroid.app.session.ScreenOrientationPref
 import com.linuxdroid.app.session.SessionPhase
 import com.linuxdroid.app.session.BackgroundMode
+import com.linuxdroid.app.session.DebugLogSection
+import com.linuxdroid.app.session.DebugLogger
+import com.linuxdroid.app.session.DebugReportBundle
 import com.linuxdroid.app.session.SessionPrefs
 import com.linuxdroid.app.session.SessionService
 import com.linuxdroid.app.session.SessionState
 import com.linuxdroid.app.session.TouchInputMode
 import com.linuxdroid.app.wayland.DeXEnvironmentDetector
+import androidx.compose.runtime.rememberCoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.io.File
 import kotlin.math.roundToInt
@@ -268,7 +280,7 @@ private fun DashboardScreen(
     var customMounts by remember { mutableStateOf(SessionPrefs.customMounts(context)) }
     var showAddMountDialog by remember { mutableStateOf(false) }
     var logRefreshTick by remember { mutableIntStateOf(0) }
-    var diagnosticLogPreview by remember { mutableStateOf("") }
+    var debugReportBundle by remember { mutableStateOf<DebugReportBundle?>(null) }
     var sawStartingPhase by rememberSaveable { mutableStateOf(false) }
 
     LaunchedEffect(sessionSnap.phase, sessionSnap.firstFrameReady) {
@@ -360,9 +372,8 @@ private fun DashboardScreen(
 
     LaunchedEffect(selectedTab, logRefreshTick, sessionSnap.phase) {
         if (selectedTab == DashboardTab.SYSTEM.ordinal) {
-            diagnosticLogPreview = withContext(Dispatchers.IO) {
-                val tail = SessionService.collectDiagnosticLogTail(LinuxRuntime.logDir(context), maxLines = 48)
-                if (tail.isEmpty()) "No session logs recorded yet." else tail.joinToString("\n")
+            debugReportBundle = withContext(Dispatchers.IO) {
+                DebugLogger.collectReport(context)
             }
         }
     }
@@ -659,7 +670,7 @@ private fun DashboardScreen(
                                     SessionPrefs.setMicEnabled(context, want)
                                 }
                             },
-                            diagnosticLogPreview = diagnosticLogPreview,
+                            debugReportBundle = debugReportBundle,
                             onRefreshLogs = { logRefreshTick++ },
                         )
                     }
@@ -1671,11 +1682,12 @@ private fun SystemTabContent(
     onRemoveMount: (String) -> Unit,
     micEnabled: Boolean,
     onToggleMic: (Boolean) -> Unit,
-    diagnosticLogPreview: String,
+    debugReportBundle: DebugReportBundle?,
     onRefreshLogs: () -> Unit,
 ) {
     // 0. Appearance & Background behavior
     val settingsContext = androidx.compose.ui.platform.LocalContext.current
+    val scope = rememberCoroutineScope()
     var appTheme by remember { mutableStateOf(SessionPrefs.appTheme(settingsContext)) }
     var bgMode by remember { mutableStateOf(SessionPrefs.backgroundMode(settingsContext)) }
     var bgDelay by remember { mutableStateOf(SessionPrefs.backgroundDelaySec(settingsContext)) }
@@ -1840,113 +1852,18 @@ private fun SystemTabContent(
         }
     }
 
-    // 3. Audio & Fixed-Height Scrollable Diagnostics Console
+    // 3. Audio Card
     SectionCard {
-        SectionHeader("Audio & Diagnostics")
+        SectionHeader("Audio")
         SettingToggleRow(
             title = "Microphone Input",
             subtitle = "Forward Android microphone audio into Linux via PulseAudio.",
             checked = micEnabled,
             onCheckedChange = onToggleMic,
         )
-
-        HorizontalDivider(modifier = Modifier.padding(vertical = 10.dp))
-
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(bottom = 8.dp),
-            horizontalArrangement = Arrangement.SpaceBetween,
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            Text(
-                text = "Session & GPU Diagnostics",
-                style = MaterialTheme.typography.labelLarge,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis,
-                modifier = Modifier.weight(1f),
-            )
-            Spacer(Modifier.width(6.dp))
-            OutlinedButton(
-                onClick = {
-                    val cm = settingsContext.getSystemService(ClipboardManager::class.java)
-                    val text = diagnosticLogPreview.ifBlank { "No session logs recorded yet." }
-                    cm?.setPrimaryClip(ClipData.newPlainText("LinuxDroid Diagnostics", text))
-                    Toast.makeText(settingsContext, "Diagnostics copied to clipboard", Toast.LENGTH_SHORT).show()
-                },
-                contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp),
-                modifier = Modifier.height(34.dp),
-            ) {
-                Text("Copy", softWrap = false, maxLines = 1)
-            }
-            Spacer(Modifier.width(6.dp))
-            OutlinedButton(
-                onClick = {
-                    val count = SessionService.clearGpuFallbacks(settingsContext)
-                    onRefreshLogs()
-                    val msg = if (count > 0) "Cleared $count GPU fallback marker(s)" else "No GPU fallback markers present"
-                    Toast.makeText(settingsContext, msg, Toast.LENGTH_SHORT).show()
-                },
-                contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp),
-                modifier = Modifier.height(34.dp),
-            ) {
-                Text("Reset GPU", softWrap = false, maxLines = 1)
-            }
-            Spacer(Modifier.width(6.dp))
-            OutlinedButton(
-                onClick = onRefreshLogs,
-                contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp),
-                modifier = Modifier.height(34.dp),
-            ) {
-                Icon(Icons.Outlined.Refresh, contentDescription = null, modifier = Modifier.size(15.dp))
-                Spacer(Modifier.width(4.dp))
-                Text("Refresh", softWrap = false, maxLines = 1)
-            }
-        }
-
-        val diagScroll = rememberScrollState()
-        Surface(
-            shape = RoundedCornerShape(8.dp),
-            color = MaterialTheme.colorScheme.surfaceContainerLowest,
-            modifier = Modifier
-                .fillMaxWidth()
-                .height(160.dp),
-        ) {
-            Column(
-                modifier = Modifier
-                    .fillMaxSize()
-                    .verticalScroll(diagScroll)
-                    .padding(10.dp),
-            ) {
-                Text(
-                    text = diagnosticLogPreview.ifBlank { "No session logs recorded yet." },
-                    fontFamily = FontFamily.Monospace,
-                    fontSize = 11.sp,
-                    lineHeight = 15.sp,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-            }
-        }
     }
 
-    // 4. About & Open-Source Credits
-    SectionCard {
-        SectionHeader("About LinuxDroid")
-        Text(
-            text = "LinuxDroid v${com.linuxdroid.app.BuildConfig.VERSION_NAME} (GPL-3.0)",
-            style = MaterialTheme.typography.bodyMedium,
-            fontWeight = FontWeight.SemiBold,
-            color = MaterialTheme.colorScheme.onSurface,
-        )
-        Spacer(Modifier.height(4.dp))
-        Text(
-            text = "Built on open-source technologies including Mesa 3D (Turnip, Zink, VirGL & Venus), PRoot, FEX-Emu, PulseAudio, Termux, and DroidDeck runtime components.",
-            style = MaterialTheme.typography.bodySmall,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-        )
-    }
-
-    // 5. Optional: battery optimization exemption for reliable background usage
+    // 4. Optional: battery optimization exemption for reliable background usage
     var batteryUnrestricted by remember { mutableStateOf(isIgnoringBatteryOptimizations(settingsContext)) }
     androidx.compose.runtime.LaunchedEffect(Unit) {
         while (true) {
@@ -1964,6 +1881,240 @@ private fun SystemTabContent(
                 if (want) requestIgnoreBatteryOptimizations(settingsContext) else openBatteryOptimizationSettings(settingsContext)
             },
         )
+    }
+
+    // 5. About & Open-Source Credits
+    SectionCard {
+        SectionHeader("About LinuxDroid")
+        Text(
+            text = "LinuxDroid v${com.linuxdroid.app.BuildConfig.VERSION_NAME} (GPL-3.0)",
+            style = MaterialTheme.typography.bodyMedium,
+            fontWeight = FontWeight.SemiBold,
+            color = MaterialTheme.colorScheme.onSurface,
+        )
+        Spacer(Modifier.height(4.dp))
+        Text(
+            text = "Built on open-source technologies including Mesa 3D (Turnip, Zink, VirGL & Venus), PRoot, FEX-Emu, PulseAudio, Termux, and DroidDeck runtime components.",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+    }
+
+    // 6. Collapsible "Debug" Menu at the bottom (Collapsed by default)
+    var debugExpanded by rememberSaveable { mutableStateOf(false) }
+    var selectedDebugSection by rememberSaveable { mutableStateOf(DebugLogSection.FULL_REPORT) }
+    var runningSelfTest by remember { mutableStateOf(false) }
+    val activeReportText = remember(debugReportBundle, selectedDebugSection) {
+        debugReportBundle?.textFor(selectedDebugSection).orEmpty().ifBlank { "Collecting debug report..." }
+    }
+    val fullReportText = remember(debugReportBundle) {
+        debugReportBundle?.fullReport.orEmpty().ifBlank { "Collecting debug report..." }
+    }
+
+    SectionCard {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .clip(RoundedCornerShape(12.dp))
+                .clickable {
+                    debugExpanded = !debugExpanded
+                    if (debugExpanded) onRefreshLogs()
+                }
+                .padding(vertical = 4.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(10.dp),
+        ) {
+            Icon(
+                imageVector = Icons.Outlined.BugReport,
+                contentDescription = null,
+                tint = MaterialTheme.colorScheme.primary,
+            )
+            Column(modifier = Modifier.weight(1f)) {
+                Text(
+                    text = "Debug",
+                    style = MaterialTheme.typography.titleMedium,
+                    fontWeight = FontWeight.SemiBold,
+                )
+                Text(
+                    text = if (debugExpanded) {
+                        "Full hardware, GPU, Wayland, PRoot, and app crash logger"
+                    } else {
+                        "Tap to expand full hardware, GPU, driver, and session debug logger"
+                    },
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    maxLines = 2,
+                    overflow = TextOverflow.Ellipsis,
+                )
+            }
+            Icon(
+                imageVector = if (debugExpanded) Icons.Outlined.ExpandLess else Icons.Outlined.ExpandMore,
+                contentDescription = if (debugExpanded) "Collapse Debug" else "Expand Debug",
+                tint = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
+
+        AnimatedVisibility(visible = debugExpanded) {
+            Column(modifier = Modifier.padding(top = 12.dp)) {
+                HorizontalDivider(modifier = Modifier.padding(bottom = 10.dp))
+
+                // Action Toolbar
+                FlowRow(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    verticalArrangement = Arrangement.spacedBy(8.dp),
+                ) {
+                    Button(
+                        onClick = {
+                            val cm = settingsContext.getSystemService(ClipboardManager::class.java)
+                            cm?.setPrimaryClip(ClipData.newPlainText("LinuxDroid Full Debug Report", fullReportText))
+                            Toast.makeText(settingsContext, "Full debug report copied to clipboard", Toast.LENGTH_SHORT).show()
+                        },
+                        contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp),
+                        modifier = Modifier.height(36.dp),
+                    ) {
+                        Icon(Icons.Outlined.ContentCopy, contentDescription = null, modifier = Modifier.size(16.dp))
+                        Spacer(Modifier.width(6.dp))
+                        Text("Copy Full Report", softWrap = false, maxLines = 1)
+                    }
+
+                    OutlinedButton(
+                        onClick = {
+                            runCatching {
+                                val sendIntent = Intent(Intent.ACTION_SEND).apply {
+                                    type = "text/plain"
+                                    putExtra(Intent.EXTRA_SUBJECT, "LinuxDroid Debug Report (v${com.linuxdroid.app.BuildConfig.VERSION_NAME})")
+                                    putExtra(Intent.EXTRA_TEXT, fullReportText)
+                                }
+                                settingsContext.startActivity(Intent.createChooser(sendIntent, "Share Debug Report"))
+                            }
+                        },
+                        contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp),
+                        modifier = Modifier.height(36.dp),
+                    ) {
+                        Icon(Icons.Outlined.Share, contentDescription = null, modifier = Modifier.size(16.dp))
+                        Spacer(Modifier.width(6.dp))
+                        Text("Share", softWrap = false, maxLines = 1)
+                    }
+
+                    OutlinedButton(
+                        enabled = !runningSelfTest,
+                        onClick = {
+                            runningSelfTest = true
+                            Toast.makeText(settingsContext, "Running GPU & system self-test...", Toast.LENGTH_SHORT).show()
+                            scope.launch {
+                                val msg = withContext(Dispatchers.IO) {
+                                    DebugLogger.runLiveDiagnosticsNow(settingsContext)
+                                }
+                                runningSelfTest = false
+                                onRefreshLogs()
+                                Toast.makeText(settingsContext, msg, Toast.LENGTH_SHORT).show()
+                            }
+                        },
+                        contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp),
+                        modifier = Modifier.height(36.dp),
+                    ) {
+                        Icon(Icons.Outlined.PlayArrow, contentDescription = null, modifier = Modifier.size(16.dp))
+                        Spacer(Modifier.width(5.dp))
+                        Text(if (runningSelfTest) "Testing..." else "Run GPU Self-Test", softWrap = false, maxLines = 1)
+                    }
+
+                    OutlinedButton(
+                        onClick = {
+                            val count = SessionService.clearGpuFallbacks(settingsContext)
+                            onRefreshLogs()
+                            val msg = if (count > 0) "Cleared $count GPU fallback marker(s)" else "No GPU fallback markers present"
+                            Toast.makeText(settingsContext, msg, Toast.LENGTH_SHORT).show()
+                        },
+                        contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp),
+                        modifier = Modifier.height(36.dp),
+                    ) {
+                        Text("Reset GPU", softWrap = false, maxLines = 1)
+                    }
+
+                    OutlinedButton(
+                        onClick = onRefreshLogs,
+                        contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp),
+                        modifier = Modifier.height(36.dp),
+                    ) {
+                        Icon(Icons.Outlined.Refresh, contentDescription = null, modifier = Modifier.size(15.dp))
+                        Spacer(Modifier.width(4.dp))
+                        Text("Refresh", softWrap = false, maxLines = 1)
+                    }
+
+                    OutlinedButton(
+                        onClick = {
+                            scope.launch {
+                                val cleared = withContext(Dispatchers.IO) {
+                                    DebugLogger.clearAllLogs(settingsContext)
+                                }
+                                onRefreshLogs()
+                                Toast.makeText(settingsContext, "Cleared $cleared log/fallback file(s)", Toast.LENGTH_SHORT).show()
+                            }
+                        },
+                        contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp),
+                        modifier = Modifier.height(36.dp),
+                    ) {
+                        Icon(Icons.Outlined.DeleteOutline, contentDescription = null, modifier = Modifier.size(15.dp))
+                        Spacer(Modifier.width(4.dp))
+                        Text("Clear Logs", softWrap = false, maxLines = 1)
+                    }
+                }
+
+                if (runningSelfTest) {
+                    Spacer(Modifier.height(8.dp))
+                    LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
+                }
+
+                Spacer(Modifier.height(10.dp))
+
+                // Category Filter Chips
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .horizontalScroll(rememberScrollState()),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                ) {
+                    for (section in DebugLogSection.entries) {
+                        FilterChip(
+                            selected = selectedDebugSection == section,
+                            onClick = { selectedDebugSection = section },
+                            label = { Text(section.label, softWrap = false, maxLines = 1) },
+                        )
+                    }
+                }
+
+                Spacer(Modifier.height(8.dp))
+
+                // Scrollable Monospace Debug Console
+                val diagScroll = rememberScrollState()
+                val horizScroll = rememberScrollState()
+                Surface(
+                    shape = RoundedCornerShape(10.dp),
+                    color = MaterialTheme.colorScheme.surfaceContainerLowest,
+                    border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(340.dp),
+                ) {
+                    Column(
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .verticalScroll(diagScroll)
+                            .horizontalScroll(horizScroll)
+                            .padding(12.dp),
+                    ) {
+                        Text(
+                            text = activeReportText,
+                            fontFamily = FontFamily.Monospace,
+                            fontSize = 11.sp,
+                            lineHeight = 15.sp,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+                }
+            }
+        }
     }
 }
 

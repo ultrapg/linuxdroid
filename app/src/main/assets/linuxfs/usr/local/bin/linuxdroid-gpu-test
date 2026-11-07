@@ -1,6 +1,6 @@
 #!/bin/bash
 # LinuxDroid GPU self-test: runs headless probes under the active GPU stack and records which stage fails.
-# Output: ~/.cache/linuxdroid/gpu-test.txt (shown in Settings > Diagnostics). Safe to run any time.
+# Output: ~/.cache/linuxdroid/gpu-test.txt (shown in Settings > Debug). Safe to run any time.
 set -u
 CACHE_DIR="${XDG_CACHE_HOME:-${HOME:-/home/linux}/.cache}/linuxdroid"
 mkdir -p "$CACHE_DIR" 2>/dev/null || true
@@ -15,18 +15,50 @@ step() {
   t0=$(date +%s)
   local log; log="$(timeout 25 "$@" 2>&1)"; rc=$?
   printf '[%s] rc=%s (%ss)\n' "$name" "$rc" "$(( $(date +%s) - t0 ))"
-  printf '%s\n' "$log" | head -n 12 | sed 's/^/    /'
+  printf '%s\n' "$log" | head -n 20 | sed 's/^/    /'
 }
 
 {
   echo "=== LinuxDroid GPU self-test ($(date -u '+%Y-%m-%d %H:%M:%S UTC')) ==="
   echo "GPU_ACTIVE=${LINUXDROID_GPU_ACTIVE:-unknown} FAMILY=${LINUXDROID_GPU_FAMILY:-unknown} BL_GPU_APPS=${BL_GPU_APPS:-0}"
   echo "KWIN_COMPOSE=${KWIN_COMPOSE:-unset} session=${XDG_SESSION_TYPE:-unset} DISPLAY=${DISPLAY:-unset} WAYLAND_DISPLAY=${WAYLAND_DISPLAY:-unset}"
-  command -v vulkaninfo >/dev/null 2>&1 && step "vulkan" vulkaninfo --summary
+  echo "VK_DRIVER_FILES=${VK_DRIVER_FILES:-unset} GALLIUM_DRIVER=${GALLIUM_DRIVER:-unset} MESA_LOADER_DRIVER_OVERRIDE=${MESA_LOADER_DRIVER_OVERRIDE:-unset}"
+
+  if command -v vulkaninfo >/dev/null 2>&1; then
+    step "vulkan" vulkaninfo --summary
+  else
+    step "vulkan-ctypes" python3 -c "import ctypes; vk=ctypes.CDLL('libvulkan.so.1'); print('libvulkan.so.1 loaded OK:', vk)"
+  fi
+
   if command -v eglinfo >/dev/null 2>&1; then
     step "egl-surfaceless" eglinfo -B -p surfaceless
     step "egl-gbm" eglinfo -B -p gbm
+    [ -n "${WAYLAND_DISPLAY:-}" ] && step "egl-wayland" eglinfo -B -p wayland
+  else
+    step "egl-ctypes-surfaceless" python3 - <<'PY'
+import ctypes
+egl = ctypes.CDLL("libEGL.so.1")
+egl.eglGetPlatformDisplay.argtypes = [ctypes.c_uint, ctypes.c_void_p, ctypes.c_void_p]
+egl.eglGetPlatformDisplay.restype = ctypes.c_void_p
+egl.eglInitialize.argtypes = [ctypes.c_void_p, ctypes.POINTER(ctypes.c_int), ctypes.POINTER(ctypes.c_int)]
+egl.eglInitialize.restype = ctypes.c_uint
+egl.eglQueryString.argtypes = [ctypes.c_void_p, ctypes.c_int]
+egl.eglQueryString.restype = ctypes.c_char_p
+egl.eglBindAPI.argtypes = [ctypes.c_uint]
+egl.eglBindAPI.restype = ctypes.c_uint
+egl.eglGetError.restype = ctypes.c_int
+# EGL_PLATFORM_SURFACELESS_MESA = 0x31DD
+dpy = egl.eglGetPlatformDisplay(0x31DD, None, None)
+maj, mn = ctypes.c_int(0), ctypes.c_int(0)
+if not dpy or not egl.eglInitialize(dpy, ctypes.byref(maj), ctypes.byref(mn)):
+    raise SystemExit(f"eglInitialize(surfaceless) failed: dpy={dpy} err=0x{egl.eglGetError():x}")
+vendor = (egl.eglQueryString(dpy, 0x3053) or b"").decode("utf-8", "replace")
+ver = (egl.eglQueryString(dpy, 0x3054) or b"").decode("utf-8", "replace")
+apis = (egl.eglQueryString(dpy, 0x308D) or b"").decode("utf-8", "replace")
+print(f"Surfaceless EGL {maj.value}.{mn.value} vendor='{vendor}' version='{ver}' apis='{apis}'")
+PY
   fi
+
   command -v glxinfo >/dev/null 2>&1 && [ -n "${DISPLAY:-}" ] && step "glx-zink" glxinfo -B
   if command -v blender >/dev/null 2>&1 || [ -x /opt/blender/blender ]; then
     b="$(command -v blender 2>/dev/null || echo /opt/blender/blender)"
@@ -37,3 +69,4 @@ step() {
   if grep -q "rc=[1-9]" "$OUT.tmp" 2>/dev/null; then echo "Some GPU stages failed (see rc!=0 above)."; else echo "All headless GPU stages passed."; fi
 } > "$OUT.tmp" 2>&1
 mv -f "$OUT.tmp" "$OUT"
+cat "$OUT" 2>/dev/null || true

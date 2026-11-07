@@ -1,6 +1,6 @@
 #!/bin/bash
 # LinuxDroid GPU Diagnostics: probes DRM/KGSL/Mali nodes, sysfs uevents, Vulkan ICDs,
-# EGL/GBM render node resolution, and active desktop/app GPU fallback flags.
+# Mesa/EGL/GBM/GL libraries, render node resolution, and active desktop/app GPU fallback flags.
 set -u
 
 CACHE_DIR="${XDG_CACHE_HOME:-${HOME:-/home/linux}/.cache}/linuxdroid"
@@ -16,23 +16,48 @@ fi
 
 {
   echo "=== LinuxDroid GPU Diagnostics ($(date -u '+%Y-%m-%d %H:%M:%S UTC')) ==="
+  echo "USER=${USER:-$(id -un 2>/dev/null || echo linux)} UID=$(id -u 2>/dev/null || echo 1000) GIDS=$(id -G 2>/dev/null || true)"
+  echo "UNAME=$(uname -a 2>/dev/null || true)"
   echo "GPU_MODE=${LINUXDROID_GPU_MODE:-auto}"
   echo "GPU_ACTIVE=${LINUXDROID_GPU_ACTIVE:-unknown}"
   echo "GPU_FAMILY=${LINUXDROID_GPU_FAMILY:-unknown}"
   echo "GPU_SUMMARY=${LINUXDROID_GPU_SUMMARY:-none}"
   echo "BL_GPU_APPS=${BL_GPU_APPS:-0} BL_GPU_DESKTOP=${BL_GPU_DESKTOP:-0}"
   echo "VK_DRIVER_FILES=${VK_DRIVER_FILES:-unset}"
+  echo "VK_ICD_FILENAMES=${VK_ICD_FILENAMES:-unset}"
   echo "GALLIUM_DRIVER=${GALLIUM_DRIVER:-unset} MESA_LOADER_DRIVER_OVERRIDE=${MESA_LOADER_DRIVER_OVERRIDE:-unset}"
+  echo "ZINK_DESCRIPTORS=${ZINK_DESCRIPTORS:-unset} LIBGL_KOPPER_DRI2=${LIBGL_KOPPER_DRI2:-unset}"
+  echo "TU_DEBUG=${TU_DEBUG:-unset} MESA_VK_WSI_DEBUG=${MESA_VK_WSI_DEBUG:-unset} VN_DEBUG=${VN_DEBUG:-unset}"
+  echo "VTEST_SOCKET_NAME=${VTEST_SOCKET_NAME:-unset}"
+  echo "WAYLAND_DISPLAY=${WAYLAND_DISPLAY:-unset} DISPLAY=${DISPLAY:-unset} XDG_RUNTIME_DIR=${XDG_RUNTIME_DIR:-unset}"
+
+  echo "--- Runtime Sockets & Shared Memory ---"
+  ls -la "${XDG_RUNTIME_DIR:-/run/linuxdroid}" /tmp/.X11-unix /dev/shm 2>/dev/null || true
 
   echo "--- Device Nodes ---"
-  ls -la /dev/kgsl-3d0 /dev/mali0 /dev/dri /dev/dri/* 2>/dev/null || true
+  ls -la /dev/kgsl-3d0 /dev/mali0 /dev/dri /dev/dri/* /dev/ion /dev/dma_heap /dev/dma_heap/* /dev/ashmem 2>/dev/null || true
 
   echo "--- Sysfs DRM & Char Nodes ---"
-  for uev in /sys/dev/char/*/uevent /sys/dev/char/*/device/uevent /sys/dev/char/*/device/drm/*/dev; do
+  for uev in /sys/dev/char/*/uevent /sys/dev/char/*/device/uevent /sys/dev/char/*/device/drm/*/dev /sys/class/kgsl/kgsl-3d0/gpu_model /sys/class/kgsl/kgsl-3d0/gpubusy; do
     [ -r "$uev" ] || continue
     echo "[$uev]"
     cat "$uev" 2>/dev/null || true
   done
+
+  echo "--- Vulkan ICD Files & Libraries ---"
+  for icd in /usr/share/vulkan/icd.d/*.json /etc/vulkan/icd.d/*.json; do
+    [ -r "$icd" ] || continue
+    echo "[$icd]"
+    cat "$icd" 2>/dev/null || true
+  done
+  ls -la /usr/lib/aarch64-linux-gnu/libvulkan* /usr/lib/aarch64-linux-gnu/libEGL* /usr/lib/aarch64-linux-gnu/libGL* /usr/lib/aarch64-linux-gnu/libgbm* /usr/lib/aarch64-linux-gnu/dri/* 2>/dev/null | head -n 45 || true
+
+  echo "--- Mesa & Graphics Package Versions ---"
+  if command -v dpkg-query >/dev/null 2>&1; then
+    dpkg-query -W -f='${Package}=${Version} (${db:Status-Abbrev})\n' \
+      mesa-vulkan-drivers libgl1-mesa-dri libegl-mesa0 libgbm1 libglx-mesa0 libdrm2 \
+      kwin-wayland plasma-workspace xwayland chromium firefox blender 2>/dev/null || true
+  fi
 
   echo "--- libdrm Render Node Resolution ---"
   python3 - <<'PY' 2>/dev/null || true
@@ -70,21 +95,71 @@ except Exception as e:
     print(f"libdrm probe error: {e}")
 PY
 
-  echo "--- Vulkan Probe ---"
-  if command -v vulkaninfo >/dev/null 2>&1; then
-    timeout 5 vulkaninfo --summary 2>&1 | grep -E "GPU[0-9]|deviceName|driverName|driverInfo|apiVersion" | head -n 20 || true
-  else
-    python3 - <<'PY' 2>/dev/null || true
+  echo "--- Direct Vulkan & EGL Library Probe ---"
+  python3 - <<'PY' 2>/dev/null || true
 import ctypes
+
 try:
     vk = ctypes.CDLL("libvulkan.so.1")
-    print("libvulkan.so.1 loaded: OK")
+    vk.vkCreateInstance.restype = ctypes.c_int
+    vk.vkCreateInstance.argtypes = [ctypes.c_void_p, ctypes.c_void_p, ctypes.POINTER(ctypes.c_void_p)]
+    vk.vkEnumeratePhysicalDevices.restype = ctypes.c_int
+    vk.vkEnumeratePhysicalDevices.argtypes = [ctypes.c_void_p, ctypes.POINTER(ctypes.c_uint32), ctypes.POINTER(ctypes.c_void_p)]
+    vk.vkDestroyInstance.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
+
+    class VkInstanceCreateInfo(ctypes.Structure):
+        _fields_ = [
+            ("sType", ctypes.c_int),
+            ("pNext", ctypes.c_void_p),
+            ("flags", ctypes.c_uint32),
+            ("pApplicationInfo", ctypes.c_void_p),
+            ("enabledLayerCount", ctypes.c_uint32),
+            ("ppEnabledLayerNames", ctypes.c_void_p),
+            ("enabledExtensionCount", ctypes.c_uint32),
+            ("ppEnabledExtensionNames", ctypes.c_void_p),
+        ]
+
+    info = VkInstanceCreateInfo(sType=1)
+    inst = ctypes.c_void_p()
+    rc = vk.vkCreateInstance(ctypes.byref(info), None, ctypes.byref(inst))
+    if rc == 0 and inst.value:
+        cnt = ctypes.c_uint32(0)
+        rc_enum = vk.vkEnumeratePhysicalDevices(inst, ctypes.byref(cnt), None)
+        print(f"Vulkan ctypes probe: vkCreateInstance=OK, physicalDevices={cnt.value} (rc={rc_enum})")
+        vk.vkDestroyInstance(inst, None)
+    else:
+        print(f"Vulkan ctypes probe: vkCreateInstance failed (rc={rc})")
 except Exception as e:
-    print(f"libvulkan.so.1 error: {e}")
+    print(f"Vulkan ctypes probe error: {e}")
+
+try:
+    egl = ctypes.CDLL("libEGL.so.1")
+    egl.eglGetDisplay.argtypes = [ctypes.c_void_p]
+    egl.eglGetDisplay.restype = ctypes.c_void_p
+    egl.eglInitialize.argtypes = [ctypes.c_void_p, ctypes.POINTER(ctypes.c_int), ctypes.POINTER(ctypes.c_int)]
+    egl.eglInitialize.restype = ctypes.c_uint
+    egl.eglQueryString.argtypes = [ctypes.c_void_p, ctypes.c_int]
+    egl.eglQueryString.restype = ctypes.c_char_p
+    egl.eglGetError.restype = ctypes.c_int
+    dpy = egl.eglGetDisplay(None)
+    maj, mn = ctypes.c_int(0), ctypes.c_int(0)
+    ok = egl.eglInitialize(dpy, ctypes.byref(maj), ctypes.byref(mn)) if dpy else 0
+    if ok:
+        vendor = (egl.eglQueryString(dpy, 0x3053) or b"").decode("utf-8", "replace")
+        ver = (egl.eglQueryString(dpy, 0x3054) or b"").decode("utf-8", "replace")
+        print(f"EGL default display: OK ({maj.value}.{mn.value}) vendor='{vendor}' version='{ver}'")
+    else:
+        print(f"EGL default display: init failed (dpy={dpy}, err=0x{egl.eglGetError():x})")
+except Exception as e:
+    print(f"EGL ctypes probe error: {e}")
 PY
+
+  if command -v vulkaninfo >/dev/null 2>&1; then
+    echo "--- vulkaninfo --summary ---"
+    timeout 6 vulkaninfo --summary 2>&1 | head -n 45 || true
   fi
 
-  echo "--- Fallback Status ---"
+  echo "--- Fallback Status & App Logs ---"
   if [ -e "$CACHE_DIR/gpu-desktop-failed" ]; then
     echo "gpu-desktop-failed: PRESENT ($(tr '\n' ' ' < "$CACHE_DIR/gpu-desktop-failed" 2>/dev/null))"
   else
@@ -96,8 +171,12 @@ PY
     echo "app gpu-fallback markers: none"
   fi
   if [ -s "$CACHE_DIR/kwin-gpu.log" ]; then
-    echo "--- kwin-gpu.log (last 15 lines) ---"
-    tail -n 15 "$CACHE_DIR/kwin-gpu.log" 2>/dev/null || true
+    echo "--- kwin-gpu.log (last 25 lines) ---"
+    tail -n 25 "$CACHE_DIR/kwin-gpu.log" 2>/dev/null || true
+  fi
+  if [ -s "$CACHE_DIR/gpu-apps.log" ]; then
+    echo "--- gpu-apps.log (last 30 lines) ---"
+    tail -n 30 "$CACHE_DIR/gpu-apps.log" 2>/dev/null || true
   fi
 } > "${OUT_FILE}.tmp" 2>&1
 

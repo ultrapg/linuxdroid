@@ -875,7 +875,9 @@ class SessionService : Service() {
                     for (l in testLines) combined.add("[gpu-test] $l")
                     val kwinGpuLines = tailNonEmptyLines(File(cacheDir, "kwin-gpu.log"), 8)
                     for (l in kwinGpuLines) combined.add("[kwin-gpu] $l")
-                    if (diagLines.isNotEmpty() || kwinGpuLines.isNotEmpty()) break
+                    val appGpuLines = tailNonEmptyLines(File(cacheDir, "gpu-apps.log"), 10)
+                    for (l in appGpuLines) combined.add("[gpu-app] $l")
+                    if (diagLines.isNotEmpty() || kwinGpuLines.isNotEmpty() || appGpuLines.isNotEmpty()) break
                 }
             }
 

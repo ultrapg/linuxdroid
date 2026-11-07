@@ -24,9 +24,17 @@ resolve() {
 real="$(resolve "$target")"
 [ -n "$real" ] || { echo "$target: command not found" >&2; exit 127; }
 name="$(basename "$target")"
-mark="${XDG_CACHE_HOME:-$HOME/.cache}/linuxdroid/gpu-fallback"
+cache_dir="${XDG_CACHE_HOME:-${HOME:-/home/linux}/.cache}/linuxdroid"
+mark="$cache_dir/gpu-fallback"
+app_log="$cache_dir/gpu-apps.log"
+mkdir -p "$cache_dir" 2>/dev/null || true
+
+log_event() {
+  printf '[%s] [%s] %s\n' "$(date -u '+%Y-%m-%d %H:%M:%S UTC')" "$name" "$*" >> "$app_log" 2>/dev/null || true
+}
 
 run_software() {
+  log_event "Launching in software rendering mode (BL_GPU_APPS=${BL_GPU_APPS:-0}, fallback_marker=$([ -e "$mark/$name" ] && echo yes || echo no))"
   export LIBGL_ALWAYS_SOFTWARE=1 GALLIUM_DRIVER=llvmpipe
   unset MESA_LOADER_DRIVER_OVERRIDE LIBGL_KOPPER_DRI2 MESA_GL_VERSION_OVERRIDE MESA_GLSL_VERSION_OVERRIDE ZINK_DESCRIPTORS
   exec "$real" "$@"
@@ -36,13 +44,22 @@ if [ "${BL_GPU_APPS:-0}" != "1" ] || [ -e "$mark/$name" ]; then
   run_software "$@"
 fi
 
+log_event "Launching with hardware GPU acceleration ($real $*) WAYLAND_DISPLAY=${WAYLAND_DISPLAY:-unset} DISPLAY=${DISPLAY:-unset}"
 start="$(date +%s)"
-/usr/local/bin/linuxdroid-gpu "$real" "$@"
+err_capture="$cache_dir/last-${name}-gpu.err"
+/usr/local/bin/linuxdroid-gpu "$real" "$@" 2> >(tee "$err_capture" >&2)
 rc=$?
 elapsed=$(( $(date +%s) - start ))
+if [ -s "$err_capture" ]; then
+  tail -n 20 "$err_capture" 2>/dev/null | while IFS= read -r line; do
+    log_event "stderr: $line"
+  done
+fi
 if [ "$rc" -ne 0 ] && [ "$rc" -ne 130 ] && [ "$rc" -ne 143 ] && [ "$elapsed" -lt 6 ]; then
-  mkdir -p "$mark" 2>/dev/null && : > "$mark/$name" 2>/dev/null
+  mkdir -p "$mark" 2>/dev/null && printf 'exit=%s elapsed=%ss at %s\n' "$rc" "$elapsed" "$(date -u '+%Y-%m-%d %H:%M:%S UTC')" > "$mark/$name" 2>/dev/null
+  log_event "GPU start failed (exit $rc in ${elapsed}s); recorded fallback marker and restarting in software mode."
   echo "linuxdroid-gpu-launch: GPU start failed for $name (exit $rc); using software rendering." >&2
   run_software "$@"
 fi
+log_event "Exited with code $rc after ${elapsed}s"
 exit "$rc"
