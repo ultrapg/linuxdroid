@@ -568,29 +568,18 @@ if [ "$desktop_choice" = "kde" ]; then
   export KWIN_SCREENSHOT_NO_PERMISSION_CHECKS=1
   unset MESA_NO_ERROR
   if [ "$gpu_desktop" = 1 ]; then
-    # Hybrid GPU desktop: kwin_wayland_wrapper isolates QPainter/wl_shm software compositing to
-    # kwin_wayland (and Xwayland) via LINUXDROID_KWIN_ONLY_SW=1, while plasmashell and Wayland
-    # desktop applications use native SoC GPU acceleration (Turnip + Zink + Kopper / VirGL) on wayland-1.
-    if [ -r /etc/linuxdroid/gpu.env ]; then
-      set -a
-      # shellcheck disable=SC1091
-      . /etc/linuxdroid/gpu.env
-      set +a
-    fi
+    # Hybrid GPU desktop: nested KWin composites Wayland client surfaces onto wayland-0 via
+    # QPainter/wl_shm (because nested KWin Wayland has no DRM/GBM modesetting device), while
+    # /usr/local/bin/plasmashell and desktop applications use native SoC GPU acceleration
+    # (Turnip + Zink + Kopper / VirGL) on wayland-1.
     export KWIN_COMPOSE=Q
+    export QT_QUICK_BACKEND=software
     export GALLIUM_THREAD=0
-    export QT_WAYLAND_FORCE_NONBLOCKING_SWAP_SUPPORT=1
-    unset QT_QUICK_BACKEND LIBGL_ALWAYS_SOFTWARE KWIN_RENDER_NODES KWIN_DRM_DEVICES
-    if [ "${LINUXDROID_GPU_ACTIVE:-}" = "turnip" ]; then
-      unset MESA_GL_VERSION_OVERRIDE MESA_GLSL_VERSION_OVERRIDE
-      export MESA_LOADER_DRIVER_OVERRIDE="${MESA_LOADER_DRIVER_OVERRIDE:-zink}"
-      export GALLIUM_DRIVER="${GALLIUM_DRIVER:-zink}"
-      export LIBGL_KOPPER_DRI2=true
-      export MESA_VK_WSI_DEBUG=sw
-      export MESA_VK_WSI_PRESENT_MODE=mailbox
-    fi
+    unset MESA_LOADER_DRIVER_OVERRIDE LIBGL_KOPPER_DRI2 MESA_GL_VERSION_OVERRIDE MESA_GLSL_VERSION_OVERRIDE KWIN_RENDER_NODES KWIN_DRM_DEVICES
+    export LIBGL_ALWAYS_SOFTWARE=1
+    export GALLIUM_DRIVER=llvmpipe
     "$KWRITECONFIG" --file kwinrc --group Compositing --key Backend QPainter 2>/dev/null || true
-    echo "== linuxdroid-desktop: hybrid GPU desktop (KWin QPainter compositing + GPU Plasma & Wayland apps, ${LINUXDROID_GPU_ACTIVE:-gpu})"
+    echo "== linuxdroid-desktop: hybrid GPU desktop (KWin QPainter compositing + GPU Plasma & apps, ${LINUXDROID_GPU_ACTIVE:-gpu})"
   else
     # Software desktop: nested KWin uses QPainter wl_shm into LinuxDroid's Vulkan compositor so it
     # starts reliably on any device without DRM/GBM modesetting.

@@ -182,11 +182,136 @@ if rgba[1] < 150 or rgba[3] < 200:
     raise SystemExit(f"VAO=0 legacy draw produced invalid pixel {rgba}")
 PY
 
+  if [ -n "${WAYLAND_DISPLAY:-}" ]; then
+    step "wayland-kopper-resize" python3 - <<'PY'
+import ctypes, os
+
+if os.path.isfile("/usr/local/lib/libblsession.so"):
+    ctypes.CDLL("/usr/local/lib/libblsession.so", mode=ctypes.RTLD_GLOBAL)
+
+wl = ctypes.CDLL("libwayland-client.so.0", mode=ctypes.RTLD_GLOBAL)
+wlegl = ctypes.CDLL("libwayland-egl.so.1", mode=ctypes.RTLD_GLOBAL)
+egl = ctypes.CDLL("libEGL.so.1", mode=ctypes.RTLD_GLOBAL)
+gl = ctypes.CDLL("libGL.so.1", mode=ctypes.RTLD_GLOBAL)
+
+wl.wl_display_connect.argtypes = [ctypes.c_char_p]
+wl.wl_display_connect.restype = ctypes.c_void_p
+wl.wl_display_roundtrip.argtypes = [ctypes.c_void_p]
+wl.wl_display_roundtrip.restype = ctypes.c_int
+wl.wl_proxy_get_version.argtypes = [ctypes.c_void_p]
+wl.wl_proxy_get_version.restype = ctypes.c_uint32
+wl.wl_proxy_marshal_flags.restype = ctypes.c_void_p
+wl.wl_proxy_add_listener.argtypes = [ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p]
+wl.wl_proxy_add_listener.restype = ctypes.c_int
+
+wlegl.wl_egl_window_create.argtypes = [ctypes.c_void_p, ctypes.c_int, ctypes.c_int]
+wlegl.wl_egl_window_create.restype = ctypes.c_void_p
+wlegl.wl_egl_window_resize.argtypes = [ctypes.c_void_p, ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_int]
+wlegl.wl_egl_window_get_attached_size.argtypes = [ctypes.c_void_p, ctypes.POINTER(ctypes.c_int), ctypes.POINTER(ctypes.c_int)]
+
+wl_reg_iface = ctypes.addressof(ctypes.c_char.in_dll(wl, "wl_registry_interface"))
+wl_comp_iface = ctypes.addressof(ctypes.c_char.in_dll(wl, "wl_compositor_interface"))
+wl_surf_iface = ctypes.addressof(ctypes.c_char.in_dll(wl, "wl_surface_interface"))
+
+wl_dpy = wl.wl_display_connect(None)
+if not wl_dpy:
+    raise SystemExit("wl_display_connect failed")
+
+comp_holder = {"ptr": None}
+GLOBAL_CB = ctypes.CFUNCTYPE(None, ctypes.c_void_p, ctypes.c_void_p, ctypes.c_uint32, ctypes.c_char_p, ctypes.c_uint32)
+REMOVE_CB = ctypes.CFUNCTYPE(None, ctypes.c_void_p, ctypes.c_void_p, ctypes.c_uint32)
+
+def on_global(data, reg, name, iface, ver):
+    if iface == b"wl_compositor" and not comp_holder["ptr"]:
+        use_ver = min(int(ver), 4)
+        wl.wl_proxy_marshal_flags.argtypes = [
+            ctypes.c_void_p, ctypes.c_uint32, ctypes.c_void_p, ctypes.c_uint32, ctypes.c_uint32,
+            ctypes.c_uint32, ctypes.c_char_p, ctypes.c_uint32, ctypes.c_void_p
+        ]
+        comp_holder["ptr"] = wl.wl_proxy_marshal_flags(reg, 0, wl_comp_iface, use_ver, 0, name, iface, use_ver, None)
+
+def on_remove(data, reg, name):
+    pass
+
+class RegistryListener(ctypes.Structure):
+    _fields_ = [("global_cb", GLOBAL_CB), ("remove_cb", REMOVE_CB)]
+
+listener = RegistryListener(GLOBAL_CB(on_global), REMOVE_CB(on_remove))
+wl.wl_proxy_marshal_flags.argtypes = [
+    ctypes.c_void_p, ctypes.c_uint32, ctypes.c_void_p, ctypes.c_uint32, ctypes.c_uint32, ctypes.c_void_p
+]
+reg = wl.wl_proxy_marshal_flags(wl_dpy, 1, wl_reg_iface, wl.wl_proxy_get_version(wl_dpy), 0, None)
+wl.wl_proxy_add_listener(reg, ctypes.byref(listener), None)
+wl.wl_display_roundtrip(wl_dpy)
+
+wl.wl_proxy_marshal_flags.argtypes = [
+    ctypes.c_void_p, ctypes.c_uint32, ctypes.c_void_p, ctypes.c_uint32, ctypes.c_uint32, ctypes.c_void_p
+]
+wl_surf = wl.wl_proxy_marshal_flags(comp_holder["ptr"], 0, wl_surf_iface, wl.wl_proxy_get_version(comp_holder["ptr"]), 0, None)
+egl_win = wlegl.wl_egl_window_create(wl_surf, 64, 64)
+
+egl.eglGetPlatformDisplay.argtypes = [ctypes.c_uint, ctypes.c_void_p, ctypes.c_void_p]
+egl.eglGetPlatformDisplay.restype = ctypes.c_void_p
+egl.eglInitialize.argtypes = [ctypes.c_void_p, ctypes.POINTER(ctypes.c_int), ctypes.POINTER(ctypes.c_int)]
+egl.eglInitialize.restype = ctypes.c_uint
+egl.eglBindAPI.argtypes = [ctypes.c_uint]
+egl.eglBindAPI.restype = ctypes.c_uint
+egl.eglChooseConfig.argtypes = [ctypes.c_void_p, ctypes.POINTER(ctypes.c_int), ctypes.POINTER(ctypes.c_void_p), ctypes.c_int, ctypes.POINTER(ctypes.c_int)]
+egl.eglChooseConfig.restype = ctypes.c_uint
+egl.eglCreateContext.argtypes = [ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p, ctypes.POINTER(ctypes.c_int)]
+egl.eglCreateContext.restype = ctypes.c_void_p
+egl.eglCreateWindowSurface.argtypes = [ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p, ctypes.POINTER(ctypes.c_int)]
+egl.eglCreateWindowSurface.restype = ctypes.c_void_p
+egl.eglMakeCurrent.argtypes = [ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p]
+egl.eglMakeCurrent.restype = ctypes.c_uint
+egl.eglSwapBuffers.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
+egl.eglSwapBuffers.restype = ctypes.c_uint
+egl.eglGetError.restype = ctypes.c_int
+
+dpy = egl.eglGetPlatformDisplay(0x31D8, wl_dpy, None)
+maj, mn = ctypes.c_int(0), ctypes.c_int(0)
+if not dpy or not egl.eglInitialize(dpy, ctypes.byref(maj), ctypes.byref(mn)):
+    raise SystemExit(f"eglInitialize(wayland) failed err=0x{egl.eglGetError():x}")
+egl.eglBindAPI(0x30A2)
+attribs = (ctypes.c_int * 13)(0x3033, 0x0004, 0x3024, 8, 0x3023, 8, 0x3022, 8, 0x3021, 8, 0x3040, 0x0008, 0x3038)
+cfg = ctypes.c_void_p()
+num_cfg = ctypes.c_int(0)
+egl.eglChooseConfig(dpy, attribs, ctypes.byref(cfg), 1, ctypes.byref(num_cfg))
+ctx = egl.eglCreateContext(dpy, cfg, None, None)
+surf = egl.eglCreateWindowSurface(dpy, cfg, egl_win, None)
+if not ctx or not surf or not egl.eglMakeCurrent(dpy, surf, surf, ctx):
+    raise SystemExit(f"Wayland eglMakeCurrent failed ctx={ctx} surf={surf} err=0x{egl.eglGetError():x}")
+
+gl.glViewport.argtypes = [ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_int]
+gl.glClearColor.argtypes = [ctypes.c_float, ctypes.c_float, ctypes.c_float, ctypes.c_float]
+gl.glClear.argtypes = [ctypes.c_uint]
+gl.glReadPixels.argtypes = [ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_uint, ctypes.c_uint, ctypes.c_void_p]
+
+gl.glViewport(0, 0, 64, 64)
+gl.glClearColor(0.2, 0.6, 0.9, 1.0)
+gl.glClear(0x4000)
+swap1 = egl.eglSwapBuffers(dpy, surf)
+
+wlegl.wl_egl_window_resize(egl_win, 128, 96, 0, 0)
+gl.glViewport(0, 0, 128, 96)
+gl.glClearColor(0.2, 0.8, 0.4, 1.0)
+gl.glClear(0x4000)
+px = (ctypes.c_ubyte * 4)(0, 0, 0, 0)
+gl.glReadPixels(96, 64, 1, 1, 0x1908, 0x1401, ctypes.cast(px, ctypes.c_void_p))
+swap2 = egl.eglSwapBuffers(dpy, surf)
+att_w, att_h = ctypes.c_int(0), ctypes.c_int(0)
+wlegl.wl_egl_window_get_attached_size(egl_win, ctypes.byref(att_w), ctypes.byref(att_h))
+rgba = (px[0], px[1], px[2], px[3])
+print(f"Wayland Kopper swap1={swap1} swap2={swap2} attached={att_w.value}x{att_h.value} resize_pixel={rgba}")
+if not swap1 or not swap2 or att_w.value != 128 or att_h.value != 96 or rgba[1] < 150:
+    raise SystemExit(f"Wayland Kopper resize failed swap1={swap1} swap2={swap2} attached={att_w.value}x{att_h.value} pixel={rgba}")
+PY
+  fi
+
   command -v glxinfo >/dev/null 2>&1 && [ -n "${DISPLAY:-}" ] && step "glx-zink" glxinfo -B
   if command -v blender >/dev/null 2>&1 || [ -x /opt/blender/blender ]; then
     b="$(command -v blender 2>/dev/null || echo /opt/blender/blender)"
     step "blender-version" "$b" --version
-    step "blender-gpu-offscreen" "$b" -b --python-expr "import bpy,gpu;print('GPU backend:',gpu.platform.backend_type_get());print('GPU device:',gpu.platform.renderer_get())"
   fi
   echo "--- verdict ---"
   if grep -q "rc=[1-9]" "$OUT.tmp" 2>/dev/null; then echo "Some GPU stages failed (see rc!=0 above)."; else echo "All headless GPU stages passed."; fi

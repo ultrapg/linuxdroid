@@ -20,19 +20,7 @@ if [ "${BL_DESKTOP:-}" = "1" ]; then
       --no-lockscreen \
       "$@"
   fi
-  # Nested kwin_wayland composites onto LinuxDroid's host Wayland socket via QPainter/wl_shm.
-  # Save the session's GPU variables so libblsession.so automatically restores hardware GPU
-  # for any child process spawned by kwin_wayland while keeping kwin_wayland itself on QPainter.
-  export LINUXDROID_SAVED_QT_QUICK_BACKEND="${QT_QUICK_BACKEND:-}"
-  export LINUXDROID_SAVED_LIBGL_ALWAYS_SOFTWARE="${LIBGL_ALWAYS_SOFTWARE:-}"
-  export LINUXDROID_SAVED_GALLIUM_DRIVER="${GALLIUM_DRIVER:-}"
-  export LINUXDROID_SAVED_MESA_LOADER_DRIVER_OVERRIDE="${MESA_LOADER_DRIVER_OVERRIDE:-}"
-  export LINUXDROID_SAVED_LIBGL_KOPPER_DRI2="${LIBGL_KOPPER_DRI2:-}"
-  export LINUXDROID_KWIN_ONLY_SW=1
   export KWIN_COMPOSE=Q
   export QT_QUICK_BACKEND=software
-  export LIBGL_ALWAYS_SOFTWARE=1
-  export GALLIUM_DRIVER=llvmpipe
-  unset MESA_LOADER_DRIVER_OVERRIDE LIBGL_KOPPER_DRI2
 fi
 exec /usr/bin/kwin_wayland_wrapper "$@"

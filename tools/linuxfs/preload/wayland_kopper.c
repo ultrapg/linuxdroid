@@ -1,6 +1,7 @@
 #define _GNU_SOURCE
 #include <dlfcn.h>
 #include <errno.h>
+#include <link.h>
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
@@ -22,9 +23,11 @@
  *    every swap after the first frame to register a wl_surface.frame throttle_callback and
  *    block inside wl_display_dispatch_queue(), conflicting with QtWayland's own frame callbacks.
  *
- * 3. When kwin_wayland runs with software compositing (LINUXDROID_KWIN_ONLY_SW=1), child
- *    processes spawned by kwin_wayland should not inherit KWin's software-only overrides
- *    (QT_QUICK_BACKEND=software, LIBGL_ALWAYS_SOFTWARE=1, GALLIUM_DRIVER=llvmpipe).
+ * 3. Note on symbol resolution: libglvnd (libEGL.so.1) loads libEGL_mesa.so.0 (and its DT_NEEDED
+ *    dependency libgallium-*.so) with dlopen(..., RTLD_LOCAL). Because RTLD_LOCAL libraries are
+ *    not in the global symbol search list, dlsym(RTLD_NEXT, ...) and dlsym(RTLD_DEFAULT, ...)
+ *    return NULL for libgallium symbols. We therefore locate the loaded library path via
+ *    dl_iterate_phdr() and resolve its symbols via dlopen(path, RTLD_LAZY | RTLD_NOLOAD).
  */
 
 #define VK_STRUCTURE_TYPE_WAYLAND_SURFACE_CREATE_INFO_KHR_VAL 1000006000U
@@ -38,10 +41,67 @@ typedef int64_t (*kopper_swap_buffers_fn)(void *drawable, uint32_t flush_flags);
 typedef int64_t (*kopper_swap_buffers_damage_fn)(void *drawable, uint32_t flush_flags, int nrects, const int *rects);
 typedef void (*wl_egl_window_resize_fn)(void *win, int width, int height, int dx, int dy);
 
+struct bl_lib_match_ctx {
+  const char *substr;
+  char path[512];
+};
+
+static int bl_find_lib_phdr_cb(struct dl_phdr_info *info, size_t size, void *data) {
+  (void)size;
+  struct bl_lib_match_ctx *ctx = (struct bl_lib_match_ctx *)data;
+  if (info->dlpi_name && info->dlpi_name[0] != '\0' && strstr(info->dlpi_name, ctx->substr) != NULL) {
+    strncpy(ctx->path, info->dlpi_name, sizeof(ctx->path) - 1);
+    ctx->path[sizeof(ctx->path) - 1] = '\0';
+    return 1;
+  }
+  return 0;
+}
+
+static void *resolve_lib_symbol(const char *lib_substr, const char *fallback_soname, const char *sym_name, void *self_addr) {
+  void *sym = dlsym(RTLD_NEXT, sym_name);
+  if (sym && sym != self_addr) {
+    return sym;
+  }
+  if (!self_addr) {
+    sym = dlsym(RTLD_DEFAULT, sym_name);
+    if (sym) {
+      return sym;
+    }
+  }
+  struct bl_lib_match_ctx ctx;
+  ctx.substr = lib_substr;
+  ctx.path[0] = '\0';
+  dl_iterate_phdr(bl_find_lib_phdr_cb, &ctx);
+  if (ctx.path[0] != '\0') {
+    void *h = dlopen(ctx.path, RTLD_LAZY | RTLD_NOLOAD);
+    if (h) {
+      sym = dlsym(h, sym_name);
+      dlclose(h);
+      if (sym && sym != self_addr) {
+        return sym;
+      }
+    }
+  }
+  if (fallback_soname) {
+    void *h = dlopen(fallback_soname, RTLD_LAZY | RTLD_NOLOAD);
+    if (!h) {
+      h = dlopen(fallback_soname, RTLD_LAZY);
+    }
+    if (h) {
+      sym = dlsym(h, sym_name);
+      dlclose(h);
+      if (sym && sym != self_addr) {
+        return sym;
+      }
+    }
+  }
+  return NULL;
+}
+
 static void call_dri_invalidate_drawable(void *drawable) {
   static dri_invalidate_drawable_fn fn = NULL;
   if (!fn) {
-    fn = (dri_invalidate_drawable_fn)dlsym(RTLD_DEFAULT, "dri_invalidate_drawable");
+    fn = (dri_invalidate_drawable_fn)resolve_lib_symbol("libgallium", NULL, "dri_invalidate_drawable", NULL);
   }
   if (fn && drawable) {
     fn(drawable);
@@ -51,7 +111,7 @@ static void call_dri_invalidate_drawable(void *drawable) {
 static void call_kopper_set_swap_interval(void *drawable, int interval) {
   static kopper_set_swap_interval_fn fn = NULL;
   if (!fn) {
-    fn = (kopper_set_swap_interval_fn)dlsym(RTLD_DEFAULT, "kopperSetSwapInterval");
+    fn = (kopper_set_swap_interval_fn)resolve_lib_symbol("libgallium", NULL, "kopperSetSwapInterval", NULL);
   }
   if (fn && drawable) {
     fn(drawable, interval);
@@ -159,7 +219,7 @@ static void sync_kopper_drawable(void *dri_drawable, int is_post_swap) {
 void *dri_create_drawable(void *screen, const void *config, int is_pixmap, void *loaderPrivate) {
   static dri_create_drawable_fn real_fn = NULL;
   if (!real_fn) {
-    real_fn = (dri_create_drawable_fn)dlsym(RTLD_NEXT, "dri_create_drawable");
+    real_fn = (dri_create_drawable_fn)resolve_lib_symbol("libgallium", NULL, "dri_create_drawable", (void *)dri_create_drawable);
   }
   if (!real_fn) {
     return NULL;
@@ -188,7 +248,7 @@ void *dri_create_drawable(void *screen, const void *config, int is_pixmap, void 
 int driBindContext(void *ctx, void *draw, void *read) {
   static dri_bind_context_fn real_fn = NULL;
   if (!real_fn) {
-    real_fn = (dri_bind_context_fn)dlsym(RTLD_NEXT, "driBindContext");
+    real_fn = (dri_bind_context_fn)resolve_lib_symbol("libgallium", NULL, "driBindContext", (void *)driBindContext);
   }
   if (!real_fn) {
     return 0;
@@ -205,7 +265,7 @@ int driBindContext(void *ctx, void *draw, void *read) {
 int64_t kopperSwapBuffers(void *drawable, uint32_t flush_flags) {
   static kopper_swap_buffers_fn real_fn = NULL;
   if (!real_fn) {
-    real_fn = (kopper_swap_buffers_fn)dlsym(RTLD_NEXT, "kopperSwapBuffers");
+    real_fn = (kopper_swap_buffers_fn)resolve_lib_symbol("libgallium", NULL, "kopperSwapBuffers", (void *)kopperSwapBuffers);
   }
   if (!real_fn) {
     return -1;
@@ -219,7 +279,7 @@ int64_t kopperSwapBuffers(void *drawable, uint32_t flush_flags) {
 int64_t kopperSwapBuffersWithDamage(void *drawable, uint32_t flush_flags, int nrects, const int *rects) {
   static kopper_swap_buffers_damage_fn real_fn = NULL;
   if (!real_fn) {
-    real_fn = (kopper_swap_buffers_damage_fn)dlsym(RTLD_NEXT, "kopperSwapBuffersWithDamage");
+    real_fn = (kopper_swap_buffers_damage_fn)resolve_lib_symbol("libgallium", NULL, "kopperSwapBuffersWithDamage", (void *)kopperSwapBuffersWithDamage);
   }
   if (!real_fn) {
     return -1;
@@ -233,7 +293,7 @@ int64_t kopperSwapBuffersWithDamage(void *drawable, uint32_t flush_flags, int nr
 void wl_egl_window_resize(void *win, int width, int height, int dx, int dy) {
   static wl_egl_window_resize_fn real_fn = NULL;
   if (!real_fn) {
-    real_fn = (wl_egl_window_resize_fn)dlsym(RTLD_NEXT, "wl_egl_window_resize");
+    real_fn = (wl_egl_window_resize_fn)resolve_lib_symbol("libwayland-egl.so", "libwayland-egl.so.1", "wl_egl_window_resize", (void *)wl_egl_window_resize);
   }
   if (!real_fn) {
     return;
@@ -252,33 +312,6 @@ void wl_egl_window_resize(void *win, int width, int height, int dx, int dy) {
     void *dri2_surf = *(void **)((char *)win + 0x20);
     if (dri2_surf) {
       bl_wl_kopper_resize_cb(win, dri2_surf);
-    }
-  }
-}
-
-static void restore_or_unset_env(const char *target_key, const char *saved_key) {
-  const char *val = getenv(saved_key);
-  if (val && val[0] != '\0') {
-    setenv(target_key, val, 1);
-  } else {
-    unsetenv(target_key);
-  }
-  unsetenv(saved_key);
-}
-
-__attribute__((constructor)) static void bl_wayland_kopper_env_init(void) {
-  const char *kwin_only_sw = getenv("LINUXDROID_KWIN_ONLY_SW");
-  if (kwin_only_sw && strcmp(kwin_only_sw, "1") == 0) {
-    const char *prog = program_invocation_short_name;
-    if (!prog || (strcmp(prog, "kwin_wayland") != 0 &&
-                  strcmp(prog, "kwin_wayland_wrapper") != 0 &&
-                  strcmp(prog, "Xwayland") != 0)) {
-      unsetenv("LINUXDROID_KWIN_ONLY_SW");
-      restore_or_unset_env("QT_QUICK_BACKEND", "LINUXDROID_SAVED_QT_QUICK_BACKEND");
-      restore_or_unset_env("LIBGL_ALWAYS_SOFTWARE", "LINUXDROID_SAVED_LIBGL_ALWAYS_SOFTWARE");
-      restore_or_unset_env("GALLIUM_DRIVER", "LINUXDROID_SAVED_GALLIUM_DRIVER");
-      restore_or_unset_env("MESA_LOADER_DRIVER_OVERRIDE", "LINUXDROID_SAVED_MESA_LOADER_DRIVER_OVERRIDE");
-      restore_or_unset_env("LIBGL_KOPPER_DRI2", "LINUXDROID_SAVED_LIBGL_KOPPER_DRI2");
     }
   }
 }
