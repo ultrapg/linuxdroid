@@ -4,7 +4,9 @@
 #include <fcntl.h>
 #include <pthread.h>
 #include <stdint.h>
+#include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 #include <sys/ioctl.h>
 #include <sys/stat.h>
 #include <sys/syscall.h>
@@ -18,6 +20,25 @@ struct gem_close {
 };
 #define GEM_CLOSE _IOW('d', 0x09, struct gem_close)
 
+struct bl_drm_version {
+  int version_major;
+  int version_minor;
+  int version_patchlevel;
+  size_t name_len;
+  char *name;
+  size_t date_len;
+  char *date;
+  size_t desc_len;
+  char *desc;
+};
+#define BL_DRM_IOCTL_VERSION _IOWR('d', 0x00, struct bl_drm_version)
+
+struct bl_drm_get_cap {
+  uint64_t capability;
+  uint64_t value;
+};
+#define BL_DRM_IOCTL_GET_CAP _IOWR('d', 0x0c, struct bl_drm_get_cap)
+
 struct handle_entry {
   uint32_t handle;
   int dma_fd;
@@ -28,17 +49,49 @@ static pthread_mutex_t lock = PTHREAD_MUTEX_INITIALIZER;
 static struct handle_entry handle_entries[MAX_HANDLES];
 static uint32_t next_handle = 1;
 static dev_t kgsl_dev;
-static int kgsl_state;
+static dev_t mali_dev;
+static int synth_drm_state;
 
-static int is_kgsl(int fd) {
+static void init_synth_drm_devs_locked(void) {
+  if (synth_drm_state != 0) {
+    return;
+  }
   struct stat st;
-  pthread_mutex_lock(&lock);
-  if (kgsl_state == 0) {
-    kgsl_state = stat("/dev/kgsl-3d0", &st) == 0 ? 1 : -1;
+  if (stat("/dev/kgsl-3d0", &st) == 0 && S_ISCHR(st.st_mode)) {
     kgsl_dev = st.st_rdev;
   }
+  if (stat("/dev/mali0", &st) == 0 && S_ISCHR(st.st_mode)) {
+    mali_dev = st.st_rdev;
+  }
+  synth_drm_state = (kgsl_dev != 0 || mali_dev != 0) ? 1 : -1;
+}
+
+static int synth_drm_kind_dev(dev_t rdev) {
+  if (rdev == 0) {
+    return 0;
+  }
+  pthread_mutex_lock(&lock);
+  init_synth_drm_devs_locked();
   pthread_mutex_unlock(&lock);
-  return kgsl_state > 0 && fstat(fd, &st) == 0 && S_ISCHR(st.st_mode) && st.st_rdev == kgsl_dev;
+  if (kgsl_dev != 0 && rdev == kgsl_dev) {
+    return 1;
+  }
+  if (mali_dev != 0 && rdev == mali_dev) {
+    return 2;
+  }
+  return 0;
+}
+
+static int synth_drm_kind_fd(int fd) {
+  struct stat st;
+  if (fd < 0 || fstat(fd, &st) != 0 || !S_ISCHR(st.st_mode)) {
+    return 0;
+  }
+  return synth_drm_kind_dev(st.st_rdev);
+}
+
+static int is_kgsl(int fd) {
+  return synth_drm_kind_fd(fd) != 0;
 }
 
 static void *real(const char *name) {
@@ -190,17 +243,86 @@ int drmGetDeviceFromDevId(dev_t find_rdev, uint32_t flags, void *device) {
   return fn(find_rdev, flags, device);
 }
 
+static void copy_drm_field(char *dst, size_t *dst_len, const char *src) {
+  size_t len = strlen(src);
+  if (dst && *dst_len > 0) {
+    size_t n = len < *dst_len ? len : *dst_len;
+    memcpy(dst, src, n);
+  }
+  *dst_len = len;
+}
+
+int drmGetNodeTypeFromFd(int fd) {
+  if (synth_drm_kind_fd(fd) != 0) {
+    char proc_path[64];
+    char link_buf[256];
+    snprintf(proc_path, sizeof(proc_path), "/proc/self/fd/%d", fd);
+    ssize_t n = readlink(proc_path, link_buf, sizeof(link_buf) - 1);
+    if (n > 0) {
+      link_buf[n] = '\0';
+      if (strstr(link_buf, "/card0") != NULL) {
+        return 0; /* DRM_NODE_PRIMARY */
+      }
+    }
+    return 2; /* DRM_NODE_RENDER */
+  }
+  int (*fn)(int) = (int (*)(int)) real("drmGetNodeTypeFromFd");
+  return fn ? fn(fd) : -1;
+}
+
+int drmGetNodeTypeFromDevId(dev_t devid) {
+  if (synth_drm_kind_dev(devid) != 0) {
+    return 2; /* DRM_NODE_RENDER */
+  }
+  int (*fn)(dev_t) = (int (*)(dev_t)) real("drmGetNodeTypeFromDevId");
+  return fn ? fn(devid) : -1;
+}
+
 __attribute__((visibility("hidden"))) int bl_drm_gem_close(int fd, unsigned long request, void *arg, int *rc) {
-  if (request != GEM_CLOSE || !arg || !is_kgsl(fd)) {
+  int kind = 0;
+  if (request != GEM_CLOSE && request != BL_DRM_IOCTL_VERSION && request != BL_DRM_IOCTL_GET_CAP) {
     return 0;
   }
-  if (release_handle(fd, ((struct gem_close *) arg)->handle)) {
-    *rc = 0;
-  } else {
-    errno = EINVAL;
-    *rc = -1;
+  if (!arg || (kind = synth_drm_kind_fd(fd)) == 0) {
+    return 0;
   }
-  return 1;
+  if (request == GEM_CLOSE) {
+    if (release_handle(fd, ((struct gem_close *) arg)->handle)) {
+      *rc = 0;
+    } else {
+      errno = EINVAL;
+      *rc = -1;
+    }
+    return 1;
+  }
+  if (request == BL_DRM_IOCTL_VERSION) {
+    struct bl_drm_version *v = (struct bl_drm_version *) arg;
+    v->version_major = 1;
+    v->version_minor = 6;
+    v->version_patchlevel = 0;
+    copy_drm_field(v->name, &v->name_len, kind == 2 ? "panfrost" : "msm");
+    copy_drm_field(v->date, &v->date_len, "20240101");
+    copy_drm_field(v->desc, &v->desc_len, kind == 2 ? "ARM Mali DRM" : "Qualcomm KGSL DRM");
+    *rc = 0;
+    return 1;
+  }
+  if (request == BL_DRM_IOCTL_GET_CAP) {
+    struct bl_drm_get_cap *cap = (struct bl_drm_get_cap *) arg;
+    cap->value = (cap->capability == 0x5 /* DRM_CAP_PRIME */) ? 0x3 : 1;
+    *rc = 0;
+    return 1;
+  }
+  return 0;
+}
+
+int drmIoctl(int fd, unsigned long request, void *arg) {
+  int rc = 0;
+  if (bl_drm_gem_close(fd, request, arg, &rc)) {
+    return rc;
+  }
+  int (*fn)(int, unsigned long, void *) =
+      (int (*)(int, unsigned long, void *)) real("drmIoctl");
+  return fn ? fn(fd, request, arg) : -ENOSYS;
 }
 
 static void drm_lock_before_fork(void) { pthread_mutex_lock(&lock); }

@@ -574,6 +574,7 @@ if [ "$desktop_choice" = "kde" ]; then
     export KWIN_COMPOSE=Q
     unset QT_QUICK_BACKEND LIBGL_ALWAYS_SOFTWARE
     export GALLIUM_THREAD=0
+    export MESA_LOG=null
     if [ "${LINUXDROID_GPU_ACTIVE:-}" = "turnip" ]; then
       export MESA_LOADER_DRIVER_OVERRIDE="${MESA_LOADER_DRIVER_OVERRIDE:-zink}"
       export GALLIUM_DRIVER="${GALLIUM_DRIVER:-zink}"
@@ -653,13 +654,20 @@ ENTRY
     start_x11_helpers ":0 :1" ""
     (
       wl1_ready=0
+      wl_nested_sock="wayland-1"
       for i in $(seq 1 150); do
         if [ -S "$XDG_RUNTIME_DIR/wayland-1" ]; then
           wl1_ready=1
-          WAYLAND_DISPLAY=wayland-1 dbus-update-activation-environment WAYLAND_DISPLAY >/dev/null 2>&1 || true
+          wl_nested_sock="wayland-1"
+        elif [ -S "$XDG_RUNTIME_DIR/wayland-2" ]; then
+          wl1_ready=1
+          wl_nested_sock="wayland-2"
+        fi
+        if [ "$wl1_ready" = "1" ]; then
+          WAYLAND_DISPLAY="$wl_nested_sock" dbus-update-activation-environment WAYLAND_DISPLAY >/dev/null 2>&1 || true
           for kamd in /usr/lib/*/libexec/kactivitymanagerd /usr/lib/kactivitymanagerd /usr/libexec/kactivitymanagerd; do
             if [ -x "$kamd" ]; then
-              WAYLAND_DISPLAY=wayland-1 "$kamd" >/dev/null 2>&1 &
+              WAYLAND_DISPLAY="$wl_nested_sock" "$kamd" >/dev/null 2>&1 &
               break
             fi
           done
@@ -667,10 +675,10 @@ ENTRY
           write_status "6|Loading KDE Plasma desktop & taskbar..." "== [BOOT 6/6] Loading KDE Plasma desktop & taskbar..."
           break
         fi
-        if [ "'"$gpu_desktop"'" = "1" ] && [ "$i" -ge 100 ]; then
-          echo "== linuxdroid-desktop: wayland-1 did not appear within 10s under GPU desktop; triggering software fallback"
-          printf "wayland-1 timeout after 10s\n" > "'"$gpu_fail"'" 2>/dev/null || true
-          pkill -TERM -f startplasma-wayland 2>/dev/null || true
+        if [ "'"$gpu_desktop"'" = "1" ] && [ "$i" -ge 120 ]; then
+          echo "== linuxdroid-desktop: wayland-1 did not appear within 12s under GPU desktop; triggering software fallback"
+          printf "wayland-1 timeout after 12s\n" > "'"$gpu_fail"'" 2>/dev/null || true
+          pkill -TERM -x startplasma-wayland 2>/dev/null || true
           pkill -TERM -x kwin_wayland_wrapper 2>/dev/null || true
           pkill -TERM -x kwin_wayland 2>/dev/null || true
           exit 0
@@ -698,7 +706,7 @@ ENTRY
       if [ "'"$gpu_desktop"'" = "1" ] && [ "$shell_up" = "0" ]; then
         echo "== linuxdroid-desktop: Plasma shell did not start with the GPU UI; falling back to software"
         printf "plasmashell did not start within 60s on the GPU\n" > "'"$gpu_fail"'" 2>/dev/null || true
-        pkill -TERM -f startplasma-wayland 2>/dev/null || true
+        pkill -TERM -x startplasma-wayland 2>/dev/null || true
         pkill -TERM -x kwin_wayland_wrapper 2>/dev/null || true
         pkill -TERM -x kwin_wayland 2>/dev/null || true
       fi
@@ -928,6 +936,15 @@ run_xwayland_desktop() {
   export GTK_MODULES="gail:atk-bridge"
   export QT_ACCESSIBILITY=1
   export QT_LINUX_ACCESSIBILITY_ALWAYS_ON=1
+  if [ "${BL_GPU_DESKTOP:-0}" = "1" ]; then
+    unset LIBGL_ALWAYS_SOFTWARE
+    export GALLIUM_THREAD=0
+    export MESA_LOG=null
+  else
+    unset MESA_LOADER_DRIVER_OVERRIDE LIBGL_KOPPER_DRI2 MESA_GL_VERSION_OVERRIDE MESA_GLSL_VERSION_OVERRIDE
+    export LIBGL_ALWAYS_SOFTWARE=1
+    export GALLIUM_DRIVER=llvmpipe
+  fi
 
   printf 'Xft.dpi: %s\nXcursor.size: %s\n' \
     "$dpi" \

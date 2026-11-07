@@ -1,5 +1,8 @@
 #!/bin/bash
 if [ "${BL_DESKTOP:-}" = "1" ]; then
+  if [ -n "${XDG_RUNTIME_DIR:-}" ] && ! pgrep -x kwin_wayland >/dev/null 2>&1; then
+    rm -f "$XDG_RUNTIME_DIR"/wayland-[1-9]* 2>/dev/null || true
+  fi
   has_wl=0
   for arg in "$@"; do
     if [ "$arg" = "--wayland-display" ]; then

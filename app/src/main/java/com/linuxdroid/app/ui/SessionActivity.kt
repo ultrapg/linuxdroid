@@ -116,6 +116,7 @@ import com.linuxdroid.app.input.TrackpadController
 import com.linuxdroid.app.input.TwoFingerGestures
 import com.linuxdroid.app.runtime.LinuxRuntime
 import com.linuxdroid.app.session.ExternalDisplayMode
+import com.linuxdroid.app.session.ScreenOrientationPref
 import com.linuxdroid.app.session.SessionPhase
 import com.linuxdroid.app.session.SessionPrefs
 import com.linuxdroid.app.session.SessionService
@@ -141,6 +142,8 @@ class SessionActivity : ComponentActivity() {
     private val trackpadController = TrackpadController()
     private var prevMouseButtonMask = 0
     private var lastBackHandledUptimeMs = 0L
+    private var lastStartRequestUptimeMs = 0L
+    private var lastStartRequestSig = ""
 
     private val showQuickMenuState = mutableStateOf(false)
     private val routingModeState = mutableStateOf(DisplayRoutingMode.INTERNAL_LAPTOP)
@@ -785,7 +788,10 @@ class SessionActivity : ComponentActivity() {
         if (routingModeState.value == DisplayRoutingMode.DEX_OR_FREEFORM_WINDOW) {
             return (surfaceW and 1.inv()).coerceAtLeast(640) to (surfaceH and 1.inv()).coerceAtLeast(480)
         }
-        return SessionPrefs.resolutionPreset(this).resolveForSurface(surfaceW, surfaceH)
+        val isPortraitPref = SessionPrefs.orientation(this) == ScreenOrientationPref.PORTRAIT
+        val normW = if (isPortraitPref) surfaceW else maxOf(surfaceW, surfaceH)
+        val normH = if (isPortraitPref) surfaceH else minOf(surfaceW, surfaceH)
+        return SessionPrefs.resolutionPreset(this).resolveForSurface(normW, normH)
     }
 
     private fun selectBestRefreshRate(displayOverride: Display? = null): Float {
@@ -812,9 +818,16 @@ class SessionActivity : ComponentActivity() {
         val snap = SessionState.state.value
         val phase = snap.phase
         if (phase == SessionPhase.FAILED || phase == SessionPhase.STOPPING) return
-        val sigChanged = snap.activeConfigSignature != null &&
-            snap.activeConfigSignature != SessionPrefs.currentConfigSignature(this)
+        val desiredSig = SessionPrefs.currentConfigSignature(this)
+        val sigChanged = snap.activeConfigSignature != null && snap.activeConfigSignature != desiredSig
         if (!SessionState.isRunningOrPaused || SessionState.isPaused || sigChanged) {
+            val now = SystemClock.uptimeMillis()
+            val reqSig = "$width:$height:${refreshHz.toInt()}:$desiredSig:${SessionState.isPaused}"
+            if (reqSig == lastStartRequestSig && now - lastStartRequestUptimeMs < 600L) {
+                return
+            }
+            lastStartRequestUptimeMs = now
+            lastStartRequestSig = reqSig
             SessionService.startOrResume(this, width, height, refreshHz)
         }
     }

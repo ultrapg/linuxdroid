@@ -91,6 +91,34 @@ try:
                         node_str = raw.decode("utf-8", "replace")
                         break
         print(f"drmGetDeviceFromDevId({label}, rdev={rdev}): rc={rc} node={node_str}")
+    if os.path.exists("/dev/dri/renderD128"):
+        fd = os.open("/dev/dri/renderD128", os.O_RDWR | os.O_CLOEXEC)
+        try:
+            drm.drmGetNodeTypeFromFd.argtypes = [ctypes.c_int]
+            drm.drmGetNodeTypeFromFd.restype = ctypes.c_int
+            ntype = drm.drmGetNodeTypeFromFd(fd)
+            class DrmVersion(ctypes.Structure):
+                _fields_ = [
+                    ("version_major", ctypes.c_int),
+                    ("version_minor", ctypes.c_int),
+                    ("version_patchlevel", ctypes.c_int),
+                    ("name_len", ctypes.c_int),
+                    ("name", ctypes.c_char_p),
+                    ("date_len", ctypes.c_int),
+                    ("date", ctypes.c_char_p),
+                    ("desc_len", ctypes.c_int),
+                    ("desc", ctypes.c_char_p),
+                ]
+            drm.drmGetVersion.argtypes = [ctypes.c_int]
+            drm.drmGetVersion.restype = ctypes.POINTER(DrmVersion)
+            drm.drmFreeVersion.argtypes = [ctypes.POINTER(DrmVersion)]
+            vp = drm.drmGetVersion(fd)
+            vname = vp.contents.name.decode("utf-8", "replace") if bool(vp) and vp.contents.name else "null"
+            if bool(vp):
+                drm.drmFreeVersion(vp)
+            print(f"renderD128 fd probe: nodeType={ntype} drmVersionName={vname}")
+        finally:
+            os.close(fd)
 except Exception as e:
     print(f"libdrm probe error: {e}")
 PY

@@ -65,12 +65,35 @@ class SessionService : Service() {
                 startForeground(NOTIFICATION_ID, buildNotification("Starting Linux workstation...", paused = false))
                 if (!SessionState.isRunningOrPaused) {
                     val gen = bootGeneration.incrementAndGet()
+                    val nowMs = System.currentTimeMillis()
+                    SessionState.update {
+                        SessionSnapshot(
+                            phase = SessionPhase.STARTING,
+                            statusText = "Preparing Linux runtime & user account...",
+                            bootStep = 1,
+                            bootTotalSteps = 6,
+                            compatibilityRetryUsed = forceCompat,
+                            startedAtMs = nowMs,
+                            activeConfigSignature = desiredSig,
+                        )
+                    }
                     Thread(
                         { bootWorkstation(width, height, refreshHz, forceCompatRetry = forceCompat, generation = gen) },
                         "session-boot-$gen"
                     ).start()
                 } else if (curSnap.activeConfigSignature != null && curSnap.activeConfigSignature != desiredSig) {
                     val gen = bootGeneration.incrementAndGet()
+                    SessionState.update {
+                        it.copy(
+                            phase = SessionPhase.STARTING,
+                            statusText = "Applying updated settings & restarting...",
+                            firstFrameReady = false,
+                            guestPid = -1,
+                            bootStep = 1,
+                            errorMessage = null,
+                            activeConfigSignature = desiredSig,
+                        )
+                    }
                     Thread(
                         { restartIntoBoot(width, height, refreshHz, forceCompatRetry = forceCompat, generation = gen) },
                         "session-restart-$gen"
@@ -161,6 +184,7 @@ class SessionService : Service() {
             SessionPrefs.prootFastPath(this) &&
             !SessionPrefs.prootNoSeccomp(this)
         LinuxRuntime.stageBundledOverlay(this, enableFastPath = fastPathPref)
+        if (bootGeneration.get() != generation) return
         RootSpawner.start(this)
 
         val root = LinuxRuntime.rootDir(this)
@@ -179,7 +203,10 @@ class SessionService : Service() {
             shmDir.mkdirs()
         }
 
-        val geom = SessionPrefs.computeCompositorGeometry(this, width, height)
+        val isPortraitPref = SessionPrefs.orientation(this) == ScreenOrientationPref.PORTRAIT
+        val normWidth = if (isPortraitPref) width else maxOf(width, height)
+        val normHeight = if (isPortraitPref) height else minOf(width, height)
+        val geom = SessionPrefs.computeCompositorGeometry(this, normWidth, normHeight)
         val configSig = SessionPrefs.currentConfigSignature(this)
         val scale = geom.effectiveScale
         val scaleText = if (scale % 1.0f == 0f) {
@@ -288,6 +315,7 @@ class SessionService : Service() {
             return
         }
 
+        if (bootGeneration.get() != generation) return
         stopHelpersOnly()
 
         if (gpuConfig.requiresVirglServer) {
@@ -400,6 +428,11 @@ class SessionService : Service() {
             status = "Starting Ubuntu ARM64 environment...",
             gpuSummary = hwSummary,
         )
+
+        if (bootGeneration.get() != generation) {
+            stopHelpersOnly()
+            return
+        }
 
         val pid = try {
             HostProcess.start(

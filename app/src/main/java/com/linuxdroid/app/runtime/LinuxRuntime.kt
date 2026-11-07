@@ -8,6 +8,7 @@ import android.system.Os
 import android.util.Log
 import com.linuxdroid.app.BuildConfig
 import com.linuxdroid.app.core.FileUtils
+import com.linuxdroid.app.gpu.GpuInfo
 import com.linuxdroid.app.session.SessionPrefs
 import com.linuxdroid.app.session.SessionState
 import java.io.File
@@ -575,26 +576,35 @@ object LinuxRuntime {
     }
 
     /**
-     * Exposes Qualcomm `/dev/kgsl-3d0` or Mali `/dev/mali0` as synthetic DRM render nodes
-     * (`/dev/dri/renderD$minor` AND `/dev/dri/renderD128`) ONLY when native `/dev/dri/renderD128`
-     * is not already present on the host.
+     * Exposes Qualcomm `/dev/kgsl-3d0` or Mali `/dev/mali0` as synthetic DRM render and primary nodes
+     * (`/dev/dri/renderD128` and `/dev/dri/card0`) whenever native `/dev/dri/renderD128` is missing
+     * or blocked by SELinux (`EACCES`).
      *
-     * Note: KWin 5.27.11 hardcodes `open("/dev/dri/renderD128")` in `WaylandBackend`, and Mesa's
-     * `pipe_loader_drm` only scans `renderD128..renderD191`, while `libdrm`'s `drmGetDeviceNameFromFd2`
-     * reads `/sys/dev/char/$major:$minor/uevent` (`DEVNAME=dri/...`). Binding both `renderD$minor`
-     * and `renderD128` satisfies KWin, Mesa, and `libdrm` simultaneously.
+     * Note: Do NOT create `renderD0` alongside `renderD128`: `libdrm`'s `drmFoldDuplicatedDevices()`
+     * folds devices sharing the same sysfs realpath and overwrites `nodes[DRM_NODE_RENDER]` with the
+     * last render node visited (`renderD0`), breaking callers that expect `/dev/dri/renderD128`.
+     * Similarly, `drmParsePlatformBusInfo()` and `drmParsePlatformDeviceInfo()` in `libdrm` require
+     * `OF_FULLNAME`, `OF_COMPATIBLE_N`, and `OF_COMPATIBLE_0` in `/sys/dev/char/$major:$minor/device/uevent`.
      */
     private fun bindKgslDrmIfNeeded(context: Context, specs: MutableList<String>) {
-        if (File("/dev/dri/renderD128").exists()) return
+        if (GpuInfo.isAccessibleCharDevice("/dev/dri/renderD128")) return
         val (hostDevPath, ueventDriver, drvTarget) = when {
-            File(KGSL_DEVICE).exists() -> Triple(
+            GpuInfo.isAccessibleCharDevice(KGSL_DEVICE) -> Triple(
                 KGSL_DEVICE,
-                "DRIVER=kgsl-3d0\nMODALIAS=platform:kgsl-3d0\n",
+                "DRIVER=kgsl-3d0\n" +
+                    "OF_FULLNAME=/soc/kgsl-3d0\n" +
+                    "OF_COMPATIBLE_0=qcom,kgsl-3d0\n" +
+                    "OF_COMPATIBLE_N=1\n" +
+                    "MODALIAS=platform:kgsl-3d0\n",
                 "/sys/bus/platform/drivers/msm_drm"
             )
-            File(MALI_DEVICE).exists() -> Triple(
+            GpuInfo.isAccessibleCharDevice(MALI_DEVICE) -> Triple(
                 MALI_DEVICE,
-                "DRIVER=mali\nMODALIAS=platform:mali\n",
+                "DRIVER=panfrost\n" +
+                    "OF_FULLNAME=/soc/gpu\n" +
+                    "OF_COMPATIBLE_0=arm,mali-valhall-csf\n" +
+                    "OF_COMPATIBLE_N=1\n" +
+                    "MODALIAS=platform:panfrost\n",
                 "/sys/bus/platform/drivers/panfrost"
             )
             else -> return
@@ -607,29 +617,36 @@ object LinuxRuntime {
         val dev = st.st_rdev
         val major = ((dev shr 8) and 0xfffL) or ((dev shr 32) and 0xfffL.inv())
         val minor = (dev and 0xffL) or ((dev shr 12) and 0xffL.inv())
-        val node = "renderD$minor"
-        val nodes = linkedSetOf(node, "renderD128")
+        val nodes = linkedSetOf("card0", "renderD128")
         val base = File(liveDir(context), "drm")
         val dri = File(base, "dri")
         val charNode = File(base, "sys/$major:$minor")
         val device = File(charNode, "device")
+        val drmDir = File(device, "drm")
         try {
+            if (dri.exists()) dri.deleteRecursively()
+            if (drmDir.exists()) drmDir.deleteRecursively()
             dri.mkdirs()
             for (n in nodes) {
-                val drm = File(device, "drm/$n")
+                val drm = File(drmDir, n)
                 drm.mkdirs()
                 File(dri, n).createNewFile()
                 FileUtils.writeString(File(drm, "dev"), "$major:$minor\n")
             }
             FileUtils.writeString(
                 File(charNode, "uevent"),
-                "MAJOR=$major\nMINOR=$minor\nDEVNAME=dri/$node\n"
+                "MAJOR=$major\nMINOR=$minor\nDEVNAME=dri/renderD128\n"
             )
             FileUtils.writeString(File(device, "uevent"), ueventDriver)
             val subsys = File(device, "subsystem")
-            if (!Files.isSymbolicLink(subsys.toPath())) Os.symlink("/sys/bus/platform", subsys.path)
+            if (Files.isSymbolicLink(subsys.toPath()) || subsys.exists()) {
+                Files.deleteIfExists(subsys.toPath())
+            }
+            Os.symlink("/sys/bus/platform", subsys.path)
             val drv = File(device, "driver")
-            if (Files.isSymbolicLink(drv.toPath())) Files.deleteIfExists(drv.toPath())
+            if (Files.isSymbolicLink(drv.toPath()) || drv.exists()) {
+                Files.deleteIfExists(drv.toPath())
+            }
             Os.symlink(drvTarget, drv.path)
         } catch (_: Exception) {
             return
@@ -639,15 +656,14 @@ object LinuxRuntime {
         for (n in nodes) {
             specs.add("$hostDevPath:/dev/dri/$n")
         }
-        if (File("/sys/class/drm").list() == null) {
-            val drmClass = File(base, "class").apply { mkdirs() }
-            runCatching {
-                drmClass.listFiles()?.forEach { Files.deleteIfExists(it.toPath()) }
-                for (n in nodes) {
-                    Os.symlink("/sys/dev/char/$major:$minor", File(drmClass, n).path)
-                }
-                specs.add("${drmClass.absolutePath}:/sys/class/drm")
+        val drmClass = File(base, "class")
+        runCatching {
+            if (drmClass.exists()) drmClass.deleteRecursively()
+            drmClass.mkdirs()
+            for (n in nodes) {
+                Os.symlink("/sys/dev/char/$major:$minor/device/drm/$n", File(drmClass, n).path)
             }
+            specs.add("${drmClass.absolutePath}:/sys/class/drm")
         }
     }
 

@@ -1,6 +1,8 @@
 package com.linuxdroid.app.gpu
 
 import android.os.Build
+import android.system.Os
+import android.system.OsConstants
 import java.io.File
 
 enum class GpuFamily(val label: String) {
@@ -43,15 +45,22 @@ data class GpuInfo(
         @Volatile
         private var cached: GpuInfo? = null
 
+        fun isAccessibleCharDevice(path: String): Boolean = try {
+            val st = Os.stat(path)
+            OsConstants.S_ISCHR(st.st_mode) && Os.access(path, OsConstants.R_OK or OsConstants.W_OK)
+        } catch (_: Throwable) {
+            false
+        }
+
         fun detect(): GpuInfo {
             cached?.let { return it }
             val map = VulkanInfo.querySafe()
             val detected = fromProbeMap(
                 probe = map,
                 socHardware = "${Build.HARDWARE} ${Build.BOARD} ${socManufacturerOrEmpty()} ${socModelOrEmpty()}",
-                hasKgslNode = File("/dev/kgsl-3d0").exists(),
-                hasDriRenderNode = File("/dev/dri/renderD128").exists(),
-                hasMaliNode = File("/dev/mali0").exists(),
+                hasKgslNode = isAccessibleCharDevice("/dev/kgsl-3d0"),
+                hasDriRenderNode = isAccessibleCharDevice("/dev/dri/renderD128"),
+                hasMaliNode = isAccessibleCharDevice("/dev/mali0"),
             )
             cached = detected
             return detected
