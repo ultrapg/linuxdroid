@@ -443,6 +443,17 @@ Java_com_linuxdroid_app_wayland_WaylandCompositor_nativeSetSurface(
     }
 }
 
+JNIEXPORT void JNICALL
+Java_com_linuxdroid_app_wayland_WaylandCompositor_nativeSetSurfaceWithSize(
+        JNIEnv *env, jclass clazz, jobject surface, jint width, jint height) {
+    (void)clazz;
+    if (surface) {
+        vk_present_set_window_with_size(ANativeWindow_fromSurface(env, surface), (int)width, (int)height);
+    } else {
+        vk_present_set_window_with_size(NULL, 0, 0);
+    }
+}
+
 JNIEXPORT jboolean JNICALL
 Java_com_linuxdroid_app_wayland_WaylandCompositor_nativeWaitSurface(
         JNIEnv *env, jclass clazz, jint timeout_ms) {

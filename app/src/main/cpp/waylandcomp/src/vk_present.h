@@ -6,6 +6,7 @@ void vk_present_set_driver(const char *driver_path, const char *library_name,
                            const char *native_lib_dir);
 
 void vk_present_set_window(ANativeWindow *window);
+void vk_present_set_window_with_size(ANativeWindow *window, int width, int height);
 int vkp_apply_window_request(void);
 int vkp_has_dmabuf(void);
 

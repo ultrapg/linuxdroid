@@ -26,6 +26,8 @@ object CompositorHost {
         refreshHz: Float,
         desktopScale: Float = 1.0f,
         surface: Surface? = null,
+        surfaceWidth: Int = initialWidth,
+        surfaceHeight: Int = initialHeight,
     ): Boolean {
         xdgRuntimeDir.mkdirs()
         FileUtils.chmod(xdgRuntimeDir, 0b111_000_000)
@@ -57,12 +59,15 @@ object CompositorHost {
                 hostDriver?.libraryName,
                 nativeLibDir,
             )
+            if (surface != null && surfaceWidth > 0 && surfaceHeight > 0) {
+                WaylandCompositor.nativeSetSurfaceWithSize(surface, surfaceWidth, surfaceHeight)
+            }
         } else {
             if (initialWidth > 0 && initialHeight > 0) {
                 WaylandCompositor.nativeResizeOutput(initialWidth, initialHeight)
             }
             if (surface != null) {
-                attachSurface(surface, initialWidth, initialHeight, refreshHz, desktopScale)
+                attachSurface(surface, initialWidth, initialHeight, refreshHz, desktopScale, surfaceWidth, surfaceHeight)
             }
         }
 
@@ -103,6 +108,8 @@ object CompositorHost {
         height: Int,
         refreshHz: Float,
         desktopScale: Float = 1.0f,
+        surfaceWidth: Int = width,
+        surfaceHeight: Int = height,
     ) {
         WaylandCompositor.nativeSetDesktopScale(desktopScale)
         if (width > 0 && height > 0) {
@@ -112,7 +119,11 @@ object CompositorHost {
             WaylandCompositor.nativeSetOutputRefreshRate(refreshHz)
             WaylandCompositor.nativeSetLayerFrameRate(refreshHz)
         }
-        WaylandCompositor.nativeSetSurface(surface)
+        if (surfaceWidth > 0 && surfaceHeight > 0) {
+            WaylandCompositor.nativeSetSurfaceWithSize(surface, surfaceWidth, surfaceHeight)
+        } else {
+            WaylandCompositor.nativeSetSurface(surface)
+        }
     }
 
     fun detachSurface() {

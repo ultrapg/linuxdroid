@@ -154,6 +154,7 @@ public final class WaylandCompositor {
     public static native void nativeSetRenderOnCommit(boolean on);
     public static native void nativeSetFpsLimit(int fps);
     public static native void nativeSetSurface(Surface surface);
+    public static native void nativeSetSurfaceWithSize(Surface surface, int width, int height);
     public static native boolean nativeWaitSurface(int timeoutMs);
     private static native void nativeSetClipboardText(byte[] utf8);
     private static native void nativeTextInputCommit(byte[] utf8);

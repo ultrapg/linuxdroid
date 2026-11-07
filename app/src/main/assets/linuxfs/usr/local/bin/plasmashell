@@ -57,6 +57,7 @@ if [ "${LINUXDROID_GPU_ACTIVE:-}" = "turnip" ]; then
   export GALLIUM_DRIVER="${GALLIUM_DRIVER:-zink}"
   export LIBGL_KOPPER_DRI2=true
   export MESA_VK_WSI_DEBUG=sw
+  export MESA_VK_WSI_PRESENT_MODE=mailbox
 else
   export GALLIUM_DRIVER="${GALLIUM_DRIVER:-virpipe}"
   if [ "${MESA_GL_VERSION_OVERRIDE:-}" = "4.3" ]; then
@@ -94,6 +95,8 @@ wl.wl_proxy_add_listener.restype = ctypes.c_int
 
 wlegl.wl_egl_window_create.argtypes = [ctypes.c_void_p, ctypes.c_int, ctypes.c_int]
 wlegl.wl_egl_window_create.restype = ctypes.c_void_p
+wlegl.wl_egl_window_resize.argtypes = [ctypes.c_void_p, ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_int]
+wlegl.wl_egl_window_get_attached_size.argtypes = [ctypes.c_void_p, ctypes.POINTER(ctypes.c_int), ctypes.POINTER(ctypes.c_int)]
 wlegl.wl_egl_window_destroy.argtypes = [ctypes.c_void_p]
 
 wl_reg_iface = ctypes.addressof(ctypes.c_char.in_dll(wl, "wl_registry_interface"))
@@ -280,7 +283,23 @@ print(f"DRAW_ERR=0x{draw_err:x} PIXEL_RGBA={rgba} SWAP_OK={swap_ok} SWAP_ERR=0x{
 
 if draw_err != 0 or rgba[2] < 180 or not swap_ok:
     raise SystemExit(f"FAIL: draw_err=0x{draw_err:x} rgba={rgba} swap_ok={swap_ok}")
-print("PASS: Wayland EGL surface + legacy shader + VAO=0 draw + swap verified")
+
+# Verify dynamic Wayland Kopper window resize + second non-blocking swap
+wlegl.wl_egl_window_resize(egl_win, 128, 96, 0, 0)
+gl.glViewport(0, 0, 128, 96)
+gl.glClearColor(0.0, 0.0, 0.0, 1.0)
+gl.glClear(0x4000)
+gl.glDrawArrays(0x0005, 0, 4)
+pix2 = (ctypes.c_ubyte * 4)(0, 0, 0, 0)
+gl.glReadPixels(96, 64, 1, 1, 0x1908, 0x1401, ctypes.cast(pix2, ctypes.c_void_p))
+rgba2 = (pix2[0], pix2[1], pix2[2], pix2[3])
+swap2_ok = egl.eglSwapBuffers(dpy, surf)
+att_w, att_h = ctypes.c_int(0), ctypes.c_int(0)
+wlegl.wl_egl_window_get_attached_size(egl_win, ctypes.byref(att_w), ctypes.byref(att_h))
+print(f"RESIZE_RGBA={rgba2} SWAP2_OK={swap2_ok} ATTACHED={att_w.value}x{att_h.value}")
+if rgba2[2] < 180 or not swap2_ok or att_w.value != 128 or att_h.value != 96:
+    raise SystemExit(f"FAIL: resize verification failed rgba2={rgba2} swap2_ok={swap2_ok} attached={att_w.value}x{att_h.value}")
+print("PASS: Wayland EGL surface + legacy shader + VAO=0 draw + resize + multi-swap verified")
 PY
   echo "=== plasmashell preflight FAILED -> falling back to QT_QUICK_BACKEND=software ===" >> "$GPU_LOG"
   printf 'plasmashell GPU preflight failed on %s\n' "${WAYLAND_DISPLAY:-wayland-1}" > "$GPU_FAIL" 2>/dev/null || true

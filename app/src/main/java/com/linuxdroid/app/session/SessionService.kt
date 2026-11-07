@@ -203,9 +203,11 @@ class SessionService : Service() {
             shmDir.mkdirs()
         }
 
-        val isPortraitPref = SessionPrefs.orientation(this) == ScreenOrientationPref.PORTRAIT
-        val normWidth = if (isPortraitPref) width else maxOf(width, height)
-        val normHeight = if (isPortraitPref) height else minOf(width, height)
+        val (normWidth, normHeight) = when (SessionPrefs.orientation(this)) {
+            ScreenOrientationPref.PORTRAIT -> minOf(width, height) to maxOf(width, height)
+            ScreenOrientationPref.LANDSCAPE -> maxOf(width, height) to minOf(width, height)
+            ScreenOrientationPref.AUTO -> width to height
+        }
         val geom = SessionPrefs.computeCompositorGeometry(this, normWidth, normHeight)
         val configSig = SessionPrefs.currentConfigSignature(this)
         val scale = geom.effectiveScale

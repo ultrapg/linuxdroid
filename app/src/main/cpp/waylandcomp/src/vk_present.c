@@ -122,6 +122,8 @@ static const char *vk_result_name(VkResult r);
 
 static pthread_mutex_t g_req_lock = PTHREAD_MUTEX_INITIALIZER;
 static ANativeWindow *g_req_window;
+static int g_req_win_w, g_req_win_h;
+static int g_win_w, g_win_h;
 static int g_req_pending;
 static int g_req_detached;
 static uint64_t g_req_generation, g_req_applied;
@@ -196,21 +198,28 @@ static void destroy_swapchain(void) {
     g_swap_md_identity = 0;
     if (g_surface) g_vk.DestroySurfaceKHR(g_inst, g_surface, NULL);
     g_surface = VK_NULL_HANDLE;
+    if (g_window) ANativeWindow_setBuffersGeometry(g_window, 0, 0, 0);
     free(g_images);
     g_images = NULL;
     g_nimg = 0;
 }
 
-void vk_present_set_window(ANativeWindow *window) {
+void vk_present_set_window_with_size(ANativeWindow *window, int width, int height) {
     ANativeWindow *superseded = NULL;
     pthread_mutex_lock(&g_req_lock);
-    if (g_req_pending && g_req_window && g_req_window != window) superseded = g_req_window;
+    if (g_req_pending && g_req_window) superseded = g_req_window;
     g_req_window = window;
+    g_req_win_w = width > 0 ? width : 0;
+    g_req_win_h = height > 0 ? height : 0;
     g_req_pending = 1;
     g_req_generation++;
-    if (!window) g_req_detached = 1;
+    g_req_detached = 1;
     pthread_mutex_unlock(&g_req_lock);
     if (superseded) ANativeWindow_release(superseded);
+}
+
+void vk_present_set_window(ANativeWindow *window) {
+    vk_present_set_window_with_size(window, 0, 0);
 }
 
 static void window_request_applied(uint64_t generation) {
@@ -242,23 +251,36 @@ int vkp_apply_window_request(void) {
     pthread_mutex_lock(&g_req_lock);
     if (!g_req_pending) { pthread_mutex_unlock(&g_req_lock); return 0; }
     w = g_req_window;
+    const int req_w = g_req_win_w;
+    const int req_h = g_req_win_h;
     const int detached = g_req_detached;
     const uint64_t generation = g_req_generation;
     g_req_window = NULL;
+    g_req_win_w = 0;
+    g_req_win_h = 0;
     g_req_pending = 0;
     g_req_detached = 0;
     pthread_mutex_unlock(&g_req_lock);
+    if (w) {
+        g_win_w = req_w;
+        g_win_h = req_h;
+    } else {
+        g_win_w = 0;
+        g_win_h = 0;
+    }
     if (w == g_window) {
         if (w) ANativeWindow_release(w);
         if (!w || !detached) { window_request_applied(generation); return 0; }
         sc_layer_window_gone();
         destroy_swapchain();
+        g_map.valid = 0;
         window_request_applied(generation);
-        droiddeck_log("gpu", "screen surface rebound: rebuilding the swapchain at its new size");
+        droiddeck_log("gpu", "screen surface rebound (%dx%d): rebuilding the swapchain at its new size", g_win_w, g_win_h);
         return 1;
     }
     sc_layer_window_gone();
     destroy_swapchain();
+    g_map.valid = 0;
     g_swap_hdr_unavailable = 0;
     if (g_window) ANativeWindow_release(g_window);
     g_window = w;
@@ -660,6 +682,9 @@ static void log_surface_formats(const VkSurfaceFormatKHR *f, uint32_t n) {
 }
 
 static int swap_init_locked(void) {
+    if (g_win_w > 0 && g_win_h > 0) {
+        ANativeWindow_setBuffersGeometry(g_window, g_win_w, g_win_h, 0);
+    }
 
     VkAndroidSurfaceCreateInfoKHR aci = {
         .sType = VK_STRUCTURE_TYPE_ANDROID_SURFACE_CREATE_INFO_KHR, .window = g_window};
@@ -720,10 +745,21 @@ static int swap_init_locked(void) {
     g_swap_fmt = chosen.format;
 
     g_extent = caps.currentExtent;
-    if (g_extent.width == 0xFFFFFFFF) {
+    if (g_win_w > 0 && g_win_h > 0) {
+        g_extent.width = (uint32_t)g_win_w;
+        g_extent.height = (uint32_t)g_win_h;
+    } else if (g_extent.width == 0xFFFFFFFF) {
         g_extent.width = ANativeWindow_getWidth(g_window);
         g_extent.height = ANativeWindow_getHeight(g_window);
     }
+    if (caps.minImageExtent.width > 0 && g_extent.width < caps.minImageExtent.width)
+        g_extent.width = caps.minImageExtent.width;
+    if (caps.maxImageExtent.width > 0 && g_extent.width > caps.maxImageExtent.width)
+        g_extent.width = caps.maxImageExtent.width;
+    if (caps.minImageExtent.height > 0 && g_extent.height < caps.minImageExtent.height)
+        g_extent.height = caps.minImageExtent.height;
+    if (caps.maxImageExtent.height > 0 && g_extent.height > caps.maxImageExtent.height)
+        g_extent.height = caps.maxImageExtent.height;
     uint32_t want = caps.minImageCount + 1;
     if (caps.maxImageCount && want > caps.maxImageCount) want = caps.maxImageCount;
 
@@ -1437,13 +1473,19 @@ static void check_surface_changed(void) {
     g_surface_checked_ns = now;
     VkSurfaceCapabilitiesKHR caps;
     if (g_vk.GetPhysicalDeviceSurfaceCapabilitiesKHR(g_pd, g_surface, &caps) != VK_SUCCESS) return;
-    if (caps.currentExtent.width == g_caps_extent.width && caps.currentExtent.height == g_caps_extent.height &&
+    const int nw = g_win_w > 0 ? g_win_w : (g_window ? ANativeWindow_getWidth(g_window) : 0);
+    const int nh = g_win_h > 0 ? g_win_h : (g_window ? ANativeWindow_getHeight(g_window) : 0);
+    const int size_mismatch = (nw > 0 && nh > 0 &&
+                               ((uint32_t)nw != g_extent.width || (uint32_t)nh != g_extent.height));
+    if (!size_mismatch && caps.currentExtent.width == g_caps_extent.width &&
+        caps.currentExtent.height == g_caps_extent.height &&
         caps.currentTransform == g_surface_transform)
         return;
-    droiddeck_log("gpu", "screen surface changed (%ux%u -> %ux%u, transform %d -> %d): rebuilding the swapchain",
-               g_caps_extent.width, g_caps_extent.height, caps.currentExtent.width, caps.currentExtent.height,
-               (int)g_surface_transform, (int)caps.currentTransform);
+    droiddeck_log("gpu", "screen surface changed (%ux%u -> %ux%u, win %dx%d, transform %d -> %d): rebuilding the swapchain",
+               g_extent.width, g_extent.height, caps.currentExtent.width, caps.currentExtent.height,
+               nw, nh, (int)g_surface_transform, (int)caps.currentTransform);
     destroy_swapchain();
+    g_map.valid = 0;
 }
 
 int vkp_base_black(int scene_w, int scene_h) {

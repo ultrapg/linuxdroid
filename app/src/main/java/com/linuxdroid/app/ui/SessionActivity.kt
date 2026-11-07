@@ -220,15 +220,18 @@ class SessionActivity : ComponentActivity() {
 
                 override fun surfaceChanged(holder: SurfaceHolder, format: Int, width: Int, height: Int) {
                     if (isInternalSurfaceActive() && width > 0 && height > 0) {
-                        val (outW, outH) = computeDesktopOutputSize(width, height)
+                        val (surfW, surfH) = normalizeSurfaceSizeForOrientation(width, height)
+                        val (outW, outH) = computeDesktopOutputSize(surfW, surfH)
                         val geom = SessionPrefs.computeCompositorGeometry(this@SessionActivity, outW, outH)
                         val hz = selectBestRefreshRate()
                         CompositorHost.attachSurface(
-                            holder.surface,
-                            geom.compositorWidth,
-                            geom.compositorHeight,
-                            hz,
-                            geom.compositorScale,
+                            surface = holder.surface,
+                            width = geom.compositorWidth,
+                            height = geom.compositorHeight,
+                            refreshHz = hz,
+                            desktopScale = geom.compositorScale,
+                            surfaceWidth = surfW,
+                            surfaceHeight = surfH,
                         )
                         ensureSessionStarted(outW, outH, hz)
                     }
@@ -330,6 +333,12 @@ class SessionActivity : ComponentActivity() {
                             SessionPrefs.setOrientation(this@SessionActivity, next)
                             requestedOrientation = next.androidOrientation
                             showQuickMenuState.value = false
+                            desktopSurfaceView.post {
+                                val holder = desktopSurfaceView.holder
+                                if (isInternalSurfaceActive() && holder.surface != null && holder.surface.isValid) {
+                                    bindInternalSurface(holder)
+                                }
+                            }
                         },
                         onOpenTerminal = {
                             showQuickMenuState.value = false
@@ -455,6 +464,14 @@ class SessionActivity : ComponentActivity() {
         super.onConfigurationChanged(newConfig)
         applyWindowAndDisplayMode()
         refreshDisplayRouting()
+        if (::desktopSurfaceView.isInitialized) {
+            desktopSurfaceView.post {
+                val holder = desktopSurfaceView.holder
+                if (isInternalSurfaceActive() && holder.surface != null && holder.surface.isValid) {
+                    bindInternalSurface(holder)
+                }
+            }
+        }
     }
 
     private fun setPhoneDimmed(dimmed: Boolean) {
@@ -648,11 +665,34 @@ class SessionActivity : ComponentActivity() {
         }
     }
 
+    private fun currentWindowBounds(): Pair<Int, Int> {
+        return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            val b = windowManager.currentWindowMetrics.bounds
+            b.width().coerceAtLeast(640) to b.height().coerceAtLeast(480)
+        } else {
+            val dm = resources.displayMetrics
+            dm.widthPixels.coerceAtLeast(640) to dm.heightPixels.coerceAtLeast(480)
+        }
+    }
+
+    private fun normalizeSurfaceSizeForOrientation(rawW: Int, rawH: Int): Pair<Int, Int> {
+        if (routingModeState.value == DisplayRoutingMode.DEX_OR_FREEFORM_WINDOW) {
+            return rawW to rawH
+        }
+        return when (SessionPrefs.orientation(this)) {
+            ScreenOrientationPref.PORTRAIT -> minOf(rawW, rawH) to maxOf(rawW, rawH)
+            ScreenOrientationPref.LANDSCAPE -> maxOf(rawW, rawH) to minOf(rawW, rawH)
+            ScreenOrientationPref.AUTO -> rawW to rawH
+        }
+    }
+
     private fun bindInternalSurface(holder: SurfaceHolder) {
         val frame = holder.surfaceFrame
-        val w = frame.width().takeIf { it > 0 } ?: desktopSurfaceView.width.takeIf { it > 0 } ?: 1920
-        val h = frame.height().takeIf { it > 0 } ?: desktopSurfaceView.height.takeIf { it > 0 } ?: 1080
-        val (outW, outH) = computeDesktopOutputSize(w, h)
+        val (winW, winH) = currentWindowBounds()
+        val rawW = frame.width().takeIf { it > 0 } ?: desktopSurfaceView.width.takeIf { it > 0 } ?: winW
+        val rawH = frame.height().takeIf { it > 0 } ?: desktopSurfaceView.height.takeIf { it > 0 } ?: winH
+        val (surfW, surfH) = normalizeSurfaceSizeForOrientation(rawW, rawH)
+        val (outW, outH) = computeDesktopOutputSize(surfW, surfH)
         val geom = SessionPrefs.computeCompositorGeometry(this, outW, outH)
         val hz = selectBestRefreshRate()
         CompositorHost.ensureStarted(
@@ -663,13 +703,17 @@ class SessionActivity : ComponentActivity() {
             refreshHz = hz,
             desktopScale = geom.compositorScale,
             surface = holder.surface,
+            surfaceWidth = surfW,
+            surfaceHeight = surfH,
         )
         CompositorHost.attachSurface(
-            holder.surface,
-            geom.compositorWidth,
-            geom.compositorHeight,
-            hz,
-            geom.compositorScale,
+            surface = holder.surface,
+            width = geom.compositorWidth,
+            height = geom.compositorHeight,
+            refreshHz = hz,
+            desktopScale = geom.compositorScale,
+            surfaceWidth = surfW,
+            surfaceHeight = surfH,
         )
         ensureSessionStarted(outW, outH, hz)
     }
@@ -691,11 +735,13 @@ class SessionActivity : ComponentActivity() {
             val extHolder = externalPresentation?.surfaceHolder
             if (extHolder != null && extHolder.surface != null && extHolder.surface.isValid) {
                 CompositorHost.attachSurface(
-                    extHolder.surface,
-                    geom.compositorWidth,
-                    geom.compositorHeight,
-                    hz,
-                    geom.compositorScale,
+                    surface = extHolder.surface,
+                    width = geom.compositorWidth,
+                    height = geom.compositorHeight,
+                    refreshHz = hz,
+                    desktopScale = geom.compositorScale,
+                    surfaceWidth = mode.physicalWidth,
+                    surfaceHeight = mode.physicalHeight,
                 )
             }
             SessionService.restart(this, outW, outH, hz, forceCompat = safeMode)
@@ -703,18 +749,22 @@ class SessionActivity : ComponentActivity() {
         }
 
         val holder = desktopSurfaceView.holder
-        val w = desktopSurfaceView.width.takeIf { it > 0 } ?: 1920
-        val h = desktopSurfaceView.height.takeIf { it > 0 } ?: 1080
-        val (outW, outH) = computeDesktopOutputSize(w, h)
+        val (winW, winH) = currentWindowBounds()
+        val rawW = desktopSurfaceView.width.takeIf { it > 0 } ?: winW
+        val rawH = desktopSurfaceView.height.takeIf { it > 0 } ?: winH
+        val (surfW, surfH) = normalizeSurfaceSizeForOrientation(rawW, rawH)
+        val (outW, outH) = computeDesktopOutputSize(surfW, surfH)
         val geom = SessionPrefs.computeCompositorGeometry(this, outW, outH)
         val hz = selectBestRefreshRate()
         if (isInternalSurfaceActive() && holder.surface != null && holder.surface.isValid) {
             CompositorHost.attachSurface(
-                holder.surface,
-                geom.compositorWidth,
-                geom.compositorHeight,
-                hz,
-                geom.compositorScale,
+                surface = holder.surface,
+                width = geom.compositorWidth,
+                height = geom.compositorHeight,
+                refreshHz = hz,
+                desktopScale = geom.compositorScale,
+                surfaceWidth = surfW,
+                surfaceHeight = surfH,
             )
         }
         SessionService.restart(this, outW, outH, hz, forceCompat = safeMode)
@@ -786,11 +836,9 @@ class SessionActivity : ComponentActivity() {
 
     private fun computeDesktopOutputSize(surfaceW: Int, surfaceH: Int): Pair<Int, Int> {
         if (routingModeState.value == DisplayRoutingMode.DEX_OR_FREEFORM_WINDOW) {
-            return (surfaceW and 1.inv()).coerceAtLeast(640) to (surfaceH and 1.inv()).coerceAtLeast(480)
+            return (surfaceW and 1.inv()).coerceAtLeast(480) to (surfaceH and 1.inv()).coerceAtLeast(480)
         }
-        val isPortraitPref = SessionPrefs.orientation(this) == ScreenOrientationPref.PORTRAIT
-        val normW = if (isPortraitPref) surfaceW else maxOf(surfaceW, surfaceH)
-        val normH = if (isPortraitPref) surfaceH else minOf(surfaceW, surfaceH)
+        val (normW, normH) = normalizeSurfaceSizeForOrientation(surfaceW, surfaceH)
         return SessionPrefs.resolutionPreset(this).resolveForSurface(normW, normH)
     }
 
@@ -893,13 +941,17 @@ class SessionActivity : ComponentActivity() {
                             refreshHz = hz,
                             desktopScale = geom.compositorScale,
                             surface = holder.surface,
+                            surfaceWidth = mode.physicalWidth,
+                            surfaceHeight = mode.physicalHeight,
                         )
                         CompositorHost.attachSurface(
-                            holder.surface,
-                            geom.compositorWidth,
-                            geom.compositorHeight,
-                            hz,
-                            geom.compositorScale,
+                            surface = holder.surface,
+                            width = geom.compositorWidth,
+                            height = geom.compositorHeight,
+                            refreshHz = hz,
+                            desktopScale = geom.compositorScale,
+                            surfaceWidth = mode.physicalWidth,
+                            surfaceHeight = mode.physicalHeight,
                         )
                         ensureSessionStarted(outW, outH, hz)
                     }
@@ -912,11 +964,13 @@ class SessionActivity : ComponentActivity() {
                             val geom = SessionPrefs.computeCompositorGeometry(this@SessionActivity, outW, outH)
                             val hz = selectBestRefreshRate(display)
                             CompositorHost.attachSurface(
-                                holder.surface,
-                                geom.compositorWidth,
-                                geom.compositorHeight,
-                                hz,
-                                geom.compositorScale,
+                                surface = holder.surface,
+                                width = geom.compositorWidth,
+                                height = geom.compositorHeight,
+                                refreshHz = hz,
+                                desktopScale = geom.compositorScale,
+                                surfaceWidth = width,
+                                surfaceHeight = height,
                             )
                         }
                     }

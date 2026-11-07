@@ -253,6 +253,8 @@ if [ -r /etc/linuxdroid/gpu.env ]; then
   if [ "${LINUXDROID_GPU_ACTIVE:-}" = "turnip" ]; then
     unset MESA_GL_VERSION_OVERRIDE MESA_GLSL_VERSION_OVERRIDE
     export LIBGL_KOPPER_DRI2=true
+    export MESA_VK_WSI_DEBUG=sw
+    export MESA_VK_WSI_PRESENT_MODE=mailbox
     export QT_WAYLAND_FORCE_NONBLOCKING_SWAP_SUPPORT=1
   fi
   if [ "${BL_GPU_DESKTOP:-0}" = "1" ]; then

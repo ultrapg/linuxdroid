@@ -598,6 +598,8 @@ static void raise_kept_on_top(void) {
     for (int i = 0; i < n; i++) wl_list_insert(g_toplevels.prev, &kept[i]->toplevel_link);
 }
 
+static void send_toplevel_configure(struct surface *s);
+
 static void map_toplevel(struct surface *s) {
     int w, h;
     if (s->mapped) return;
@@ -614,6 +616,10 @@ static void map_toplevel(struct surface *s) {
     if (!g_desktop) g_key_target = s;
     apply_zorder();
     publish_query_state();
+    if (s->xdg_toplevel && s->xdg_surface && g_output_w > 0 && g_output_h > 0 &&
+        (w != g_output_w || h != g_output_h)) {
+        send_toplevel_configure(s);
+    }
 }
 
 static void unmap_toplevel(struct surface *s) {
@@ -3583,8 +3589,9 @@ static void output_resized(void) {
     struct surface *s;
     output_notify_mode();
     wl_list_for_each(s, &g_surfaces, link)
-        if (s->xdg_toplevel && s->toplevel_committed) send_toplevel_configure(s);
+        if (s->xdg_toplevel && s->xdg_surface) send_toplevel_configure(s);
     droiddeck_log("display", "output resized to %dx%d", g_output_w, g_output_h);
+    schedule_render();
     wl_display_flush_clients(g_display);
 }
 

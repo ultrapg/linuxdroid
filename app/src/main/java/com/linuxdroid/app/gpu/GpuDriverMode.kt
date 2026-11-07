@@ -83,6 +83,7 @@ object GpuConfigGenerator {
                 env["VK_ICD_FILENAMES"] = FREEDRENO_ICD
                 env["TU_DEBUG"] = "noconform"
                 env["MESA_VK_WSI_DEBUG"] = "sw"
+                env["MESA_VK_WSI_PRESENT_MODE"] = "mailbox"
                 env["MESA_LOADER_DRIVER_OVERRIDE"] = "zink"
                 env["GALLIUM_DRIVER"] = "zink"
                 env["ZINK_DESCRIPTORS"] = "lazy"
