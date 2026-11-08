@@ -244,10 +244,15 @@ __attribute__((visibility("hidden"))) int bl_udevmon_recvmsg(int fd, struct msgh
   return 1;
 }
 
+__attribute__((visibility("hidden"))) int bl_netif_recvmsg(int fd, struct msghdr *msg, int flags,
+                                                           ssize_t (*real_recvmsg)(int, struct msghdr *, int),
+                                                           ssize_t *result);
+
 ssize_t recvmsg(int fd, struct msghdr *msg, int flags) {
   static ssize_t (*real)(int, struct msghdr *, int);
   if (!real) real = (ssize_t (*)(int, struct msghdr *, int))dlsym(RTLD_NEXT, "recvmsg");
   ssize_t answered;
   if (msg && bl_udevmon_recvmsg(fd, msg, flags, real, &answered)) return answered;
+  if (msg && bl_netif_recvmsg(fd, msg, flags, real, &answered)) return answered;
   return real(fd, msg, flags);
 }

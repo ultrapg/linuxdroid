@@ -170,4 +170,40 @@ class WorkstationControlsAndExternalDisplayTest {
             FileUtils.deleteRecursively(tempBase)
         }
     }
+
+    @Test
+    fun diagnosticReportV1052RegressionsAreResolved() {
+        val repoRoot = java.io.File(System.getProperty("user.dir") ?: ".").let {
+            if (it.name == "app") it.parentFile else it
+        }
+        val manifestText = repoRoot.resolve("app/src/main/AndroidManifest.xml").readText()
+        val sessionActivityBlock = manifestText.substringAfter("android:name=\".ui.SessionActivity\"")
+            .substringBefore("</activity>")
+        assertFalse(
+            "SessionActivity must not hardcode sensorLandscape in AndroidManifest.xml",
+            sessionActivityBlock.contains("sensorLandscape"),
+        )
+
+        val compositorC = repoRoot.resolve("app/src/main/cpp/waylandcomp/src/compositor.c").readText()
+        assertTrue(
+            "scene_size must prefer g_output_w/g_output_h over hardcoded 1920x1080 fallback",
+            compositorC.contains("*w = g_output_w > 0 ? g_output_w : INPUT_SPACE_W;") &&
+                compositorC.contains("*h = g_output_h > 0 ? g_output_h : INPUT_SPACE_H;"),
+        )
+
+        val drmC = repoRoot.resolve("tools/linuxfs/preload/drm.c").readText()
+        assertTrue("drm.c must synthesize drmDevice via alloc_synth_drm_device", drmC.contains("alloc_synth_drm_device"))
+        assertTrue("drm.c must intercept drmGetVersion", drmC.contains("void *drmGetVersion(int fd)"))
+        assertTrue("drm.c must intercept drmGetDevices2", drmC.contains("int drmGetDevices2("))
+        assertTrue("drm.c must gate gbm_create_device via should_block_kgsl_gbm", drmC.contains("should_block_kgsl_gbm()"))
+
+        val gpuScript = repoRoot.resolve("app/src/main/assets/linuxfs/usr/local/bin/linuxdroid-gpu").readText()
+        assertTrue(
+            "linuxdroid-gpu must set LIBDECOR_PLUGIN_DIR=/nonexistent for blender",
+            gpuScript.contains("export LIBDECOR_PLUGIN_DIR=/nonexistent"),
+        )
+
+        val sessionScript = repoRoot.resolve("app/src/main/assets/linuxfs/usr/local/bin/linuxdroid-session").readText()
+        assertTrue("linuxdroid-session must upgrade Blender wrapper to BL_WRAPPER_V4", sessionScript.contains("BL_WRAPPER_V4"))
+    }
 }

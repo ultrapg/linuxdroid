@@ -41,10 +41,13 @@ if [ "$#" -gt 0 ]; then
       # Blender 5.x creates 4 shared OpenGL contexts across main + background 'Shader Compilation'
       # worker threads. Disable mesa_glthread and Zink async background compiler queue (zcq0) so
       # DrawManager compute/graphics pipelines never deadlock between shared contexts.
+      # Point LIBDECOR_PLUGIN_DIR at a nonexistent path so libdecor uses its built-in client-side
+      # decoration fallback instead of dlopening libdecor-gtk.so under Blender's bundled LD_LIBRARY_PATH.
       unset mesa_glthread
       export ZINK_DESCRIPTORS=lazy
       export ZINK_DEBUG=nobgc,nopc
       export GALLIUM_THREAD=0
+      export LIBDECOR_PLUGIN_DIR=/nonexistent
       ;;
     chromium|chromium-browser|google-chrome|google-chrome-stable|brave-browser)
       export GALLIUM_THREAD=0

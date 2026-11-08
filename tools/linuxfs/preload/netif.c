@@ -8,6 +8,8 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <ifaddrs.h>
+#include <linux/netlink.h>
+#include <linux/rtnetlink.h>
 #include <net/if.h>
 #include <net/if_arp.h>
 #include <netpacket/packet.h>
@@ -20,6 +22,7 @@
 #include <sys/ioctl.h>
 #include <sys/mman.h>
 #include <sys/socket.h>
+#include <sys/stat.h>
 #include <time.h>
 #include <unistd.h>
 
@@ -326,9 +329,258 @@ char *if_indextoname(unsigned int index, char name[IF_NAMESIZE]) {
     int saved = errno;
     struct link link;
     if (index == LO_INDEX) return strcpy(name, LO_NAME);
-    if (load_link(&link) && index == link.index) return strcpy(name, link.name);
+    if (load_link(&link)) {
+        if (index == link.index) return strcpy(name, link.name);
+        if (index > LO_INDEX && index < 4096) {
+            snprintf(name, IF_NAMESIZE, "%s", link.name);
+            return name;
+        }
+    }
     errno = saved;
     return NULL;
+}
+
+#define NL_TRACK_SLOTS 8
+struct nl_route_pending {
+    int fd;
+    ino_t inode;
+    uint32_t seq;
+    uint32_t pid;
+    int step; /* 1 = send RTM_NEWLINK batch, 2 = send NLMSG_DONE */
+};
+static struct nl_route_pending nl_pending[NL_TRACK_SLOTS];
+
+static ino_t nl_fd_inode(int fd) {
+    struct stat st;
+    return (fd >= 0 && fstat(fd, &st) == 0) ? st.st_ino : 0;
+}
+
+static int is_netlink_route_sock(int fd) {
+    struct sockaddr_nl nl;
+    socklen_t len = sizeof(nl);
+    if (getsockname(fd, (struct sockaddr *)&nl, &len) != 0 || nl.nl_family != AF_NETLINK) {
+        return 0;
+    }
+    int proto = -1;
+    socklen_t plen = sizeof(proto);
+    if (getsockopt(fd, SOL_SOCKET, SO_PROTOCOL, &proto, &plen) == 0 && proto != NETLINK_ROUTE) {
+        return 0;
+    }
+    return 1;
+}
+
+static void record_nl_getlink(int fd, uint32_t seq) {
+    ino_t ino = nl_fd_inode(fd);
+    if (!ino) return;
+    struct sockaddr_nl nl;
+    socklen_t len = sizeof(nl);
+    uint32_t pid = (getsockname(fd, (struct sockaddr *)&nl, &len) == 0) ? nl.nl_pid : (uint32_t)getpid();
+    if (pid == 0) pid = (uint32_t)getpid();
+    pthread_mutex_lock(&link_lock);
+    int slot = 0;
+    for (int i = 0; i < NL_TRACK_SLOTS; i++) {
+        if (nl_pending[i].fd == fd || nl_pending[i].step == 0) {
+            slot = i;
+            break;
+        }
+    }
+    nl_pending[slot].fd = fd;
+    nl_pending[slot].inode = ino;
+    nl_pending[slot].seq = seq;
+    nl_pending[slot].pid = pid;
+    nl_pending[slot].step = 1;
+    pthread_mutex_unlock(&link_lock);
+}
+
+static size_t append_newlink_msg(unsigned char *buf, size_t cap, size_t off,
+                                 uint32_t seq, uint32_t pid, int ifindex,
+                                 const char *ifname, unsigned short iftype,
+                                 unsigned int ifflags, uint32_t mtu,
+                                 const unsigned char *mac) {
+    size_t name_len = strlen(ifname) + 1;
+    size_t rta_name_len = RTA_LENGTH(name_len);
+    size_t rta_mtu_len = RTA_LENGTH(sizeof(uint32_t));
+    size_t rta_addr_len = RTA_LENGTH(6);
+    size_t payload_len = NLMSG_ALIGN(sizeof(struct ifinfomsg)) +
+                         RTA_ALIGN(rta_name_len) +
+                         RTA_ALIGN(rta_mtu_len) +
+                         RTA_ALIGN(rta_addr_len);
+    size_t total_len = NLMSG_LENGTH(payload_len);
+    if (off + NLMSG_ALIGN(total_len) > cap) return off;
+
+    struct nlmsghdr *nlh = (struct nlmsghdr *)(buf + off);
+    memset(nlh, 0, NLMSG_ALIGN(total_len));
+    nlh->nlmsg_len = (uint32_t)total_len;
+    nlh->nlmsg_type = RTM_NEWLINK;
+    nlh->nlmsg_flags = NLM_F_MULTI;
+    nlh->nlmsg_seq = seq;
+    nlh->nlmsg_pid = pid;
+
+    struct ifinfomsg *ifi = (struct ifinfomsg *)NLMSG_DATA(nlh);
+    ifi->ifi_family = AF_UNSPEC;
+    ifi->ifi_type = iftype;
+    ifi->ifi_index = ifindex;
+    ifi->ifi_flags = ifflags;
+    ifi->ifi_change = 0xFFFFFFFFU;
+
+    unsigned char *attr_ptr = (unsigned char *)ifi + NLMSG_ALIGN(sizeof(struct ifinfomsg));
+    struct rtattr *rta = (struct rtattr *)attr_ptr;
+    rta->rta_type = IFLA_IFNAME;
+    rta->rta_len = (unsigned short)rta_name_len;
+    memcpy(RTA_DATA(rta), ifname, name_len);
+    attr_ptr += RTA_ALIGN(rta_name_len);
+
+    rta = (struct rtattr *)attr_ptr;
+    rta->rta_type = IFLA_MTU;
+    rta->rta_len = (unsigned short)rta_mtu_len;
+    memcpy(RTA_DATA(rta), &mtu, sizeof(uint32_t));
+    attr_ptr += RTA_ALIGN(rta_mtu_len);
+
+    rta = (struct rtattr *)attr_ptr;
+    rta->rta_type = IFLA_ADDRESS;
+    rta->rta_len = (unsigned short)rta_addr_len;
+    if (mac) memcpy(RTA_DATA(rta), mac, 6);
+    else memset(RTA_DATA(rta), 0, 6);
+
+    return off + NLMSG_ALIGN(total_len);
+}
+
+static ssize_t synthesize_nl_getlink_reply(int fd, void *out_buf, size_t out_len, struct sockaddr *from, socklen_t *fromlen) {
+    ino_t ino = nl_fd_inode(fd);
+    if (!ino) return -1;
+    uint32_t seq = 0, pid = 0;
+    int step = 0;
+    pthread_mutex_lock(&link_lock);
+    for (int i = 0; i < NL_TRACK_SLOTS; i++) {
+        if (nl_pending[i].fd == fd && nl_pending[i].inode == ino && nl_pending[i].step != 0) {
+            seq = nl_pending[i].seq;
+            pid = nl_pending[i].pid;
+            step = nl_pending[i].step;
+            if (step == 1) nl_pending[i].step = 2;
+            else nl_pending[i].step = 0;
+            break;
+        }
+    }
+    pthread_mutex_unlock(&link_lock);
+    if (step == 0) return -1;
+
+    struct link link;
+    if (!load_link(&link)) {
+        memset(&link, 0, sizeof(link));
+        strcpy(link.name, "wlan0");
+        link.index = 2;
+        link.mtu = 1500;
+    }
+
+    unsigned char staging[8192];
+    size_t total = 0;
+    if (step == 1) {
+        unsigned int lo_flags = IFF_UP | IFF_RUNNING | IFF_LOOPBACK;
+        unsigned int up_flags = IFF_UP | IFF_RUNNING | IFF_BROADCAST | IFF_MULTICAST;
+        total = append_newlink_msg(staging, sizeof(staging), total, seq, pid, LO_INDEX, LO_NAME, ARPHRD_LOOPBACK, lo_flags, LO_MTU, NULL);
+        total = append_newlink_msg(staging, sizeof(staging), total, seq, pid, (int)link.index, link.name, ARPHRD_ETHER, up_flags, (uint32_t)link.mtu, link.mac);
+        /* Also cover common Android Wi-Fi / cellular interface indices (e.g. rmnet / wlan0 at 20..55) so RTM_GETADDR matches */
+        for (int idx = 3; idx <= 60; idx++) {
+            if ((unsigned)idx == link.index) continue;
+            char alt_name[IFNAMSIZ];
+            snprintf(alt_name, sizeof(alt_name), "%s", link.name);
+            total = append_newlink_msg(staging, sizeof(staging), total, seq, pid, idx, alt_name, ARPHRD_ETHER, up_flags, (uint32_t)link.mtu, link.mac);
+        }
+    } else {
+        size_t done_len = NLMSG_LENGTH(sizeof(int));
+        if (done_len <= sizeof(staging)) {
+            struct nlmsghdr *nlh = (struct nlmsghdr *)staging;
+            memset(nlh, 0, NLMSG_ALIGN(done_len));
+            nlh->nlmsg_len = (uint32_t)done_len;
+            nlh->nlmsg_type = NLMSG_DONE;
+            nlh->nlmsg_flags = 0;
+            nlh->nlmsg_seq = seq;
+            nlh->nlmsg_pid = pid;
+            total = NLMSG_ALIGN(done_len);
+        }
+    }
+
+    if (from && fromlen && *fromlen >= sizeof(struct sockaddr_nl)) {
+        struct sockaddr_nl nl_from;
+        memset(&nl_from, 0, sizeof(nl_from));
+        nl_from.nl_family = AF_NETLINK;
+        memcpy(from, &nl_from, sizeof(nl_from));
+        *fromlen = sizeof(nl_from);
+    }
+    size_t copy_len = total < out_len ? total : out_len;
+    if (out_buf && copy_len > 0) {
+        memcpy(out_buf, staging, copy_len);
+    }
+    return (ssize_t)copy_len;
+}
+
+ssize_t sendto(int fd, const void *buf, size_t len, int flags, const struct sockaddr *dest_addr, socklen_t addrlen) {
+    typedef ssize_t (*sendto_fn)(int, const void *, size_t, int, const struct sockaddr *, socklen_t);
+    static sendto_fn real_sendto;
+    if (!real_sendto) real_sendto = (sendto_fn)dlsym(RTLD_NEXT, "sendto");
+    const struct nlmsghdr *nlh = (const struct nlmsghdr *)buf;
+    int is_getlink = (buf && len >= sizeof(struct nlmsghdr) && nlh->nlmsg_type == RTM_GETLINK && is_netlink_route_sock(fd));
+    ssize_t rc = real_sendto(fd, buf, len, flags, dest_addr, addrlen);
+    if (is_getlink && rc < 0 && (errno == EACCES || errno == EPERM)) {
+        record_nl_getlink(fd, nlh->nlmsg_seq);
+        errno = 0;
+        return (ssize_t)len;
+    }
+    return rc;
+}
+
+ssize_t send(int fd, const void *buf, size_t len, int flags) {
+    return sendto(fd, buf, len, flags, NULL, 0);
+}
+
+ssize_t recvfrom(int fd, void *buf, size_t len, int flags, struct sockaddr *src_addr, socklen_t *addrlen) {
+    typedef ssize_t (*recvfrom_fn)(int, void *, size_t, int, struct sockaddr *, socklen_t *);
+    static recvfrom_fn real_recvfrom;
+    if (!real_recvfrom) real_recvfrom = (recvfrom_fn)dlsym(RTLD_NEXT, "recvfrom");
+    ssize_t synth = synthesize_nl_getlink_reply(fd, buf, len, src_addr, addrlen);
+    if (synth >= 0) return synth;
+    return real_recvfrom(fd, buf, len, flags, src_addr, addrlen);
+}
+
+ssize_t recv(int fd, void *buf, size_t len, int flags) {
+    return recvfrom(fd, buf, len, flags, NULL, NULL);
+}
+
+__attribute__((visibility("hidden"))) int bl_netif_recvmsg(int fd, struct msghdr *msg, int flags,
+                                                           ssize_t (*real_recvmsg)(int, struct msghdr *, int),
+                                                           ssize_t *result) {
+    if (msg && msg->msg_iov && msg->msg_iovlen >= 1) {
+        socklen_t namelen = msg->msg_namelen;
+        ssize_t synth = synthesize_nl_getlink_reply(fd, msg->msg_iov[0].iov_base, msg->msg_iov[0].iov_len,
+                                                    (struct sockaddr *)msg->msg_name, &namelen);
+        if (synth >= 0) {
+            msg->msg_namelen = namelen;
+            msg->msg_flags = 0;
+            *result = synth;
+            return 1;
+        }
+    }
+    ssize_t n = real_recvmsg(fd, msg, flags);
+    if (n >= (ssize_t)sizeof(struct nlmsghdr) && msg && msg->msg_iov && msg->msg_iovlen >= 1) {
+        struct nlmsghdr *nlh = (struct nlmsghdr *)msg->msg_iov[0].iov_base;
+        if (nlh && nlh->nlmsg_type == NLMSG_ERROR && n >= (ssize_t)NLMSG_SPACE(sizeof(struct nlmsgerr))) {
+            struct nlmsgerr *err = (struct nlmsgerr *)NLMSG_DATA(nlh);
+            if ((err->error == -EACCES || err->error == -EPERM) && err->msg.nlmsg_type == RTM_GETLINK) {
+                record_nl_getlink(fd, nlh->nlmsg_seq);
+                socklen_t namelen = msg->msg_namelen;
+                ssize_t synth = synthesize_nl_getlink_reply(fd, msg->msg_iov[0].iov_base, msg->msg_iov[0].iov_len,
+                                                            (struct sockaddr *)msg->msg_name, &namelen);
+                if (synth >= 0) {
+                    msg->msg_namelen = namelen;
+                    msg->msg_flags = 0;
+                    *result = synth;
+                    return 1;
+                }
+            }
+        }
+    }
+    *result = n;
+    return 1;
 }
 
 static int mac_unusable(const struct ifreq *ifr) {

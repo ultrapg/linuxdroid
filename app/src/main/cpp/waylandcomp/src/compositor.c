@@ -1927,7 +1927,10 @@ static void scene_size(int *w, int *h) {
         surface_size(s, &sw, &sh);
         if ((long long)sw * sh > best) { best = (long long)sw * sh; *w = sw; *h = sh; }
     }
-    if (*w <= 0 || *h <= 0) { *w = INPUT_SPACE_W; *h = INPUT_SPACE_H; }
+    if (*w <= 0 || *h <= 0) {
+        *w = g_output_w > 0 ? g_output_w : INPUT_SPACE_W;
+        *h = g_output_h > 0 ? g_output_h : INPUT_SPACE_H;
+    }
 }
 
 static void fire_all_frames(void) {

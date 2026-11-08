@@ -50,6 +50,8 @@ static struct handle_entry handle_entries[MAX_HANDLES];
 static uint32_t next_handle = 1;
 static dev_t kgsl_dev;
 static dev_t mali_dev;
+static dev_t dri_render_dev;
+static dev_t dri_card_dev;
 static int synth_drm_state;
 
 static void init_synth_drm_devs_locked(void) {
@@ -63,7 +65,13 @@ static void init_synth_drm_devs_locked(void) {
   if (stat("/dev/mali0", &st) == 0 && S_ISCHR(st.st_mode)) {
     mali_dev = st.st_rdev;
   }
-  synth_drm_state = (kgsl_dev != 0 || mali_dev != 0) ? 1 : -1;
+  if (stat("/dev/dri/renderD128", &st) == 0 && S_ISCHR(st.st_mode)) {
+    dri_render_dev = st.st_rdev;
+  }
+  if (stat("/dev/dri/card0", &st) == 0 && S_ISCHR(st.st_mode)) {
+    dri_card_dev = st.st_rdev;
+  }
+  synth_drm_state = (kgsl_dev != 0 || mali_dev != 0 || dri_render_dev != 0 || dri_card_dev != 0) ? 1 : -1;
 }
 
 static int synth_drm_kind_dev(dev_t rdev) {
@@ -78,6 +86,17 @@ static int synth_drm_kind_dev(dev_t rdev) {
   }
   if (mali_dev != 0 && rdev == mali_dev) {
     return 2;
+  }
+  if ((dri_render_dev != 0 && rdev == dri_render_dev) ||
+      (dri_card_dev != 0 && rdev == dri_card_dev)) {
+    char sys_subsys[128];
+    struct stat sst;
+    snprintf(sys_subsys, sizeof(sys_subsys), "/sys/dev/char/%u:%u/device/subsystem",
+             (unsigned int)((rdev >> 8) & 0xfff) | ((unsigned int)(rdev >> 32) & ~0xfffU),
+             (unsigned int)(rdev & 0xff) | ((unsigned int)(rdev >> 12) & ~0xffU));
+    if (lstat(sys_subsys, &sst) != 0) {
+      return (mali_dev != 0) ? 2 : 1;
+    }
   }
   return 0;
 }
@@ -218,12 +237,108 @@ int drmCloseBufferHandle(int fd, uint32_t handle) {
   return release_handle(fd, handle) ? 0 : -EINVAL;
 }
 
-int drmGetDeviceFromDevId(dev_t find_rdev, uint32_t flags, void *device) {
-  int (*fn)(dev_t, uint32_t, void *) =
-      (int (*)(dev_t, uint32_t, void *)) real("drmGetDeviceFromDevId");
-  if (!fn) {
-    return -ENOSYS;
+#define BL_DRM_NODE_PRIMARY 0
+#define BL_DRM_NODE_CONTROL 1
+#define BL_DRM_NODE_RENDER  2
+#define BL_DRM_NODE_MAX     3
+#define BL_DRM_BUS_PLATFORM 1
+#define BL_DRM_PLATFORM_DEVICE_NAME_LEN 512
+
+struct bl_drm_platform_bus_info {
+  char fullname[BL_DRM_PLATFORM_DEVICE_NAME_LEN];
+};
+
+struct bl_drm_platform_device_info {
+  char **compatible;
+};
+
+struct bl_drm_device {
+  char **nodes;
+  int available_nodes;
+  int bustype;
+  union {
+    struct bl_drm_platform_bus_info *platform;
+  } businfo;
+  union {
+    struct bl_drm_platform_device_info *platform;
+  } deviceinfo;
+};
+
+static int alloc_synth_drm_device(int kind, struct bl_drm_device **out_dev) {
+  if (!out_dev) {
+    return -EINVAL;
   }
+  const char *primary_node = "/dev/dri/card0";
+  const char *render_node = "/dev/dri/renderD128";
+  const char *fullname = (kind == 2) ? "/soc/gpu" : "/soc/kgsl-3d0";
+  const char *compat_str = (kind == 2) ? "arm,mali-valhall" : "qcom,adreno";
+  struct stat pst;
+  int has_primary = (stat(primary_node, &pst) == 0 && S_ISCHR(pst.st_mode));
+
+  size_t nodes_arr_sz = BL_DRM_NODE_MAX * sizeof(char *);
+  size_t str_primary_sz = has_primary ? (strlen(primary_node) + 1) : 0;
+  size_t str_render_sz = strlen(render_node) + 1;
+  size_t bus_sz = sizeof(struct bl_drm_platform_bus_info);
+  size_t dev_sz = sizeof(struct bl_drm_platform_device_info);
+
+  size_t total = sizeof(struct bl_drm_device) + nodes_arr_sz +
+                 str_primary_sz + str_render_sz + bus_sz + dev_sz + 64;
+  char *block = (char *)calloc(1, total);
+  if (!block) {
+    return -ENOMEM;
+  }
+
+  char **compat_arr = (char **)calloc(2, sizeof(char *));
+  char *c_str = strdup(compat_str);
+  if (!compat_arr || !c_str) {
+    free(compat_arr);
+    free(c_str);
+    free(block);
+    return -ENOMEM;
+  }
+  compat_arr[0] = c_str;
+  compat_arr[1] = NULL;
+
+  struct bl_drm_device *d = (struct bl_drm_device *)block;
+  uintptr_t cur = (uintptr_t)(block + sizeof(struct bl_drm_device));
+  cur = (cur + sizeof(void *) - 1) & ~(uintptr_t)(sizeof(void *) - 1);
+
+  d->nodes = (char **)cur;
+  cur += nodes_arr_sz;
+
+  char *p_node = NULL;
+  if (has_primary) {
+    p_node = (char *)cur;
+    memcpy(p_node, primary_node, str_primary_sz);
+    cur += str_primary_sz;
+  }
+
+  char *r_node = (char *)cur;
+  memcpy(r_node, render_node, str_render_sz);
+  cur += str_render_sz;
+
+  d->nodes[BL_DRM_NODE_PRIMARY] = p_node;
+  d->nodes[BL_DRM_NODE_CONTROL] = NULL;
+  d->nodes[BL_DRM_NODE_RENDER] = r_node;
+  d->available_nodes = (has_primary ? (1 << BL_DRM_NODE_PRIMARY) : 0) | (1 << BL_DRM_NODE_RENDER);
+  d->bustype = BL_DRM_BUS_PLATFORM;
+
+  cur = (cur + sizeof(void *) - 1) & ~(uintptr_t)(sizeof(void *) - 1);
+  d->businfo.platform = (struct bl_drm_platform_bus_info *)cur;
+  strncpy(d->businfo.platform->fullname, fullname, BL_DRM_PLATFORM_DEVICE_NAME_LEN - 1);
+  cur += bus_sz;
+
+  cur = (cur + sizeof(void *) - 1) & ~(uintptr_t)(sizeof(void *) - 1);
+  d->deviceinfo.platform = (struct bl_drm_platform_device_info *)cur;
+  cur += dev_sz;
+
+  d->deviceinfo.platform->compatible = compat_arr;
+
+  *out_dev = d;
+  return 0;
+}
+
+int drmGetDeviceFromDevId(dev_t find_rdev, uint32_t flags, void *device) {
   if (find_rdev == 0) {
     static const char *fallback_nodes[] = {
       "/dev/dri/renderD128",
@@ -240,16 +355,66 @@ int drmGetDeviceFromDevId(dev_t find_rdev, uint32_t flags, void *device) {
       }
     }
   }
-  return fn(find_rdev, flags, device);
+  int kind = synth_drm_kind_dev(find_rdev);
+  if (kind != 0) {
+    if (device == NULL) {
+      return 0;
+    }
+    return alloc_synth_drm_device(kind, (struct bl_drm_device **)device);
+  }
+  int (*fn)(dev_t, uint32_t, void *) =
+      (int (*)(dev_t, uint32_t, void *)) real("drmGetDeviceFromDevId");
+  return fn ? fn(find_rdev, flags, device) : -ENOSYS;
 }
 
 int drmGetDevice2(int fd, uint32_t flags, void *device) {
   struct stat st;
-  if (fd >= 0 && fstat(fd, &st) == 0 && S_ISCHR(st.st_mode) && synth_drm_kind_dev(st.st_rdev) != 0) {
-    return drmGetDeviceFromDevId(st.st_rdev, flags, device);
+  if (fd >= 0 && fstat(fd, &st) == 0 && S_ISCHR(st.st_mode)) {
+    int kind = synth_drm_kind_dev(st.st_rdev);
+    if (kind != 0) {
+      if (device == NULL) {
+        return 0;
+      }
+      return alloc_synth_drm_device(kind, (struct bl_drm_device **)device);
+    }
   }
   int (*fn)(int, uint32_t, void *) = (int (*)(int, uint32_t, void *)) real("drmGetDevice2");
   return fn ? fn(fd, flags, device) : -ENOSYS;
+}
+
+int drmGetDevice(int fd, void *device) {
+  return drmGetDevice2(fd, 0, device);
+}
+
+int drmGetDevices2(uint32_t flags, void *devices, int max_devices) {
+  pthread_mutex_lock(&lock);
+  init_synth_drm_devs_locked();
+  pthread_mutex_unlock(&lock);
+  int kind = (kgsl_dev != 0) ? 1 : ((mali_dev != 0) ? 2 : 0);
+  if (kind == 0 && dri_render_dev != 0) {
+    kind = synth_drm_kind_dev(dri_render_dev);
+  }
+  if (kind == 0 && dri_card_dev != 0) {
+    kind = synth_drm_kind_dev(dri_card_dev);
+  }
+  if (kind != 0) {
+    if (devices == NULL) {
+      return 1;
+    }
+    if (max_devices <= 0) {
+      return 0;
+    }
+    struct bl_drm_device **dev_list = (struct bl_drm_device **)devices;
+    if (alloc_synth_drm_device(kind, &dev_list[0]) == 0) {
+      return 1;
+    }
+  }
+  int (*fn)(uint32_t, void *, int) = (int (*)(uint32_t, void *, int)) real("drmGetDevices2");
+  return fn ? fn(flags, devices, max_devices) : -ENOSYS;
+}
+
+int drmGetDevices(void *devices, int max_devices) {
+  return drmGetDevices2(0, devices, max_devices);
 }
 
 char *drmGetRenderDeviceNameFromFd(int fd) {
@@ -350,8 +515,67 @@ int drmIoctl(int fd, unsigned long request, void *arg) {
   return fn ? fn(fd, request, arg) : -ENOSYS;
 }
 
+struct bl_drm_public_version {
+  int version_major;
+  int version_minor;
+  int version_patchlevel;
+  int name_len;
+  char *name;
+  int date_len;
+  char *date;
+  int desc_len;
+  char *desc;
+};
+
+void *drmGetVersion(int fd) {
+  int kind = synth_drm_kind_fd(fd);
+  if (kind != 0) {
+    struct bl_drm_public_version *v =
+        (struct bl_drm_public_version *)calloc(1, sizeof(*v));
+    if (!v) {
+      return NULL;
+    }
+    const char *name = (kind == 2) ? "panfrost" : "msm";
+    const char *date = "20240101";
+    const char *desc = (kind == 2) ? "ARM Mali DRM" : "Qualcomm KGSL DRM";
+    v->version_major = 1;
+    v->version_minor = 6;
+    v->version_patchlevel = 0;
+    v->name_len = (int)strlen(name);
+    v->name = strdup(name);
+    v->date_len = (int)strlen(date);
+    v->date = strdup(date);
+    v->desc_len = (int)strlen(desc);
+    v->desc = strdup(desc);
+    return v;
+  }
+  void *(*fn)(int) = (void *(*)(int)) real("drmGetVersion");
+  return fn ? fn(fd) : NULL;
+}
+
+static int should_block_kgsl_gbm(void) {
+  static int cached = -1;
+  if (cached >= 0) {
+    return cached;
+  }
+  const char *force = getenv("BL_BLOCK_KGSL_GBM");
+  if (force && *force) {
+    cached = (strcmp(force, "1") == 0);
+    return cached;
+  }
+  const char *prog = program_invocation_short_name;
+  if (prog && (strcmp(prog, "kwin_wayland") == 0 ||
+               strcmp(prog, "kwin_wayland_wrapper") == 0 ||
+               strcmp(prog, "Xwayland") == 0)) {
+    cached = 1;
+    return 1;
+  }
+  cached = 0;
+  return 0;
+}
+
 void *gbm_create_device(int fd) {
-  if (is_kgsl(fd)) {
+  if (is_kgsl(fd) && should_block_kgsl_gbm()) {
     errno = ENODEV;
     return NULL;
   }

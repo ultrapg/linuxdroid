@@ -501,8 +501,9 @@ print(fallback)
   sudo sh -c '
     cat > /usr/local/bin/blender <<'\''WRAP'\''
 #!/bin/sh
-# BL_WRAPPER_V2
+# BL_WRAPPER_V4
 unset MESA_NO_ERROR DRI_PRIME
+export LIBDECOR_PLUGIN_DIR=/nonexistent
 export LP_NUM_THREADS="${BL_CPU_COUNT:-4}"
 if [ "${BL_GPU_APPS:-0}" = "1" ]; then
   unset LIBGL_ALWAYS_SOFTWARE
@@ -524,10 +525,10 @@ except Exception:
       ;;
   esac
 fi
+export LD_LIBRARY_PATH="/opt/blender/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
 if [ -x /opt/blender/blender-launcher ]; then
   exec /usr/local/bin/linuxdroid-gpu-launch /opt/blender/blender-launcher "$@"
 fi
-export LD_LIBRARY_PATH="/opt/blender/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
 exec /usr/local/bin/linuxdroid-gpu-launch /opt/blender/blender "$@"
 WRAP
     chmod 755 /usr/local/bin/blender

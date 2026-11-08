@@ -20,7 +20,7 @@ step() {
   t0=$(date +%s)
   local log; log="$(timeout 25 "$@" 2>&1)"; rc=$?
   printf '[%s] rc=%s (%ss)\n' "$name" "$rc" "$(( $(date +%s) - t0 ))"
-  printf '%s\n' "$log" | head -n 20 | sed 's/^/    /'
+  printf '%s\n' "$log" | head -n 55 | sed 's/^/    /'
 }
 
 {

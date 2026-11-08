@@ -159,10 +159,11 @@ if [ -x /opt/blender/blender ]; then
   rm -f "${HOME:-/home/linux}/.cache/linuxdroid/gpu-fallback/blender" \
         "${HOME:-/home/linux}/.cache/linuxdroid/gpu-fallback/blender-launcher" 2>/dev/null || true
   refresh_blender_wrapper='
-    cat > /usr/local/bin/blender <<'\''WRAP'\''
+    cat > /usr/local/bin/blender.tmp <<'\''WRAP'\''
 #!/bin/sh
-# BL_WRAPPER_V2
+# BL_WRAPPER_V4
 unset MESA_NO_ERROR DRI_PRIME
+export LIBDECOR_PLUGIN_DIR=/nonexistent
 export LP_NUM_THREADS="${BL_CPU_COUNT:-4}"
 if [ "${BL_GPU_APPS:-0}" = "1" ]; then
   unset LIBGL_ALWAYS_SOFTWARE
@@ -184,19 +185,20 @@ except Exception:
       ;;
   esac
 fi
+export LD_LIBRARY_PATH="/opt/blender/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
 if [ -x /opt/blender/blender-launcher ]; then
   exec /usr/local/bin/linuxdroid-gpu-launch /opt/blender/blender-launcher "$@"
 fi
-export LD_LIBRARY_PATH="/opt/blender/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
 exec /usr/local/bin/linuxdroid-gpu-launch /opt/blender/blender "$@"
 WRAP
-    chmod 755 /usr/local/bin/blender
+    chmod 755 /usr/local/bin/blender.tmp && mv -f /usr/local/bin/blender.tmp /usr/local/bin/blender
     if [ -f /opt/blender/blender.desktop ]; then
-      sed -e "s#^Exec=blender#Exec=/usr/local/bin/blender#" -e "/^PrefersNonDefaultGPU=/d" /opt/blender/blender.desktop > /usr/share/applications/blender.desktop
-      chmod 644 /usr/share/applications/blender.desktop
+      sed -e "s#^Exec=blender#Exec=/usr/local/bin/blender#" -e "/^PrefersNonDefaultGPU=/d" /opt/blender/blender.desktop > /usr/share/applications/blender.desktop.tmp &&
+      chmod 644 /usr/share/applications/blender.desktop.tmp &&
+      mv -f /usr/share/applications/blender.desktop.tmp /usr/share/applications/blender.desktop
     fi
   '
-  if ! grep -q "BL_WRAPPER_V2" /usr/local/bin/blender 2>/dev/null || grep -q "^PrefersNonDefaultGPU=" /usr/share/applications/blender.desktop 2>/dev/null; then
+  if ! grep -q "BL_WRAPPER_V4" /usr/local/bin/blender 2>/dev/null || grep -q "^PrefersNonDefaultGPU=" /usr/share/applications/blender.desktop 2>/dev/null || [ ! -s /usr/share/applications/blender.desktop ]; then
     sh -c "$refresh_blender_wrapper" 2>/dev/null || linuxdroid-root sh -c "$refresh_blender_wrapper" 2>/dev/null || true
   fi
 fi

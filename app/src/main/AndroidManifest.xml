@@ -62,7 +62,6 @@
             android:launchMode="singleTask"
             android:preferMinimalPostProcessing="true"
             android:resizeableActivity="true"
-            android:screenOrientation="sensorLandscape"
             android:theme="@style/SessionTheme"
             android:windowSoftInputMode="stateHidden|adjustNothing"
             android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize|density|keyboard|keyboardHidden|navigation|uiMode">

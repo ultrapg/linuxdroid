@@ -601,7 +601,7 @@ object LinuxRuntime {
                 KGSL_DEVICE,
                 "DRIVER=kgsl-3d0\n" +
                     "OF_FULLNAME=/soc/kgsl-3d0\n" +
-                    "OF_COMPATIBLE_0=qcom,kgsl-3d0\n" +
+                    "OF_COMPATIBLE_0=qcom,adreno\n" +
                     "OF_COMPATIBLE_N=1\n" +
                     "MODALIAS=platform:kgsl-3d0\n",
                 "/sys/bus/platform/drivers/msm_drm"
@@ -625,7 +625,7 @@ object LinuxRuntime {
         val dev = st.st_rdev
         val major = ((dev shr 8) and 0xfffL) or ((dev shr 32) and 0xfffL.inv())
         val minor = (dev and 0xffL) or ((dev shr 12) and 0xffL.inv())
-        val devNodes = linkedSetOf("renderD128", "renderD$minor")
+        val devNodes = linkedSetOf("renderD128")
         val sysNodes = linkedSetOf("renderD128")
         val base = File(liveDir(context), "drm")
         val dri = File(base, "dri")
