@@ -40,11 +40,26 @@ case "${LANG:-}" in
 esac
 mkdir -p /tmp/chromium-crashpad 2>/dev/null || true
 
+user_args=()
+for arg in "$@"; do
+  case "$arg" in
+    --no-sandbox|--no-zygote|--disable-gpu-sandbox|--disable-dev-shm-usage|--in-process-gpu|--disable-gpu-watchdog|--disable-vulkan|--ozone-platform-hint=*)
+      ;;
+    *)
+      user_args+=("$arg")
+      ;;
+  esac
+done
+
 flags=(
   --no-sandbox
   --no-zygote
   --disable-gpu-sandbox
   --disable-dev-shm-usage
+  --in-process-gpu
+  --disable-gpu-watchdog
+  --disable-vulkan
+  --disable-features=Vulkan,DefaultANGLEVulkan,VulkanFromANGLE,GlobalShortcutsPortal,DesktopCapturePipeWire,WebRtcPipeWireCapturer,AudioServiceOutOfProcess
   --password-store=basic
   --no-first-run
   --no-default-browser-check
@@ -57,8 +72,8 @@ flags=(
 if [ "${BL_GPU_APPS:-0}" = "1" ]; then
   flags+=(--ignore-gpu-blocklist --enable-gpu-rasterization --enable-zero-copy)
   if [ -x /usr/local/bin/linuxdroid-gpu-launch ]; then
-    exec /usr/local/bin/linuxdroid-gpu-launch "$real_bin" "${flags[@]}" "$@"
+    exec /usr/local/bin/linuxdroid-gpu-launch "$real_bin" "${flags[@]}" "${user_args[@]}"
   fi
 fi
 
-exec "$real_bin" "${flags[@]}" "$@"
+exec "$real_bin" "${flags[@]}" "${user_args[@]}"

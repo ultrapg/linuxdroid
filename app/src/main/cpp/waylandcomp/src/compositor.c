@@ -2612,7 +2612,7 @@ static const struct wl_seat_interface seat_impl = {
 static void bind_seat(struct wl_client *c, void *data, uint32_t ver, uint32_t id) {
     struct wl_resource *r = wl_resource_create(c, &wl_seat_interface, ver, id);
     wl_resource_set_implementation(r, &seat_impl, NULL, NULL);
-    wl_seat_send_capabilities(r, WL_SEAT_CAPABILITY_POINTER | WL_SEAT_CAPABILITY_KEYBOARD | WL_SEAT_CAPABILITY_TOUCH);
+    wl_seat_send_capabilities(r, WL_SEAT_CAPABILITY_POINTER | WL_SEAT_CAPABILITY_KEYBOARD);
     if (ver >= 2) wl_seat_send_name(r, "linuxdroid-seat");
 }
 
@@ -3422,9 +3422,7 @@ static void touch_down(int id, double x, double y) {
     }
     struct seat_touch *st;
     int has_touch = 0;
-    if (target != g_desktop) {
-        for_each_touch_of(client, st) has_touch = 1;
-    }
+    (void)st;
     if (!any_active) {
         char name[160];
         describe(target, name, sizeof(name));

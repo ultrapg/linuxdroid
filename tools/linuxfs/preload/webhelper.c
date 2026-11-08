@@ -186,6 +186,9 @@ __attribute__((visibility("hidden"))) char *const *bl_webhelper_argv(const char 
     int has_no_zygote = 0;
     int has_disable_gpu_sandbox = 0;
     int has_disable_dev_shm = 0;
+    int has_in_process_gpu = 0;
+    int has_disable_gpu_watchdog = 0;
+    int has_disable_vulkan = 0;
     for (; argv[argc]; argc++) {
       if (strncmp(argv[argc], "--type=", 7) == 0 ||
           strcmp(argv[argc], "--version") == 0 ||
@@ -198,13 +201,21 @@ __attribute__((visibility("hidden"))) char *const *bl_webhelper_argv(const char 
       else if (strcmp(argv[argc], "--no-zygote") == 0) has_no_zygote = 1;
       else if (strcmp(argv[argc], "--disable-gpu-sandbox") == 0) has_disable_gpu_sandbox = 1;
       else if (strcmp(argv[argc], "--disable-dev-shm-usage") == 0) has_disable_dev_shm = 1;
+      else if (strcmp(argv[argc], "--in-process-gpu") == 0) has_in_process_gpu = 1;
+      else if (strcmp(argv[argc], "--disable-gpu-watchdog") == 0) has_disable_gpu_watchdog = 1;
+      else if (strcmp(argv[argc], "--disable-vulkan") == 0) has_disable_vulkan = 1;
     }
-    const char *inject[4];
+    const char *inject[7];
     size_t extra_flags = 0;
     if (!has_no_sandbox) inject[extra_flags++] = "--no-sandbox";
     if (!has_no_zygote) inject[extra_flags++] = "--no-zygote";
     if (!has_disable_gpu_sandbox) inject[extra_flags++] = "--disable-gpu-sandbox";
     if (!has_disable_dev_shm) inject[extra_flags++] = "--disable-dev-shm-usage";
+    if (is_chrom) {
+      if (!has_in_process_gpu) inject[extra_flags++] = "--in-process-gpu";
+      if (!has_disable_gpu_watchdog) inject[extra_flags++] = "--disable-gpu-watchdog";
+      if (!has_disable_vulkan) inject[extra_flags++] = "--disable-vulkan";
+    }
     if (extra_flags == 0) return argv;
     char **out = calloc(argc + extra_flags + 1, sizeof(char *));
     if (!out) return argv;

@@ -350,6 +350,15 @@ int drmIoctl(int fd, unsigned long request, void *arg) {
   return fn ? fn(fd, request, arg) : -ENOSYS;
 }
 
+void *gbm_create_device(int fd) {
+  if (is_kgsl(fd)) {
+    errno = ENODEV;
+    return NULL;
+  }
+  void *(*fn)(int) = (void *(*)(int)) real("gbm_create_device");
+  return fn ? fn(fd) : NULL;
+}
+
 static void drm_lock_before_fork(void) { pthread_mutex_lock(&lock); }
 static void drm_unlock_after_fork(void) { pthread_mutex_unlock(&lock); }
 static void drm_reset_after_fork(void) { pthread_mutex_init(&lock, NULL); }

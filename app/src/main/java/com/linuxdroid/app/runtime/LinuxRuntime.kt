@@ -538,6 +538,9 @@ object LinuxRuntime {
             "overflowgid" to "65534\n",
             "file-max" to "9223372036854775807\n",
             "overcommit_memory" to "0\n",
+            "inotify_max_user_watches" to "524288\n",
+            "inotify_max_user_instances" to "1024\n",
+            "inotify_max_queued_events" to "32768\n",
         )
         for ((name, text) in defaults) {
             val f = File(fakeProc, name)
@@ -563,6 +566,9 @@ object LinuxRuntime {
             "overflowgid" to "/proc/sys/kernel/overflowgid",
             "file-max" to "/proc/sys/fs/file-max",
             "overcommit_memory" to "/proc/sys/vm/overcommit_memory",
+            "inotify_max_user_watches" to "/proc/sys/fs/inotify/max_user_watches",
+            "inotify_max_user_instances" to "/proc/sys/fs/inotify/max_user_instances",
+            "inotify_max_queued_events" to "/proc/sys/fs/inotify/max_queued_events",
         )
         val allowEmpty = setOf("/proc/bus/pci/devices", "/proc/locks")
         for ((srcName, guestTarget) in mappings) {

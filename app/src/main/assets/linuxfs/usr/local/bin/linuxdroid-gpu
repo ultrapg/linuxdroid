@@ -36,7 +36,7 @@ if [ "$#" -gt 0 ]; then
       ;;
     chromium|chromium-browser|google-chrome|google-chrome-stable|brave-browser)
       export GALLIUM_THREAD=0
-      set -- "$1" --ozone-platform=wayland "${@:2}"
+      set -- "$1" --ozone-platform=wayland --in-process-gpu --disable-gpu-watchdog --disable-vulkan "${@:2}"
       ;;
     firefox)
       export MOZ_ENABLE_WAYLAND=1 MOZ_WEBRENDER=1 GALLIUM_THREAD=0

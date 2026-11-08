@@ -1011,6 +1011,12 @@ __attribute__((visibility("hidden"))) int bl_proc_open(int dirfd, const char *pa
     static_fallback = "";
   } else if (strcmp(norm, "/proc/sys/fs/file-nr") == 0) {
     static_fallback = "1024\t0\t9223372036854775807\n";
+  } else if (strcmp(norm, "/proc/sys/fs/inotify/max_user_watches") == 0) {
+    static_fallback = "524288\n";
+  } else if (strcmp(norm, "/proc/sys/fs/inotify/max_user_instances") == 0) {
+    static_fallback = "1024\n";
+  } else if (strcmp(norm, "/proc/sys/fs/inotify/max_queued_events") == 0) {
+    static_fallback = "32768\n";
   } else if (strcmp(norm, "/proc/sys/kernel/pid_max") == 0) {
     static_fallback = "32768\n";
   } else if (strcmp(norm, "/proc/sys/kernel/sched_autogroup_enabled") == 0) {

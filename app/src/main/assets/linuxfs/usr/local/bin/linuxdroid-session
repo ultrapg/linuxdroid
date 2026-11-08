@@ -126,7 +126,11 @@ prepare_locale
 # and neutralize /usr/bin/ksplashqml so KDE's fullscreen LayerOverlay splash never covers the desktop.
 for stub_svc in \
   /usr/share/dbus-1/services/org.freedesktop.systemd1.service \
-  /usr/share/dbus-1/services/org.kde.KSplash.service; do
+  /usr/share/dbus-1/services/org.kde.KSplash.service \
+  /usr/share/dbus-1/services/org.freedesktop.portal.Desktop.service \
+  /usr/share/dbus-1/services/org.freedesktop.portal.Documents.service \
+  /usr/share/dbus-1/services/org.freedesktop.impl.portal.desktop.kde.service \
+  /usr/share/dbus-1/services/org.freedesktop.impl.portal.desktop.gtk.service; do
   if [ -f "$stub_svc" ]; then
     rm -f "$stub_svc" 2>/dev/null || linuxdroid-root rm -f "$stub_svc" 2>/dev/null || true
   fi

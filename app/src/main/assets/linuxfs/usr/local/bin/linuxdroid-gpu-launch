@@ -46,8 +46,8 @@ fi
 
 log_event "Launching with hardware GPU acceleration ($real $*) WAYLAND_DISPLAY=${WAYLAND_DISPLAY:-unset} DISPLAY=${DISPLAY:-unset}"
 start="$(date +%s)"
-err_capture="$cache_dir/last-${name}-gpu.err"
-/usr/local/bin/linuxdroid-gpu "$real" "$@" 2> >(tee "$err_capture" >&2)
+err_capture="$cache_dir/last-${name}-$$.err"
+/usr/local/bin/linuxdroid-gpu "$real" "$@" 2> >(tee -a "$cache_dir/last-${name}-gpu.err" "$err_capture" >&2)
 rc=$?
 elapsed=$(( $(date +%s) - start ))
 if [ -s "$err_capture" ]; then
@@ -55,6 +55,7 @@ if [ -s "$err_capture" ]; then
     log_event "stderr: $line"
   done
 fi
+rm -f "$err_capture" 2>/dev/null || true
 if [ "$rc" -ne 0 ] && [ "$rc" -ne 130 ] && [ "$rc" -ne 143 ] && [ "$elapsed" -lt 6 ]; then
   mkdir -p "$mark" 2>/dev/null && printf 'exit=%s elapsed=%ss at %s\n' "$rc" "$elapsed" "$(date -u '+%Y-%m-%d %H:%M:%S UTC')" > "$mark/$name" 2>/dev/null
   log_event "GPU start failed (exit $rc in ${elapsed}s); recorded fallback marker and restarting in software mode."
