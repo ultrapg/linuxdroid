@@ -75,6 +75,14 @@ static const char *fp_shim_redirect(const char *path) {
       access("/usr/local/bin/flatpak-spawn", X_OK) == 0) {
     return "/usr/local/bin/flatpak-spawn";
   }
+  if ((strcmp(path, "/usr/bin/chromium") == 0 || strcmp(path, "/bin/chromium") == 0) &&
+      access("/usr/local/bin/chromium", X_OK) == 0) {
+    return "/usr/local/bin/chromium";
+  }
+  if ((strcmp(path, "/usr/bin/chromium-browser") == 0 || strcmp(path, "/bin/chromium-browser") == 0) &&
+      access("/usr/local/bin/chromium-browser", X_OK) == 0) {
+    return "/usr/local/bin/chromium-browser";
+  }
   return NULL;
 }
 
@@ -82,6 +90,8 @@ static int fp_is_shim_name(const char *file) {
   if (!file) return 0;
   return strcmp(file, "bwrap") == 0 ||
          strcmp(file, "flatpak-spawn") == 0 ||
+         strcmp(file, "chromium") == 0 ||
+         strcmp(file, "chromium-browser") == 0 ||
          fp_shim_redirect(file) != NULL;
 }
 

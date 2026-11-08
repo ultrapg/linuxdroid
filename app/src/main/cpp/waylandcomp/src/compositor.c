@@ -194,6 +194,7 @@ struct surface {
     struct wl_resource *pending_buffer;
     struct wl_listener pending_buffer_destroy;
     int pending_attach;
+    int pending_off_x, pending_off_y;
     int pending_src_set, pending_dst_set;
     float pending_src[4];
     int pending_dst[2];
@@ -452,7 +453,7 @@ static atomic_int g_cursor_composite_want;
 
 static void cursor_publish_shown(void) {
     pthread_mutex_lock(&g_cursor_lock);
-    if (g_cursor_w > 0) { g_cursor_hidden = 0; g_cursor_serial++; }
+    if (g_cursor_w > 0 && g_cursor_hidden) { g_cursor_hidden = 0; g_cursor_serial++; }
     pthread_mutex_unlock(&g_cursor_lock);
 }
 
@@ -957,6 +958,8 @@ static void surface_attach(struct wl_client *c, struct wl_resource *r,
     wl_list_init(&s->pending_buffer_destroy.link);
     s->pending_buffer = buffer;
     s->pending_attach = 1;
+    s->pending_off_x += x;
+    s->pending_off_y += y;
     if (buffer) {
         s->pending_buffer_destroy.notify = on_pending_buffer_destroyed;
         wl_resource_add_destroy_listener(buffer, &s->pending_buffer_destroy);
@@ -1222,6 +1225,17 @@ static void surface_commit(struct wl_client *c, struct wl_resource *r) {
     if (s->pending_buf_scale >= 1) {
         s->buf_scale = s->pending_buf_scale;
     }
+    if (s->pending_off_x || s->pending_off_y) {
+        if (s->role == ROLE_CURSOR) {
+            pthread_mutex_lock(&g_cursor_lock);
+            g_cursor_hx -= s->pending_off_x;
+            g_cursor_hy -= s->pending_off_y;
+            if (!s->pending_attach) g_cursor_serial++;
+            pthread_mutex_unlock(&g_cursor_lock);
+        }
+        s->pending_off_x = 0;
+        s->pending_off_y = 0;
+    }
 
     s->damage_buf = s->pending_damage_buf;
     s->damage_local = s->pending_damage_local;
@@ -1299,7 +1313,13 @@ static void surface_damage_buffer(struct wl_client *c, struct wl_resource *r,
     struct surface *s = wl_resource_get_user_data(r);
     note_damage(&s->pending_damage_buf, x, y, w, h);
 }
-static void surface_offset(struct wl_client *c, struct wl_resource *r, int32_t x, int32_t y) {}
+static void surface_offset(struct wl_client *c, struct wl_resource *r, int32_t x, int32_t y) {
+    struct surface *s = wl_resource_get_user_data(r);
+    if (s) {
+        s->pending_off_x += x;
+        s->pending_off_y += y;
+    }
+}
 
 static const struct wl_surface_interface surface_impl = {
     .destroy = surface_destroy,
@@ -2503,8 +2523,10 @@ static void pointer_set_cursor(struct wl_client *c, struct wl_resource *r, uint3
     s->role = ROLE_CURSOR;
     g_cursor_surface = s;
     pthread_mutex_lock(&g_cursor_lock);
+    int hotspot_changed = (g_cursor_hx != hx || g_cursor_hy != hy);
     g_cursor_hx = hx;
     g_cursor_hy = hy;
+    if (hotspot_changed && !g_cursor_hidden && g_cursor_shown == s) g_cursor_serial++;
     pthread_mutex_unlock(&g_cursor_lock);
     struct wl_resource *buffer = surface_take_idle(s);
     if (buffer) {
@@ -3124,14 +3146,25 @@ static void pointer_input(double x, double y, int relative, uint32_t button, int
     if (relative) {
         dx = x; dy = y;
     } else {
-        dx = g_raw_valid ? x - g_raw_x : 0;
-        dy = g_raw_valid ? y - g_raw_y : 0;
+        if (!g_raw_valid || (button && pressed)) {
+            dx = 0; dy = 0;
+        } else {
+            dx = x - g_raw_x;
+            dy = y - g_raw_y;
+        }
         g_raw_x = x; g_raw_y = y; g_raw_valid = 1;
     }
 
     if (k && k->is_lock) {
         target = k->surface;
     } else {
+        if (!g_ptr_known) {
+            int w, h;
+            scene_size(&w, &h);
+            g_ptr_x = w * 0.5;
+            g_ptr_y = h * 0.5;
+            g_ptr_known = 1;
+        }
         if (relative) {
             int w, h;
             scene_size(&w, &h);
@@ -3143,6 +3176,7 @@ static void pointer_input(double x, double y, int relative, uint32_t button, int
         }
         if (k) confine_clamp(k, &x, &y);
         g_ptr_x = x; g_ptr_y = y;
+        g_raw_x = x; g_raw_y = y; g_raw_valid = 1;
         g_ptr_known = 1;
         if (atomic_load(&g_cursor_composite)) schedule_render();
         if (k) {
@@ -3167,8 +3201,8 @@ static void pointer_input(double x, double y, int relative, uint32_t button, int
     uint32_t t = now_ms();
 
     pointer_focus(target->resource, fx, fy);
-    int rel_consumed = send_relative_motion(client, dx, dy);
-    if (!(k && k->is_lock) && !(relative && rel_consumed) && (!relative || dx != 0 || dy != 0))
+    send_relative_motion(client, dx, dy);
+    if (!(k && k->is_lock) && (!relative || dx != 0 || dy != 0))
         for_each_pointer_of(client, sp) wl_pointer_send_motion(sp->ptr, t, fx, fy);
     for_each_pointer_of(client, sp) {
         if (button)
@@ -3190,6 +3224,13 @@ static void pointer_event(double x, double y, uint32_t button, int pressed) {
 }
 
 static void pointer_delta(double dx, double dy) {
+    int w, h, ow = 0, oh = 0;
+    scene_size(&w, &h);
+    vkp_output_size(&ow, &oh);
+    if (ow > 0 && oh > 0 && w > 0 && h > 0) {
+        dx *= (double)w / (double)ow;
+        dy *= (double)h / (double)oh;
+    }
     pointer_input(dx, dy, 1, 0, 0);
 }
 
@@ -3381,11 +3422,13 @@ static void touch_down(int id, double x, double y) {
     }
     struct seat_touch *st;
     int has_touch = 0;
-    for_each_touch_of(client, st) has_touch = 1;
+    if (target != g_desktop) {
+        for_each_touch_of(client, st) has_touch = 1;
+    }
     if (!any_active) {
         char name[160];
         describe(target, name, sizeof(name));
-        droiddeck_log("touch", "%s gets %s", name, has_touch ? "touch" : "the pointer (it takes no touch)");
+        droiddeck_log("touch", "%s gets %s", name, has_touch ? "touch" : "the pointer (desktop/pointer mode)");
     }
     if (!has_touch) {
         if (any_active) return;

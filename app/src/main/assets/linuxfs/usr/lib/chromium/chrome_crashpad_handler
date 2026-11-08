@@ -1,0 +1,11 @@
+#!/bin/sh
+mkdir -p /tmp/chromium-crashpad
+for a in "$@"; do
+    shift
+    case "$a" in
+        --database=) set -- "$@" "--database=/tmp/chromium-crashpad" ;;
+        --metrics-dir=) set -- "$@" "--metrics-dir=/tmp/chromium-crashpad" ;;
+        *) set -- "$@" "$a" ;;
+    esac
+done
+exec /usr/lib/chromium/chrome_crashpad_handler.real "$@"

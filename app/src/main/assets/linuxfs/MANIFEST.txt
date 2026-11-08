@@ -18,6 +18,17 @@
 0644 etc/xdg/kwinrc
 0644 etc/xdg/powerdevilrc
 0644 etc/xdg/startkderc
+0644 usr/lib/chromium/chrome_100_percent.pak
+0644 usr/lib/chromium/chrome_200_percent.pak
+0755 usr/lib/chromium/chrome_crashpad_handler
+0755 usr/lib/chromium/chrome_crashpad_handler.real
+0644 usr/lib/chromium/icudtl.dat
+0644 usr/lib/chromium/libEGL.so
+0644 usr/lib/chromium/libGLESv2.so
+0644 usr/lib/chromium/locales/en-US.pak
+0644 usr/lib/chromium/resources.pak
+0644 usr/lib/chromium/snapshot_blob.bin
+0644 usr/lib/chromium/v8_context_snapshot.bin
 0644 usr/lib/firefox/defaults/pref/linuxdroid.js
 0644 usr/lib/firefox/linuxdroid.cfg
 0755 usr/local/bin/apt

@@ -1,23 +1,64 @@
 #!/bin/bash
-# LinuxDroid: Chromium-based browsers cannot create their namespace sandbox under PRoot, so launch the real
-# binary (found later in PATH) with the sandbox disabled.
+# LinuxDroid: Chromium wrapper for PRoot + Wayland/X11 + ANGLE (Mesa EGL/GLESv2).
 name="$(basename "$0")"
-IFS=: read -ra dirs <<< "$PATH"
-for d in "${dirs[@]}"; do
-  [ "$d" = "/usr/local/bin" ] && continue
-  if [ -x "$d/$name" ]; then
-    for arg in "$@"; do
-      case "$arg" in
-        --version|-v|--help|-h) exec "$d/$name" "$@" ;;
-      esac
-    done
-    flags=(--no-sandbox --no-zygote --disable-gpu-sandbox --disable-dev-shm-usage)
-    if [ "${BL_GPU_APPS:-0}" = "1" ]; then
-      flags+=(--ignore-gpu-blocklist --enable-gpu-rasterization --enable-zero-copy)
-      exec /usr/local/bin/linuxdroid-gpu-launch "$d/$name" "${flags[@]}" "$@"
-    fi
-    exec "$d/$name" "${flags[@]}" "$@"
+real_bin=""
+for cand in \
+  /usr/lib/chromium/chromium \
+  /usr/lib/chromium-browser/chromium-browser \
+  /usr/lib/chromium-browser/chromium \
+  "/usr/bin/${name}.distrib"; do
+  if [ -x "$cand" ]; then
+    real_bin="$cand"
+    break
   fi
 done
-echo "$name: command not found" >&2
-exit 127
+
+if [ -z "$real_bin" ]; then
+  IFS=: read -ra dirs <<< "$PATH"
+  for d in "${dirs[@]}"; do
+    [ "$d" = "/usr/local/bin" ] && continue
+    if [ -x "$d/$name" ] && [ ! "$d/$name" -ef "$0" ]; then
+      real_bin="$d/$name"
+      break
+    fi
+  done
+fi
+
+if [ -z "$real_bin" ]; then
+  echo "$name: command not found" >&2
+  exit 127
+fi
+
+for arg in "$@"; do
+  case "$arg" in
+    --version|-v|--help|-h) exec "$real_bin" "$@" ;;
+  esac
+done
+
+case "${LANG:-}" in
+  ""|C|C.*|POSIX) export LANG="en_US.UTF-8" ;;
+esac
+mkdir -p /tmp/chromium-crashpad 2>/dev/null || true
+
+flags=(
+  --no-sandbox
+  --no-zygote
+  --disable-gpu-sandbox
+  --disable-dev-shm-usage
+  --password-store=basic
+  --no-first-run
+  --no-default-browser-check
+  --lang=en-US
+  --ozone-platform-hint=auto
+  --use-gl=angle
+  --use-angle=gles-egl
+)
+
+if [ "${BL_GPU_APPS:-0}" = "1" ]; then
+  flags+=(--ignore-gpu-blocklist --enable-gpu-rasterization --enable-zero-copy)
+  if [ -x /usr/local/bin/linuxdroid-gpu-launch ]; then
+    exec /usr/local/bin/linuxdroid-gpu-launch "$real_bin" "${flags[@]}" "$@"
+  fi
+fi
+
+exec "$real_bin" "${flags[@]}" "$@"

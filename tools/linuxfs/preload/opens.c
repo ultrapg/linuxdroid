@@ -13,6 +13,7 @@ int bl_status_without_tracer(const char *path, int flags, const void *caller) __
 int bl_proc_open(int dirfd, const char *path, int flags) __attribute__((visibility("hidden")));
 void bl_proc_close(int fd) __attribute__((visibility("hidden")));
 int bl_writable_retry(int dirfd, const char *path, int flags) __attribute__((visibility("hidden")));
+int bl_is_root_dirfd(int dirfd) __attribute__((visibility("hidden")));
 const char *bl_flatpak_map_path_mode(const char *path, char *buf, size_t bufsz, int follow_final)
     __attribute__((visibility("hidden")));
 
@@ -66,6 +67,10 @@ int openat(int dirfd, const char *path, int flags, ...) {
   va_start(ap, flags);
   mode = va_arg(ap, mode_t);
   va_end(ap);
+  const char *p = path;
+  if (dirfd >= 0 && p && strcmp(p, "..") == 0 && bl_is_root_dirfd(dirfd)) {
+    path = ".";
+  }
   path = bl_flatpak_map_path_mode(path, vfs_buf, sizeof(vfs_buf), (flags & O_NOFOLLOW) ? 0 : 1);
   if (is_trace_marker(path)) {
     errno = EACCES;

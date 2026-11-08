@@ -418,6 +418,31 @@ static int is_self_exe_path(const char *path) {
   return 0;
 }
 
+__attribute__((visibility("hidden"))) int bl_is_root_dirfd(int dirfd) {
+  if (dirfd < 0) return 0;
+  static dev_t root_dev;
+  static ino_t root_ino;
+  static int root_init;
+  int saved_errno = errno;
+  if (!__atomic_load_n(&root_init, __ATOMIC_ACQUIRE)) {
+    struct stat rst;
+    if (syscall(SYS_newfstatat, AT_FDCWD, "/", &rst, 0) == 0) {
+      root_dev = rst.st_dev;
+      root_ino = rst.st_ino;
+      __atomic_store_n(&root_init, 1, __ATOMIC_RELEASE);
+    }
+  }
+  struct stat dst;
+  int is_root = 0;
+  if (__atomic_load_n(&root_init, __ATOMIC_ACQUIRE) &&
+      syscall(SYS_fstat, dirfd, &dst) == 0 &&
+      dst.st_dev == root_dev && dst.st_ino == root_ino) {
+    is_root = 1;
+  }
+  errno = saved_errno;
+  return is_root;
+}
+
 /* PLT wrappers for filesystem lookups not already in opens.c / pathcache.c / netif.c */
 
 DIR *opendir(const char *path) {
@@ -430,6 +455,9 @@ DIR *opendir(const char *path) {
 int fstatat(int dirfd, const char *path, struct stat *st, int flags) {
   static int (*real_fstatat)(int, const char *, struct stat *, int);
   if (!real_fstatat) real_fstatat = (int (*)(int, const char *, struct stat *, int))dlsym(RTLD_NEXT, "fstatat");
+  if (dirfd >= 0 && path && strcmp(path, "..") == 0 && bl_is_root_dirfd(dirfd)) {
+    path = ".";
+  }
   char buf[PATH_MAX];
   int follow = (flags & AT_SYMLINK_NOFOLLOW) ? 0 : 1;
   return real_fstatat(dirfd, bl_flatpak_map_path_mode(path, buf, sizeof(buf), follow), st, flags);
@@ -455,11 +483,38 @@ int lstat64(const char *path, struct stat64 *st) {
 int statx(int dirfd, const char *path, int flags, unsigned int mask, struct statx *stx) {
   static int (*real_statx)(int, const char *, int, unsigned int, struct statx *);
   if (!real_statx) real_statx = (int (*)(int, const char *, int, unsigned int, struct statx *))dlsym(RTLD_NEXT, "statx");
+  if (dirfd >= 0 && path && strcmp(path, "..") == 0 && bl_is_root_dirfd(dirfd)) {
+    path = ".";
+  }
   char buf[PATH_MAX];
   int follow = (flags & AT_SYMLINK_NOFOLLOW) ? 0 : 1;
   const char *mapped = bl_flatpak_map_path_mode(path, buf, sizeof(buf), follow);
-  if (real_statx) return real_statx(dirfd, mapped, flags, mask, stx);
-  return (int)syscall(SYS_statx, dirfd, mapped, flags, mask, stx);
+  int r = real_statx ? real_statx(dirfd, mapped, flags, mask, stx)
+                     : (int)syscall(SYS_statx, dirfd, mapped, flags, mask, stx);
+  if (r < 0 && errno == ENOENT) {
+    struct stat st;
+    int st_flags = flags & (AT_SYMLINK_NOFOLLOW | AT_EMPTY_PATH | AT_NO_AUTOMOUNT);
+    if (fstatat(dirfd, mapped, &st, st_flags) == 0) {
+      memset(stx, 0, sizeof(*stx));
+      stx->stx_mask = STATX_BASIC_STATS;
+      stx->stx_blksize = st.st_blksize;
+      stx->stx_nlink = st.st_nlink;
+      stx->stx_uid = st.st_uid;
+      stx->stx_gid = st.st_gid;
+      stx->stx_mode = st.st_mode;
+      stx->stx_ino = st.st_ino;
+      stx->stx_size = st.st_size;
+      stx->stx_blocks = st.st_blocks;
+      stx->stx_atime.tv_sec = st.st_atim.tv_sec;
+      stx->stx_atime.tv_nsec = st.st_atim.tv_nsec;
+      stx->stx_mtime.tv_sec = st.st_mtim.tv_sec;
+      stx->stx_mtime.tv_nsec = st.st_mtim.tv_nsec;
+      stx->stx_ctime.tv_sec = st.st_ctim.tv_sec;
+      stx->stx_ctime.tv_nsec = st.st_ctim.tv_nsec;
+      return 0;
+    }
+  }
+  return r;
 }
 
 ssize_t readlinkat(int dirfd, const char *path, char *out, size_t bufsiz) {
