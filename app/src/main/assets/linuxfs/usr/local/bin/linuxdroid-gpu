@@ -2,7 +2,10 @@
 # Run an application with full hardware SoC OpenGL (Zink / VirGL) and Vulkan enabled.
 set -u
 
-unset LIBGL_ALWAYS_SOFTWARE
+case "${VK_ICD_FILENAMES:-}${VK_DRIVER_FILES:-}" in
+  *lvp_icd*) ;;
+  *) unset LIBGL_ALWAYS_SOFTWARE ;;
+esac
 unset QT_QUICK_BACKEND
 
 if [ -r /etc/linuxdroid/gpu.env ]; then
@@ -14,7 +17,10 @@ fi
 unset MESA_NO_ERROR
 
 if [ "${LINUXDROID_GPU_ACTIVE:-}" = "turnip" ] || [ "${LINUXDROID_GPU_ACTIVE:-}" = "unified" ]; then
-  unset LIBGL_ALWAYS_SOFTWARE
+  case "${VK_ICD_FILENAMES:-}${VK_DRIVER_FILES:-}" in
+    *lvp_icd*) ;;
+    *) unset LIBGL_ALWAYS_SOFTWARE ;;
+  esac
   if [ "${LINUXDROID_GPU_ACTIVE:-}" = "turnip" ]; then
     # Never override GL version to 4.6 without COMPAT; Mesa forces Core Profile and breaks
     # QWaylandBlitter / Qt Quick / legacy GL shaders. Zink + Turnip natively supports 4.6 Compat.
@@ -32,7 +38,13 @@ fi
 if [ "$#" -gt 0 ]; then
   case "$(basename "$1")" in
     blender|blender-launcher)
-      export ZINK_DESCRIPTORS=lazy GALLIUM_THREAD=0
+      # Blender 5.x creates 4 shared OpenGL contexts across main + background 'Shader Compilation'
+      # worker threads. Disable mesa_glthread and Zink async background compiler queue (zcq0) so
+      # DrawManager compute/graphics pipelines never deadlock between shared contexts.
+      unset mesa_glthread
+      export ZINK_DESCRIPTORS=lazy
+      export ZINK_DEBUG=nobgc,nopc
+      export GALLIUM_THREAD=0
       ;;
     chromium|chromium-browser|google-chrome|google-chrome-stable|brave-browser)
       export GALLIUM_THREAD=0

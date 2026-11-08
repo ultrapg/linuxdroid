@@ -108,16 +108,6 @@ static void call_dri_invalidate_drawable(void *drawable) {
   }
 }
 
-static void call_kopper_set_swap_interval(void *drawable, int interval) {
-  static kopper_set_swap_interval_fn fn = NULL;
-  if (!fn) {
-    fn = (kopper_set_swap_interval_fn)resolve_lib_symbol("libgallium", NULL, "kopperSetSwapInterval", NULL);
-  }
-  if (fn && drawable) {
-    fn(drawable, interval);
-  }
-}
-
 static int is_valid_wayland_kopper_triplet(void *win, void *dri2_surf, void *dri_drawable) {
   if (!win || !dri2_surf || !dri_drawable) {
     return 0;
@@ -150,10 +140,9 @@ static void bl_wl_kopper_resize_cb(void *win, void *data) {
     return;
   }
 
-  /* Ensure non-blocking swap on Wayland Kopper so QtWayland handles frame pacing */
+  /* Ensure non-blocking swap on Wayland Kopper so QtWayland/GHOST handles frame pacing */
   if (*(int32_t *)((char *)dri2_surf + 0x80) != 0) {
     *(int32_t *)((char *)dri2_surf + 0x80) = 0;
-    call_kopper_set_swap_interval(dri_drawable, 0);
   }
 
   int32_t w = *(int32_t *)((char *)win + 0x08);
@@ -173,7 +162,9 @@ static void bl_wl_kopper_resize_cb(void *win, void *data) {
     *((uint8_t *)dri2_surf + 0x2b8) = 1;
     *(int32_t *)((char *)dri_drawable + 0x1d8) = w;
     *(int32_t *)((char *)dri_drawable + 0x1dc) = h;
-    call_dri_invalidate_drawable(dri_drawable);
+    if (cur_dw > 0 && cur_dh > 0 && (cur_dw != w || cur_dh != h)) {
+      call_dri_invalidate_drawable(dri_drawable);
+    }
   }
 }
 
@@ -199,7 +190,6 @@ static void sync_kopper_drawable(void *dri_drawable, int is_post_swap) {
 
   if (*(int32_t *)((char *)dri2_surf + 0x80) != 0) {
     *(int32_t *)((char *)dri2_surf + 0x80) = 0;
-    call_kopper_set_swap_interval(dri_drawable, 0);
   }
 
   bl_wl_kopper_resize_cb(win, dri2_surf);
