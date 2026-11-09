@@ -497,22 +497,23 @@ print(fallback)
   fi
   sudo rm -rf /opt/blender
   sudo mv /opt/blender.new /opt/blender
+  sudo rm -f /opt/blender/lib/libvulkan.so* 2>/dev/null || true
 
   sudo sh -c '
     cat > /usr/local/bin/blender <<'\''WRAP'\''
 #!/bin/sh
-# BL_WRAPPER_V4
+# BL_WRAPPER_V5
 unset MESA_NO_ERROR DRI_PRIME
 export LIBDECOR_PLUGIN_DIR=/nonexistent
 export LP_NUM_THREADS="${BL_CPU_COUNT:-4}"
-if [ "${BL_GPU_APPS:-0}" = "1" ]; then
+if [ "${BL_GPU_APPS:-1}" = "1" ]; then
   unset LIBGL_ALWAYS_SOFTWARE
-elif [ "${KWIN_COMPOSE:-}" = "Q" ]; then
+else
   unset MESA_LOADER_DRIVER_OVERRIDE LIBGL_KOPPER_DRI2 MESA_GL_VERSION_OVERRIDE MESA_GLSL_VERSION_OVERRIDE
   export LIBGL_ALWAYS_SOFTWARE=1
   export GALLIUM_DRIVER=llvmpipe
 fi
-if [ "${LIBGL_ALWAYS_SOFTWARE:-}" = "1" ] && [ "${BL_GPU_APPS:-0}" != "1" ]; then
+if [ "${LIBGL_ALWAYS_SOFTWARE:-}" = "1" ] && [ "${BL_GPU_APPS:-1}" != "1" ]; then
   case " $* " in
     *" --version "*|*" -v "*|*" --help "*|*" -h "*|*" -b "*|*" --background "*) ;;
     *)
@@ -525,7 +526,7 @@ except Exception:
       ;;
   esac
 fi
-export LD_LIBRARY_PATH="/opt/blender/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+export LD_LIBRARY_PATH="/usr/lib/aarch64-linux-gnu:/opt/blender/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
 if [ -x /opt/blender/blender-launcher ]; then
   exec /usr/local/bin/linuxdroid-gpu-launch /opt/blender/blender-launcher "$@"
 fi

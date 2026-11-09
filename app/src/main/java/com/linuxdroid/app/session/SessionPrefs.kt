@@ -2,6 +2,7 @@ package com.linuxdroid.app.session
 
 import android.content.Context
 import android.content.pm.ActivityInfo
+import com.linuxdroid.app.core.FileUtils
 import com.linuxdroid.app.gpu.GpuDriverMode
 import com.linuxdroid.app.runtime.LinuxRuntime
 import com.linuxdroid.app.runtime.UserProvisioner
@@ -318,20 +319,53 @@ object SessionPrefs {
         prefs(context).edit().putBoolean("mic_enabled", enabled).apply()
     }
 
-    /** GPU acceleration for apps that support it (browser, video, creative tools). The desktop shell stays software-composited. */
-    fun gpuApps(context: Context): Boolean =
-        prefs(context).getBoolean("gpu_apps", false)
-
-    fun setGpuApps(context: Context, enabled: Boolean) {
-        prefs(context).edit().putBoolean("gpu_apps", enabled).apply()
+    private fun ensureGpuDefaultsMigrated(context: Context) {
+        val p = prefs(context)
+        if (!p.getBoolean("gpu_defaults_v2", false)) {
+            p.edit()
+                .putBoolean("gpu_defaults_v2", true)
+                .putBoolean("gpu_apps", true)
+                .putBoolean("gpu_desktop", true)
+                .apply()
+            runCatching {
+                val cacheDir = File(LinuxRuntime.rootDir(context), "home/${username(context)}/.cache/linuxdroid")
+                File(cacheDir, "gpu-desktop-failed").delete()
+                FileUtils.deleteRecursively(File(cacheDir, "gpu-fallback"))
+            }
+        }
     }
 
-    /** GPU compositing for the KDE desktop itself (KWin OpenGL + GPU Qt Quick). Falls back to software on failure. */
-    fun gpuDesktop(context: Context): Boolean =
-        prefs(context).getBoolean("gpu_desktop", false)
+    /** GPU acceleration for apps that support it (browser, video, creative tools). Enabled by default. */
+    fun gpuApps(context: Context): Boolean {
+        ensureGpuDefaultsMigrated(context)
+        return prefs(context).getBoolean("gpu_apps", true)
+    }
+
+    fun setGpuApps(context: Context, enabled: Boolean) {
+        prefs(context).edit()
+            .putBoolean("gpu_defaults_v2", true)
+            .putBoolean("gpu_apps", enabled)
+            .apply()
+        if (enabled) {
+            runCatching {
+                FileUtils.deleteRecursively(
+                    File(LinuxRuntime.rootDir(context), "home/${username(context)}/.cache/linuxdroid/gpu-fallback")
+                )
+            }
+        }
+    }
+
+    /** GPU compositing for the desktop environment and Plasma shell. Enabled by default; falls back to software on failure. */
+    fun gpuDesktop(context: Context): Boolean {
+        ensureGpuDefaultsMigrated(context)
+        return prefs(context).getBoolean("gpu_desktop", true)
+    }
 
     fun setGpuDesktop(context: Context, enabled: Boolean) {
-        prefs(context).edit().putBoolean("gpu_desktop", enabled).apply()
+        prefs(context).edit()
+            .putBoolean("gpu_defaults_v2", true)
+            .putBoolean("gpu_desktop", enabled)
+            .apply()
         // Re-enabling clears a previous automatic software fallback so the GPU desktop is tried again.
         if (enabled) {
             runCatching {

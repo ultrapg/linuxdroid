@@ -569,15 +569,20 @@ if [ "$desktop_choice" = "kde" ]; then
   unset MESA_NO_ERROR
   if [ "$gpu_desktop" = 1 ]; then
     # Hybrid GPU desktop: nested KWin composites Wayland client surfaces onto wayland-0 via
-    # QPainter/wl_shm (because nested KWin Wayland has no DRM/GBM modesetting device), while
-    # /usr/local/bin/plasmashell and desktop applications use native SoC GPU acceleration
-    # (Turnip + Zink + Kopper / VirGL) on wayland-1.
-    export KWIN_COMPOSE=Q
-    export QT_QUICK_BACKEND=software
+    # QPainter/wl_shm (configured in kwinrc and /usr/local/bin/kwin_wayland_wrapper), while
+    # the session environment, /usr/local/bin/plasmashell, and desktop applications keep native
+    # SoC GPU acceleration (Turnip + Zink + Kopper / VirGL) enabled by default on wayland-1.
+    unset LIBGL_ALWAYS_SOFTWARE QT_QUICK_BACKEND MESA_GL_VERSION_OVERRIDE MESA_GLSL_VERSION_OVERRIDE KWIN_RENDER_NODES KWIN_DRM_DEVICES KWIN_COMPOSE
     export GALLIUM_THREAD=0
-    unset MESA_LOADER_DRIVER_OVERRIDE LIBGL_KOPPER_DRI2 MESA_GL_VERSION_OVERRIDE MESA_GLSL_VERSION_OVERRIDE KWIN_RENDER_NODES KWIN_DRM_DEVICES
-    export LIBGL_ALWAYS_SOFTWARE=1
-    export GALLIUM_DRIVER=llvmpipe
+    if [ "${LINUXDROID_GPU_ACTIVE:-}" = "turnip" ]; then
+      export MESA_LOADER_DRIVER_OVERRIDE="${MESA_LOADER_DRIVER_OVERRIDE:-zink}"
+      export GALLIUM_DRIVER="${GALLIUM_DRIVER:-zink}"
+      export TU_DEBUG="${TU_DEBUG:-noconform,sysmem}"
+      export LIBGL_KOPPER_DRI2=true
+      export MESA_VK_WSI_DEBUG=sw
+      export MESA_VK_WSI_PRESENT_MODE=mailbox
+      export QT_WAYLAND_FORCE_NONBLOCKING_SWAP_SUPPORT=1
+    fi
     "$KWRITECONFIG" --file kwinrc --group Compositing --key Backend QPainter 2>/dev/null || true
     echo "== linuxdroid-desktop: hybrid GPU desktop (KWin QPainter compositing + GPU Plasma & apps, ${LINUXDROID_GPU_ACTIVE:-gpu})"
   else
@@ -629,7 +634,7 @@ ENTRY
     fi
   fi
 
-  echo "== linuxdroid-desktop: starting KDE Plasma Wayland (logical=${WIDTH}x${HEIGHT}, pixel=${PIXEL_WIDTH}x${PIXEL_HEIGHT}, scale=${SCALE}, KWIN_COMPOSE=${KWIN_COMPOSE})"
+  echo "== linuxdroid-desktop: starting KDE Plasma Wayland (logical=${WIDTH}x${HEIGHT}, pixel=${PIXEL_WIDTH}x${PIXEL_HEIGHT}, scale=${SCALE}, gpu_desktop=${gpu_desktop})"
   export -f start_x11_helpers configure_kde_default_launchers sync_live_kde_launchers prune_missing_launchers
   dbus-run-session -- /bin/bash -c '
     if [ -n "${XDG_RUNTIME_DIR:-}" ] && [ -n "${DBUS_SESSION_BUS_ADDRESS:-}" ]; then

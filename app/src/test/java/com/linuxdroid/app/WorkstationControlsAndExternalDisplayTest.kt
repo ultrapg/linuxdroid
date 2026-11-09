@@ -204,6 +204,6 @@ class WorkstationControlsAndExternalDisplayTest {
         )
 
         val sessionScript = repoRoot.resolve("app/src/main/assets/linuxfs/usr/local/bin/linuxdroid-session").readText()
-        assertTrue("linuxdroid-session must upgrade Blender wrapper to BL_WRAPPER_V4", sessionScript.contains("BL_WRAPPER_V4"))
+        assertTrue("linuxdroid-session must upgrade Blender wrapper to BL_WRAPPER_V5", sessionScript.contains("BL_WRAPPER_V5"))
     }
 }

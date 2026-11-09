@@ -154,25 +154,28 @@ exec /usr/local/bin/linuxdroid-gpu-launch $gpu_app \"\$@\""
     linuxdroid-root sh -c "printf '%s\n' '$gpu_body' > /usr/local/bin/$gpu_app && chmod 755 /usr/local/bin/$gpu_app" 2>/dev/null || true
 done
 
-# Ensure any existing /opt/blender installation uses the safe wrapper without MESA_NO_ERROR / DRI_PRIME
+# Ensure any existing /opt/blender installation uses the safe wrapper without MESA_NO_ERROR / DRI_PRIME / bundled libvulkan
 if [ -x /opt/blender/blender ]; then
   rm -f "${HOME:-/home/linux}/.cache/linuxdroid/gpu-fallback/blender" \
-        "${HOME:-/home/linux}/.cache/linuxdroid/gpu-fallback/blender-launcher" 2>/dev/null || true
+        "${HOME:-/home/linux}/.cache/linuxdroid/gpu-fallback/blender-launcher" \
+        /opt/blender/lib/libvulkan.so* 2>/dev/null || \
+    linuxdroid-root rm -f /opt/blender/lib/libvulkan.so* 2>/dev/null || true
   refresh_blender_wrapper='
+    rm -f /opt/blender/lib/libvulkan.so* 2>/dev/null || true
     cat > /usr/local/bin/blender.tmp <<'\''WRAP'\''
 #!/bin/sh
-# BL_WRAPPER_V4
+# BL_WRAPPER_V5
 unset MESA_NO_ERROR DRI_PRIME
 export LIBDECOR_PLUGIN_DIR=/nonexistent
 export LP_NUM_THREADS="${BL_CPU_COUNT:-4}"
-if [ "${BL_GPU_APPS:-0}" = "1" ]; then
+if [ "${BL_GPU_APPS:-1}" = "1" ]; then
   unset LIBGL_ALWAYS_SOFTWARE
-elif [ "${KWIN_COMPOSE:-}" = "Q" ]; then
+else
   unset MESA_LOADER_DRIVER_OVERRIDE LIBGL_KOPPER_DRI2 MESA_GL_VERSION_OVERRIDE MESA_GLSL_VERSION_OVERRIDE
   export LIBGL_ALWAYS_SOFTWARE=1
   export GALLIUM_DRIVER=llvmpipe
 fi
-if [ "${LIBGL_ALWAYS_SOFTWARE:-}" = "1" ] && [ "${BL_GPU_APPS:-0}" != "1" ]; then
+if [ "${LIBGL_ALWAYS_SOFTWARE:-}" = "1" ] && [ "${BL_GPU_APPS:-1}" != "1" ]; then
   case " $* " in
     *" --version "*|*" -v "*|*" --help "*|*" -h "*|*" -b "*|*" --background "*) ;;
     *)
@@ -185,7 +188,7 @@ except Exception:
       ;;
   esac
 fi
-export LD_LIBRARY_PATH="/opt/blender/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+export LD_LIBRARY_PATH="/usr/lib/aarch64-linux-gnu:/opt/blender/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
 if [ -x /opt/blender/blender-launcher ]; then
   exec /usr/local/bin/linuxdroid-gpu-launch /opt/blender/blender-launcher "$@"
 fi
@@ -198,7 +201,7 @@ WRAP
       mv -f /usr/share/applications/blender.desktop.tmp /usr/share/applications/blender.desktop
     fi
   '
-  if ! grep -q "BL_WRAPPER_V4" /usr/local/bin/blender 2>/dev/null || grep -q "^PrefersNonDefaultGPU=" /usr/share/applications/blender.desktop 2>/dev/null || [ ! -s /usr/share/applications/blender.desktop ]; then
+  if ! grep -q "BL_WRAPPER_V5" /usr/local/bin/blender 2>/dev/null || grep -q "^PrefersNonDefaultGPU=" /usr/share/applications/blender.desktop 2>/dev/null || [ ! -s /usr/share/applications/blender.desktop ]; then
     sh -c "$refresh_blender_wrapper" 2>/dev/null || linuxdroid-root sh -c "$refresh_blender_wrapper" 2>/dev/null || true
   fi
 fi
@@ -267,7 +270,8 @@ if [ -r /etc/linuxdroid/gpu.env ]; then
   set +a
   unset MESA_NO_ERROR
   if [ "${LINUXDROID_GPU_ACTIVE:-}" = "turnip" ]; then
-    unset MESA_GL_VERSION_OVERRIDE MESA_GLSL_VERSION_OVERRIDE
+    unset MESA_GL_VERSION_OVERRIDE MESA_GLSL_VERSION_OVERRIDE ZINK_DESCRIPTORS
+    export TU_DEBUG="${TU_DEBUG:-noconform,sysmem}"
     export LIBGL_KOPPER_DRI2=true
     export MESA_VK_WSI_DEBUG=sw
     export MESA_VK_WSI_PRESENT_MODE=mailbox

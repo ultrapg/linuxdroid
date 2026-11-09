@@ -8,7 +8,8 @@ OUT="$CACHE_DIR/gpu-test.txt"
 if [ -r /etc/linuxdroid/gpu.env ]; then set -a; . /etc/linuxdroid/gpu.env; set +a; fi
 unset MESA_NO_ERROR LIBGL_ALWAYS_SOFTWARE
 if [ "${LINUXDROID_GPU_ACTIVE:-}" = "turnip" ]; then
-  unset MESA_GL_VERSION_OVERRIDE MESA_GLSL_VERSION_OVERRIDE
+  unset MESA_GL_VERSION_OVERRIDE MESA_GLSL_VERSION_OVERRIDE ZINK_DESCRIPTORS
+  export TU_DEBUG="${TU_DEBUG:-noconform,sysmem}"
   export LIBGL_KOPPER_DRI2=true
   export MESA_VK_WSI_DEBUG=sw
 fi
@@ -37,7 +38,7 @@ step() {
 
   if command -v eglinfo >/dev/null 2>&1; then
     step "egl-surfaceless" eglinfo -B -p surfaceless
-    step "egl-gbm" eglinfo -B -p gbm
+    [ -c /dev/dri/card0 ] && step "egl-gbm" eglinfo -B -p gbm
     [ -n "${WAYLAND_DISPLAY:-}" ] && step "egl-wayland" eglinfo -B -p wayland
   else
     step "egl-ctypes-surfaceless" python3 - <<'PY'
@@ -312,6 +313,7 @@ PY
   if command -v blender >/dev/null 2>&1 || [ -x /opt/blender/blender ]; then
     b="$(command -v blender 2>/dev/null || echo /opt/blender/blender)"
     step "blender-version" "$b" --version
+    step "blender-gpu-probe" /usr/local/bin/linuxdroid-gpu /opt/blender/blender -b --factory-startup --python-expr "import gpu; print('BLENDER_GPU=' + gpu.platform.backend_type_get() + ':' + gpu.platform.vendor_get() + ':' + gpu.platform.renderer_get() + ':' + gpu.platform.version_get())"
   fi
   echo "--- verdict ---"
   if grep -q "rc=[1-9]" "$OUT.tmp" 2>/dev/null; then echo "Some GPU stages failed (see rc!=0 above)."; else echo "All headless GPU stages passed."; fi

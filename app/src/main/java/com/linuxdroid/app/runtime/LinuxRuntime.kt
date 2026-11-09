@@ -9,6 +9,7 @@ import android.util.Log
 import com.linuxdroid.app.BuildConfig
 import com.linuxdroid.app.core.FileUtils
 import com.linuxdroid.app.gpu.GpuInfo
+import com.linuxdroid.app.gpu.TurnipDriver
 import com.linuxdroid.app.session.SessionPrefs
 import com.linuxdroid.app.session.SessionState
 import java.io.File
@@ -255,6 +256,7 @@ object LinuxRuntime {
             }
         }
         FileUtils.writeString(File(root, "etc/ld.so.preload"), preloadLines)
+        TurnipDriver.stageGuestLinuxTurnipDriver(context, root)
         if (stagedOk) {
             val sig = currentApkOverlaySignature(context, enableFastPath)
             FileUtils.writeString(File(etcLinuxDroid, OVERLAY_STAMP_FILE), "$sig\n")

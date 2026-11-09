@@ -25,6 +25,7 @@ if [ "${LINUXDROID_GPU_ACTIVE:-}" = "turnip" ] || [ "${LINUXDROID_GPU_ACTIVE:-}"
     # Never override GL version to 4.6 without COMPAT; Mesa forces Core Profile and breaks
     # QWaylandBlitter / Qt Quick / legacy GL shaders. Zink + Turnip natively supports 4.6 Compat.
     unset MESA_GL_VERSION_OVERRIDE MESA_GLSL_VERSION_OVERRIDE
+    export TU_DEBUG="${TU_DEBUG:-noconform,sysmem}"
     export LIBGL_KOPPER_DRI2=true
     export MESA_VK_WSI_DEBUG=sw
     export MESA_VK_WSI_PRESENT_MODE=mailbox
@@ -34,20 +35,26 @@ if [ "${LINUXDROID_GPU_ACTIVE:-}" = "turnip" ] || [ "${LINUXDROID_GPU_ACTIVE:-}"
   export mesa_glthread=true
 fi
 
-# Per-application profiles: apps stay on native Wayland (no X11 forcing).
+# Per-application profiles
 if [ "$#" -gt 0 ]; then
   case "$(basename "$1")" in
     blender|blender-launcher)
-      # Blender 5.x creates 4 shared OpenGL contexts across main + background 'Shader Compilation'
-      # worker threads. Disable mesa_glthread and Zink async background compiler queue (zcq0) so
-      # DrawManager compute/graphics pipelines never deadlock between shared contexts.
-      # Point LIBDECOR_PLUGIN_DIR at a nonexistent path so libdecor uses its built-in client-side
-      # decoration fallback instead of dlopening libdecor-gtk.so under Blender's bundled LD_LIBRARY_PATH.
-      unset mesa_glthread
-      export ZINK_DESCRIPTORS=lazy
-      export ZINK_DEBUG=nobgc,nopc
+      # Blender 5.x runs over Xwayland (GHOST_SystemX11) by default to avoid GHOST_SystemWayland's
+      # background wl_display event-reader thread racing with Mesa Kopper's Wayland WSI swapchain
+      # dispatch. Keep Turnip + Zink + Kopper hardware acceleration active.
+      unset mesa_glthread ZINK_DEBUG ZINK_DESCRIPTORS
       export GALLIUM_THREAD=0
       export LIBDECOR_PLUGIN_DIR=/nonexistent
+      if [ "${BLENDER_WAYLAND:-0}" != "1" ] && { [ -n "${DISPLAY:-}" ] || [ -S /tmp/.X11-unix/X0 ] || [ -S /tmp/.X11-unix/X1 ]; }; then
+        if [ -z "${DISPLAY:-}" ]; then
+          if [ -S /tmp/.X11-unix/X0 ]; then
+            export DISPLAY=:0
+          else
+            export DISPLAY=:1
+          fi
+        fi
+        unset WAYLAND_DISPLAY
+      fi
       ;;
     chromium|chromium-browser|google-chrome|google-chrome-stable|brave-browser)
       export GALLIUM_THREAD=0

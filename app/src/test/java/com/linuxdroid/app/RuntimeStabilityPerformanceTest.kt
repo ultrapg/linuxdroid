@@ -164,7 +164,11 @@ class RuntimeStabilityPerformanceTest {
         )
         val turnipCfg = GpuConfigGenerator.resolve(GpuDriverMode.AUTO, adreno, "/run/linuxdroid/virgl_test")
         assertEquals("1", turnipCfg.envVars["MESA_DISK_CACHE_DATABASE"])
-        assertEquals("lazy", turnipCfg.envVars["ZINK_DESCRIPTORS"])
+        assertEquals("noconform,sysmem", turnipCfg.envVars["TU_DEBUG"])
+        assertFalse(
+            "ZINK_DESCRIPTORS=lazy must not be forced on Turnip (DD-Turnip v0.5.0 includes A8xx bindless invalidation)",
+            turnipCfg.envVars.containsKey("ZINK_DESCRIPTORS"),
+        )
         assertFalse(
             "MESA_NO_ERROR must not be set globally because _mesa_UniformBlockBinding_no_error crashes OpenGL 4.x apps like Blender 5.x",
             turnipCfg.envVars.containsKey("MESA_NO_ERROR"),
