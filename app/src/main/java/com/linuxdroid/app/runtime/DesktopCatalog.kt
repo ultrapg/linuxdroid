@@ -46,18 +46,101 @@ object DesktopCatalog {
     )
 
     fun fetchCatalogOrFallback(): List<DesktopEdition> {
-        return try {
-            val conn = (URL(BuildConfig.CATALOG_URL).openConnection() as HttpURLConnection).apply {
-                connectTimeout = 8_000
-                readTimeout = 8_000
-                instanceFollowRedirects = true
-                setRequestProperty("Accept", "application/json")
+        fetchFromUrl(BuildConfig.CATALOG_URL, isOctetStream = false)?.let { parsed ->
+            if (parsed.isNotEmpty()) return parsed
+        }
+        fetchCatalogViaGitHubApi()?.let { parsed ->
+            if (parsed.isNotEmpty()) return parsed
+        }
+        return FALLBACK_EDITIONS
+    }
+
+    fun resolveGitHubAssetApiUrl(repo: String, assetFileName: String, expectedSizeBytes: Long = 0L): String? {
+        if (assetFileName.isBlank()) return null
+        val apiEndpoints = listOf(
+            "https://api.github.com/repos/$repo/releases/latest",
+            "https://api.github.com/repos/$repo/releases?per_page=5",
+        )
+        for (endpoint in apiEndpoints) {
+            try {
+                val conn = (URL(endpoint).openConnection() as HttpURLConnection).apply {
+                    connectTimeout = 10_000
+                    readTimeout = 15_000
+                    instanceFollowRedirects = true
+                    setRequestProperty("Accept", "application/vnd.github+json")
+                    setRequestProperty("User-Agent", "LinuxDroid/1.0")
+                }
+                if (conn.responseCode !in 200..299) {
+                    conn.disconnect()
+                    continue
+                }
+                val text = conn.inputStream.bufferedReader().use { it.readText() }
+                conn.disconnect()
+                val releases = if (text.trimStart().startsWith("[")) {
+                    val arr = org.json.JSONArray(text)
+                    (0 until arr.length()).map { arr.getJSONObject(it) }
+                } else {
+                    listOf(JSONObject(text))
+                }
+                for (rel in releases) {
+                    val assets = rel.optJSONArray("assets") ?: continue
+                    for (i in 0 until assets.length()) {
+                        val asset = assets.getJSONObject(i)
+                        if (asset.optString("name") == assetFileName) {
+                            val size = asset.optLong("size", 0L)
+                            if (expectedSizeBytes <= 0L || size == expectedSizeBytes) {
+                                val apiUrl = asset.optString("url")
+                                if (apiUrl.isNotBlank()) return apiUrl
+                            }
+                        }
+                    }
+                }
+            } catch (_: Exception) {
             }
-            if (conn.responseCode !in 200..299) return FALLBACK_EDITIONS
-            val body = conn.inputStream.bufferedReader().use { it.readText() }
-            parseCatalogJson(body).ifEmpty { FALLBACK_EDITIONS }
+        }
+        return null
+    }
+
+    private fun fetchCatalogViaGitHubApi(): List<DesktopEdition>? {
+        val assetApiUrl = resolveGitHubAssetApiUrl(BuildConfig.GITHUB_REPO, "catalog.json") ?: return null
+        return fetchFromUrl(assetApiUrl, isOctetStream = true)
+    }
+
+    private fun fetchFromUrl(url: String, isOctetStream: Boolean): List<DesktopEdition>? {
+        return try {
+            var current = url
+            repeat(5) {
+                val conn = (URL(current).openConnection() as HttpURLConnection).apply {
+                    connectTimeout = 8_000
+                    readTimeout = 8_000
+                    instanceFollowRedirects = false
+                    setRequestProperty("User-Agent", "LinuxDroid/1.0")
+                    if (isOctetStream && current.contains("://api.github.com/")) {
+                        setRequestProperty("Accept", "application/octet-stream")
+                    } else {
+                        setRequestProperty("Accept", "application/json")
+                    }
+                }
+                val code = conn.responseCode
+                if (code in 300..399) {
+                    val loc = conn.getHeaderField("Location") ?: run {
+                        conn.disconnect()
+                        return null
+                    }
+                    current = URL(URL(current), loc).toString()
+                    conn.disconnect()
+                } else if (code in 200..299) {
+                    val body = conn.inputStream.bufferedReader().use { it.readText() }
+                    conn.disconnect()
+                    return parseCatalogJson(body)
+                } else {
+                    conn.disconnect()
+                    return null
+                }
+            }
+            null
         } catch (_: Exception) {
-            FALLBACK_EDITIONS
+            null
         }
     }
 

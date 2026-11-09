@@ -285,26 +285,69 @@ class RuntimeInstallService : Service() {
     }
 
     private fun followRedirects(initialUrl: String): HttpURLConnection {
-        var current = initialUrl
+        val candidates = buildCandidateDownloadUrls(initialUrl)
+        var lastError: IOException? = null
+        for (candidate in candidates) {
+            try {
+                return openRedirectChain(candidate)
+            } catch (e: IOException) {
+                lastError = e
+                appendLog("Mirror check: ${e.message}")
+            }
+        }
+        throw lastError ?: IOException("Failed to download rootfs ($initialUrl)")
+    }
+
+    private fun buildCandidateDownloadUrls(initialUrl: String): List<String> {
+        val result = LinkedHashSet<String>()
+        result.add(initialUrl)
+        val fileName = initialUrl.substringBefore('?').substringAfterLast('/')
+        if (fileName.endsWith(".tar.zst") || fileName.endsWith(".tar.xz") || fileName.endsWith(".tar.gz")) {
+            val expectedSize = DesktopCatalog.FALLBACK_EDITIONS.firstOrNull {
+                it.downloadUrl.endsWith("/$fileName")
+            }?.sizeBytes ?: 0L
+            DesktopCatalog.resolveGitHubAssetApiUrl(
+                repo = com.linuxdroid.app.BuildConfig.GITHUB_REPO,
+                assetFileName = fileName,
+                expectedSizeBytes = expectedSize,
+            )?.let { apiUrl ->
+                result.add(apiUrl)
+            }
+            for (fallbackTag in listOf("v1.0.52", "v1.0.51")) {
+                result.add("https://github.com/${com.linuxdroid.app.BuildConfig.GITHUB_REPO}/releases/download/$fallbackTag/$fileName")
+            }
+        }
+        return result.toList()
+    }
+
+    private fun openRedirectChain(startUrl: String): HttpURLConnection {
+        var current = startUrl
         repeat(8) {
             val conn = (URL(current).openConnection() as HttpURLConnection).apply {
                 connectTimeout = 15_000
                 readTimeout = 30_000
                 instanceFollowRedirects = false
                 setRequestProperty("User-Agent", "LinuxDroid/1.0")
+                if (current.contains("://api.github.com/repos/") && current.contains("/releases/assets/")) {
+                    setRequestProperty("Accept", "application/octet-stream")
+                }
             }
             val code = conn.responseCode
             if (code in 300..399) {
-                val loc = conn.getHeaderField("Location") ?: throw IOException("Redirect missing Location")
+                val loc = conn.getHeaderField("Location") ?: run {
+                    conn.disconnect()
+                    throw IOException("Redirect missing Location")
+                }
                 current = URL(URL(current), loc).toString()
                 conn.disconnect()
             } else if (code in 200..299) {
                 return conn
             } else {
+                conn.disconnect()
                 throw IOException("HTTP $code when downloading rootfs ($current)")
             }
         }
-        throw IOException("Too many redirects for $initialUrl")
+        throw IOException("Too many redirects for $startUrl")
     }
 
     private fun queryDisplayName(uri: Uri): String? = runCatching {
