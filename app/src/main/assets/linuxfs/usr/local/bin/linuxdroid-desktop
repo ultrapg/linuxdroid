@@ -523,7 +523,6 @@ sync_live_kde_launchers() {
 
 prune_missing_launchers() {
   configure_kde_default_launchers
-  sync_live_kde_launchers || true
 }
 
 if [ "$desktop_choice" = "kde" ]; then
@@ -578,7 +577,6 @@ if [ "$desktop_choice" = "kde" ]; then
   unset MESA_LOADER_DRIVER_OVERRIDE LIBGL_KOPPER_DRI2 MESA_GL_VERSION_OVERRIDE MESA_GLSL_VERSION_OVERRIDE KWIN_RENDER_NODES KWIN_DRM_DEVICES
   export LIBGL_ALWAYS_SOFTWARE=1
   export GALLIUM_DRIVER=llvmpipe
-  "$KWRITECONFIG" --file kwinrc --group Compositing --key Backend QPainter 2>/dev/null || true
   if [ "$gpu_desktop" = 1 ]; then
     echo "== linuxdroid-desktop: hybrid GPU desktop (Host Vulkan + KWin QPainter + GPU apps, ${LINUXDROID_GPU_ACTIVE:-gpu})"
   fi
@@ -593,37 +591,97 @@ NoDisplay=true
 X-KDE-Wayland-VirtualKeyboard=true
 ENTRY
 
-  if command -v "$KWRITECONFIG" >/dev/null 2>&1; then
-    cursor_px=$(python3 -c "print(max(24, int(round(24 * float('$SCALE')))))" 2>/dev/null || echo 24)
-    "$KWRITECONFIG" --file plasma-localerc --group Formats --key LANG "${LANG:-C.UTF-8}" 2>/dev/null || true
-    "$KWRITECONFIG" --file kwinrc --group Wayland --key InputMethod "$HOME/.local/share/applications/linuxdroid-ime.desktop" 2>/dev/null || true
-    "$KWRITECONFIG" --file kwinrc --group Wayland --key VirtualKeyboardEnabled true 2>/dev/null || true
-    "$KWRITECONFIG" --file kwinrc --group Xwayland --key Scale "$SCALE" 2>/dev/null || true
-    "$KWRITECONFIG" --file kwinrc --group Windows --key BorderlessMaximizedWindows false 2>/dev/null || true
-    "$KWRITECONFIG" --file kwinrc --group Windows --key Placement Centered 2>/dev/null || true
-    "$KWRITECONFIG" --file kwinrc --group org.kde.kdecoration2 --key library org.kde.breeze 2>/dev/null || true
-    "$KWRITECONFIG" --file kwinrc --group org.kde.kdecoration2 --key NoPlugin false 2>/dev/null || true
-    "$KWRITECONFIG" --file kcminputrc --group Mouse --key cursorSize "$cursor_px" 2>/dev/null || true
-    "$KWRITECONFIG" --file kscreenlockerrc --group Daemon --key Autolock false 2>/dev/null || true
-    "$KWRITECONFIG" --file kscreenlockerrc --group Daemon --key LockOnResume false 2>/dev/null || true
-    "$KWRITECONFIG" --file ksplashrc --group KSplash --key Engine none 2>/dev/null || true
-    "$KWRITECONFIG" --file ksplashrc --group KSplash --key Theme None 2>/dev/null || true
-    "$KWRITECONFIG" --file kdeglobals --group KDE --key AnimationDurationFactor 0 2>/dev/null || true
-    # KWin Wayland applies native --scale $SCALE directly to Wayland outputs, so forceFontDPI must stay 0
-    # to avoid double-multiplying font sizes.
-    # The Wayland output uses a whole-number scale; the remaining fractional UI scale is applied as font DPI.
-    font_dpi=$(python3 -c "s=float('$SCALE'); u=float('${BL_UI_SCALE:-$SCALE}'); print(int(round(96*u/s)) if abs(u-s)>0.01 else 0)" 2>/dev/null || echo 0)
-    "$KWRITECONFIG" --file kcmfonts --group General --key forceFontDPI "$font_dpi" 2>/dev/null || true
-    # One-time desktop-style defaults (applied once so later user changes are kept): double-click to open
-    # files, and a snappy hardware keyboard repeat rate for external keyboards.
-    tuned_stamp="$HOME/.local/share/linuxdroid/desktop-tuned-v1"
-    if [ ! -e "$tuned_stamp" ]; then
-      "$KWRITECONFIG" --file kdeglobals --group KDE --key SingleClick false 2>/dev/null || true
-      "$KWRITECONFIG" --file kcminputrc --group Keyboard --key RepeatDelay 300 2>/dev/null || true
-      "$KWRITECONFIG" --file kcminputrc --group Keyboard --key RepeatRate 30 2>/dev/null || true
-      mkdir -p "${tuned_stamp%/*}" && : > "$tuned_stamp"
-    fi
-  fi
+  # Configure all KDE INI settings in a single fast Python pass instead of 19 separate kwriteconfig5 processes
+  python3 -B - "$HOME/.config" "$SCALE" "${BL_UI_SCALE:-$SCALE}" "${LANG:-C.UTF-8}" "$HOME/.local/share/applications/linuxdroid-ime.desktop" "$HOME/.local/share/linuxdroid/desktop-tuned-v1" <<'PY' 2>/dev/null || true
+import os
+import re
+import sys
+
+cfg_dir, scale_s, ui_scale_s, lang, ime_desktop, tuned_stamp = sys.argv[1:7]
+os.makedirs(cfg_dir, exist_ok=True)
+try:
+    scale = float(scale_s)
+except Exception:
+    scale = 1.0
+try:
+    ui_scale = float(ui_scale_s)
+except Exception:
+    ui_scale = scale
+
+cursor_px = str(max(24, int(round(24.0 * scale))))
+font_dpi = str(int(round(96.0 * ui_scale / scale)) if abs(ui_scale - scale) > 0.01 else 0)
+
+def update_ini(filename, updates):
+    path = os.path.join(cfg_dir, filename)
+    text = ""
+    if os.path.isfile(path):
+        try:
+            with open(path, "r", encoding="utf-8", errors="surrogateescape") as f:
+                text = f.read()
+        except OSError:
+            text = ""
+    orig = text
+    for group, kv in updates.items():
+        hdr = f"[{group}]"
+        idx = text.find(hdr)
+        if idx == -1:
+            if text and not text.endswith("\n"):
+                text += "\n"
+            if text:
+                text += "\n"
+            text += hdr + "\n"
+            for k, v in kv.items():
+                text += f"{k}={v}\n"
+        else:
+            start = idx + len(hdr)
+            nl = text.find("\n", start)
+            body_start = nl + 1 if nl != -1 else len(text)
+            next_hdr = re.search(r"(?m)^\[", text[body_start:])
+            body_end = body_start + next_hdr.start() if next_hdr else len(text)
+            body = text[body_start:body_end]
+            lines = body.splitlines(True)
+            for k, v in kv.items():
+                prefix = k + "="
+                replaced = False
+                for i, ln in enumerate(lines):
+                    if ln.startswith(prefix):
+                        lines[i] = f"{k}={v}\n"
+                        replaced = True
+                        break
+                if not replaced:
+                    insert_at = len(lines)
+                    while insert_at > 0 and lines[insert_at - 1].strip() == "":
+                        insert_at -= 1
+                    lines.insert(insert_at, f"{k}={v}\n")
+            text = text[:body_start] + "".join(lines) + text[body_end:]
+    if text != orig:
+        tmp = path + ".tmp"
+        with open(tmp, "w", encoding="utf-8", errors="surrogateescape") as f:
+            f.write(text)
+        os.replace(tmp, path)
+
+update_ini("kwinrc", {
+    "Compositing": {"Backend": "QPainter"},
+    "Wayland": {"InputMethod": ime_desktop, "VirtualKeyboardEnabled": "true"},
+    "Xwayland": {"Scale": scale_s},
+    "Windows": {"BorderlessMaximizedWindows": "false", "Placement": "Centered"},
+    "org.kde.kdecoration2": {"library": "org.kde.breeze", "NoPlugin": "false"},
+})
+update_ini("plasma-localerc", {"Formats": {"LANG": lang}})
+kcminput_updates = {"Mouse": {"cursorSize": cursor_px}}
+kdeglobals_updates = {"KDE": {"AnimationDurationFactor": "0"}}
+if not os.path.exists(tuned_stamp):
+    kdeglobals_updates["KDE"]["SingleClick"] = "false"
+    kcminput_updates["Keyboard"] = {"RepeatDelay": "300", "RepeatRate": "30"}
+    os.makedirs(os.path.dirname(tuned_stamp), exist_ok=True)
+    with open(tuned_stamp, "w", encoding="utf-8"):
+        pass
+update_ini("kcminputrc", kcminput_updates)
+update_ini("kdeglobals", kdeglobals_updates)
+update_ini("kscreenlockerrc", {"Daemon": {"Autolock": "false", "LockOnResume": "false"}})
+update_ini("ksplashrc", {"KSplash": {"Engine": "none", "Theme": "None"}})
+update_ini("kcmfonts", {"General": {"forceFontDPI": font_dpi}})
+PY
 
   echo "== linuxdroid-desktop: starting KDE Plasma Wayland (logical=${WIDTH}x${HEIGHT}, pixel=${PIXEL_WIDTH}x${PIXEL_HEIGHT}, scale=${SCALE}, gpu_desktop=${gpu_desktop})"
   export -f start_x11_helpers configure_kde_default_launchers sync_live_kde_launchers prune_missing_launchers
@@ -665,17 +723,15 @@ ENTRY
           write_status "6|Loading KDE Plasma desktop & taskbar..." "== [BOOT 6/6] Loading KDE Plasma desktop & taskbar..."
           break
         fi
-        if [ "$i" -eq 80 ] && [ ! -S "$XDG_RUNTIME_DIR/wayland-1" ] && ! pgrep -f "/usr/bin/kwin_wayland" >/dev/null 2>&1; then
-          echo "== linuxdroid-desktop: kwin_wayland not running at 8s; starting kwin_wayland_wrapper fallback"
+        if [ "$i" -eq 45 ] && [ ! -S "$XDG_RUNTIME_DIR/wayland-1" ] && ! pgrep -x kwin_wayland >/dev/null 2>&1; then
+          echo "== linuxdroid-desktop: kwin_wayland not running at 4.5s; starting kwin_wayland_wrapper fallback"
           /usr/local/bin/kwin_wayland_wrapper --xwayland >/dev/null 2>&1 &
         fi
-        if [ "'"$gpu_desktop"'" = "1" ] && [ "$i" -ge 120 ]; then
-          echo "== linuxdroid-desktop: wayland-1 did not appear within 12s under GPU desktop; triggering software fallback"
-          printf "wayland-1 timeout after 12s\n" > "'"$gpu_fail"'" 2>/dev/null || true
-          pkill -TERM -x startplasma-wayland 2>/dev/null || true
-          pkill -TERM -x kwin_wayland_wrapper 2>/dev/null || true
-          pkill -TERM -x kwin_wayland 2>/dev/null || true
-          exit 0
+        if [ "$i" -eq 85 ] && [ ! -S "$XDG_RUNTIME_DIR/wayland-1" ] && ! pgrep -x kwin_wayland >/dev/null 2>&1; then
+          echo "== linuxdroid-desktop: kwin_wayland still not running at 8.5s; starting direct kwin_wayland fallback"
+          KWIN_COMPOSE=Q QT_QUICK_BACKEND=software LIBGL_ALWAYS_SOFTWARE=1 GALLIUM_DRIVER=llvmpipe KWIN_WAYLAND_NO_XAUTHORITY=1 \
+            /usr/bin/kwin_wayland --wayland-display "${LINUXDROID_PARENT_WAYLAND:-wayland-0}" --socket wayland-1 --xwayland \
+            --width "${WIDTH}" --height "${HEIGHT}" --scale "${SCALE}" --no-lockscreen >/dev/null 2>&1 &
         fi
         sleep 0.1
       done
@@ -686,7 +742,7 @@ ENTRY
       fi
       shell_up=0
       for j in $(seq 1 100); do
-        if [ "$j" -eq 35 ] && ! pgrep -f plasmashell >/dev/null 2>&1; then
+        if [ "$j" -eq 25 ] && ! pgrep -f "/usr/bin/plasmashell" >/dev/null 2>&1; then
           WAYLAND_DISPLAY="$wl_nested_sock" /usr/local/bin/plasmashell >/dev/null 2>&1 &
         fi
         if dbus-send --session --dest=org.kde.plasmashell --type=method_call --print-reply /PlasmaShell org.freedesktop.DBus.Introspectable.Introspect 2>/dev/null | grep -q "org.kde.PlasmaShell"; then
@@ -705,13 +761,8 @@ ENTRY
         sleep 0.2
       done
       if [ "$shell_up" = "0" ]; then
-        if [ "'"$gpu_desktop"'" = "1" ]; then
-          echo "== linuxdroid-desktop: Plasma shell did not start within 20s on GPU; launching software plasmashell fallback"
-          printf "plasmashell did not start within 20s on the GPU\n" > "'"$gpu_fail"'" 2>/dev/null || true
-        else
-          echo "== linuxdroid-desktop: Plasma shell did not register within 20s; launching fallback plasmashell"
-        fi
-        pkill -9 -f plasmashell 2>/dev/null || true
+        echo "== linuxdroid-desktop: Plasma shell did not register within 20s; launching fallback plasmashell"
+        pkill -9 -f "/usr/bin/plasmashell" 2>/dev/null || true
         WAYLAND_DISPLAY="$wl_nested_sock" QT_QUICK_BACKEND=software LIBGL_ALWAYS_SOFTWARE=1 GALLIUM_DRIVER=llvmpipe \
           /usr/local/bin/plasmashell >/dev/null 2>&1 &
         for _ in $(seq 1 50); do
@@ -736,15 +787,6 @@ ENTRY
   '
   rc=$?
   echo "== linuxdroid-desktop: KDE Plasma Wayland exited (code=$rc)"
-  if [ "$gpu_desktop" = 1 ] && { [ -e "$gpu_fail" ] || [ "$SECONDS" -lt 45 ]; }; then
-    echo "== linuxdroid-desktop: GPU desktop exited early; falling back to software compositing"
-    if [ -s "$kwin_gpu_log" ]; then
-      echo "== kwin-gpu.log tail:"
-      tail -n 25 "$kwin_gpu_log" 2>/dev/null || true
-    fi
-    mkdir -p "${gpu_fail%/*}" && printf 'exited code=%s after %ss\n' "$rc" "$SECONDS" > "$gpu_fail"
-    exec "$0" "$@"
-  fi
   exit "$rc"
 fi
 

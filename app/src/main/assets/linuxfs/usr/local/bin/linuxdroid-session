@@ -154,21 +154,23 @@ exec /usr/local/bin/linuxdroid-gpu-launch $gpu_app \"\$@\""
     linuxdroid-root sh -c "printf '%s\n' '$gpu_body' > /usr/local/bin/$gpu_app && chmod 755 /usr/local/bin/$gpu_app" 2>/dev/null || true
 done
 
-# Ensure /usr/bin/plasmashell uses the LinuxDroid GPU/fallback wrapper even when invoked by full path
-if [ -x /usr/local/bin/plasmashell ] && [ -f /usr/bin/plasmashell ]; then
-  if ! grep -q "^# LinuxDroid plasmashell wrapper" /usr/bin/plasmashell 2>/dev/null; then
-    (
-      if [ ! -e /usr/bin/plasmashell.distrib ]; then
-        cp -a /usr/bin/plasmashell /usr/bin/plasmashell.distrib 2>/dev/null || \
-          linuxdroid-root cp -a /usr/bin/plasmashell /usr/bin/plasmashell.distrib 2>/dev/null || true
-      fi
-      if [ -x /usr/bin/plasmashell.distrib ]; then
-        cp -f /usr/local/bin/plasmashell /usr/bin/plasmashell 2>/dev/null || \
-          linuxdroid-root cp -f /usr/local/bin/plasmashell /usr/bin/plasmashell 2>/dev/null || true
-      fi
-    )
+# Ensure /usr/bin/plasmashell and /usr/bin/kwin_wayland_wrapper use the LinuxDroid wrappers even when invoked by full path
+for kde_tool in plasmashell kwin_wayland_wrapper; do
+  if [ -x "/usr/local/bin/$kde_tool" ] && [ -f "/usr/bin/$kde_tool" ]; then
+    if ! grep -q "^# LinuxDroid $kde_tool" "/usr/bin/$kde_tool" 2>/dev/null; then
+      (
+        if [ ! -e "/usr/bin/${kde_tool}.distrib" ]; then
+          cp -a "/usr/bin/$kde_tool" "/usr/bin/${kde_tool}.distrib" 2>/dev/null || \
+            linuxdroid-root cp -a "/usr/bin/$kde_tool" "/usr/bin/${kde_tool}.distrib" 2>/dev/null || true
+        fi
+        if [ -x "/usr/bin/${kde_tool}.distrib" ]; then
+          cp -f "/usr/local/bin/$kde_tool" "/usr/bin/$kde_tool" 2>/dev/null || \
+            linuxdroid-root cp -f "/usr/local/bin/$kde_tool" "/usr/bin/$kde_tool" 2>/dev/null || true
+        fi
+      )
+    fi
   fi
-fi
+done
 
 # Ensure any existing /opt/blender installation uses the safe wrapper without MESA_NO_ERROR / DRI_PRIME / bundled libvulkan
 if [ -x /opt/blender/blender ]; then

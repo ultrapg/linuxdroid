@@ -218,8 +218,17 @@ class WorkstationControlsAndExternalDisplayTest {
 
         val kwinWrapper = repoRoot.resolve("app/src/main/assets/linuxfs/usr/local/bin/kwin_wayland_wrapper").readText()
         assertTrue(
-            "kwin_wayland_wrapper must enable --xwayland and KWIN_WAYLAND_NO_XAUTHORITY=1",
-            kwinWrapper.contains("--xwayland") && kwinWrapper.contains("KWIN_WAYLAND_NO_XAUTHORITY=1"),
+            "kwin_wayland_wrapper must enable --xwayland, KWIN_WAYLAND_NO_XAUTHORITY=1, and .distrib fallback",
+            kwinWrapper.contains("--xwayland") &&
+                kwinWrapper.contains("KWIN_WAYLAND_NO_XAUTHORITY=1") &&
+                kwinWrapper.contains("kwin_wayland_wrapper.distrib"),
+        )
+
+        val desktopScript = repoRoot.resolve("app/src/main/assets/linuxfs/usr/local/bin/linuxdroid-desktop").readText()
+        assertFalse(
+            "linuxdroid-desktop must not use pkill -x on >15-char process names (startplasma-wayland, kwin_wayland_wrapper)",
+            desktopScript.contains("pkill -TERM -x startplasma-wayland") ||
+                desktopScript.contains("pkill -TERM -x kwin_wayland_wrapper"),
         )
     }
 }

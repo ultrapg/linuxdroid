@@ -1,6 +1,17 @@
 #!/bin/bash
+# LinuxDroid kwin_wayland_wrapper
+REAL_KWIN_WRAPPER="/usr/bin/kwin_wayland_wrapper.distrib"
+if [ ! -x "$REAL_KWIN_WRAPPER" ]; then
+  if [ -x /usr/bin/kwin_wayland_wrapper ] && ! grep -q "^# LinuxDroid kwin_wayland_wrapper" /usr/bin/kwin_wayland_wrapper 2>/dev/null; then
+    REAL_KWIN_WRAPPER="/usr/bin/kwin_wayland_wrapper"
+  else
+    echo "linuxdroid kwin_wayland_wrapper: $REAL_KWIN_WRAPPER not found" >&2
+    exit 127
+  fi
+fi
+
 if [ "${BL_DESKTOP:-}" = "1" ]; then
-  if [ -n "${XDG_RUNTIME_DIR:-}" ] && ! pgrep -f "/usr/bin/kwin_wayland " >/dev/null 2>&1; then
+  if [ -n "${XDG_RUNTIME_DIR:-}" ] && ! pgrep -x kwin_wayland >/dev/null 2>&1; then
     rm -f "$XDG_RUNTIME_DIR"/wayland-[1-9]* 2>/dev/null || true
   fi
   has_wl=0
@@ -32,4 +43,4 @@ if [ "${BL_DESKTOP:-}" = "1" ]; then
   export KWIN_WAYLAND_NO_XAUTHORITY=1
   unset MESA_LOADER_DRIVER_OVERRIDE LIBGL_KOPPER_DRI2 MESA_GL_VERSION_OVERRIDE MESA_GLSL_VERSION_OVERRIDE ZINK_DESCRIPTORS MESA_NO_ERROR
 fi
-exec /usr/bin/kwin_wayland_wrapper "$@"
+exec "$REAL_KWIN_WRAPPER" "$@"

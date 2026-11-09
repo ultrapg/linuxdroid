@@ -222,8 +222,8 @@ object LinuxRuntime {
             "${BuildConfig.VERSION_NAME}\n"
         )
 
-        // Ensure hardcoded /usr/bin/{sudo,pkexec,su,bwrap,flatpak-spawn,chromium,chromium-browser,plasmashell} invocations also use the LinuxDroid shims
-        for (tool in listOf("sudo", "pkexec", "su", "bwrap", "flatpak-spawn", "chromium", "chromium-browser", "plasmashell")) {
+        // Ensure hardcoded /usr/bin/{sudo,pkexec,su,bwrap,flatpak-spawn,chromium,chromium-browser,plasmashell,kwin_wayland_wrapper} invocations also use the LinuxDroid shims
+        for (tool in listOf("sudo", "pkexec", "su", "bwrap", "flatpak-spawn", "chromium", "chromium-browser", "plasmashell", "kwin_wayland_wrapper")) {
             val localWrapper = File(root, "usr/local/bin/$tool")
             val usrBinTarget = File(root, "usr/bin/$tool")
             if (localWrapper.isFile) {
