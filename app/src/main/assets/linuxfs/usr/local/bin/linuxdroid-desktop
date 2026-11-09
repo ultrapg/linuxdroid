@@ -660,6 +660,11 @@ ENTRY
           write_status "6|Loading KDE Plasma desktop & taskbar..." "== [BOOT 6/6] Loading KDE Plasma desktop & taskbar..."
           break
         fi
+        if [ "$i" -eq 60 ] && ! pgrep -x kwin_wayland >/dev/null 2>&1; then
+          echo "== linuxdroid-desktop: kwin_wayland not running at 6s; starting kwin_wayland fallback"
+          KWIN_COMPOSE=Q QT_QUICK_BACKEND=software LIBGL_ALWAYS_SOFTWARE=1 GALLIUM_DRIVER=llvmpipe \
+            kwin_wayland --wayland-display "${LINUXDROID_PARENT_WAYLAND:-wayland-0}" --xwayland --width "${WIDTH}" --height "${HEIGHT}" --scale "${SCALE}" >/dev/null 2>&1 &
+        fi
         if [ "'"$gpu_desktop"'" = "1" ] && [ "$i" -ge 120 ]; then
           echo "== linuxdroid-desktop: wayland-1 did not appear within 12s under GPU desktop; triggering software fallback"
           printf "wayland-1 timeout after 12s\n" > "'"$gpu_fail"'" 2>/dev/null || true
@@ -670,7 +675,11 @@ ENTRY
         fi
         sleep 0.1
       done
-      [ "$wl1_ready" = "1" ] || exit 0
+      if [ "$wl1_ready" != "1" ]; then
+        echo "== linuxdroid-desktop: wayland-1 did not appear within 15s; marking READY to avoid boot screen hang"
+        write_status "READY|KDE Plasma desktop ready" "== [BOOT READY] KDE Plasma desktop ready"
+        exit 0
+      fi
       shell_up=0
       for j in $(seq 1 100); do
         if [ "$j" -eq 35 ] && ! pgrep -f plasmashell >/dev/null 2>&1; then

@@ -13,18 +13,16 @@ object TurnipDriver {
     private const val DRIVER_A7XX = "adrenotools-turnip25.1.0"
     private const val DRIVER_A8XX = "adrenotools-turnip-sdk36"
     private const val GUEST_LINUX_TURNIP = "linux-turnip-dd-0.5.0"
-    private const val EXPECTED_DD_VERSION = "DD-Turnip-v0.5.0"
+    private const val GUEST_MESA_GALLIUM = "linux-mesa-gallium-26.2.6"
+    private const val EXPECTED_DD_VERSION = "DD-Turnip-v0.5.0-mesa26.2.6"
 
     data class HostVulkanDriver(val driverDir: String, val libraryName: String)
 
-    private fun readMetaLibraryName(dir: File, expectedVersion: String? = null): String? {
+    private fun readMetaLibraryName(dir: File): String? {
         val metaFile = File(dir, "meta.json")
         if (!metaFile.isFile) return null
         return runCatching {
             val obj = JSONObject(metaFile.readText())
-            if (expectedVersion != null && obj.optString("driverVersion") != expectedVersion) {
-                return@runCatching null
-            }
             val name = obj.optString("libraryName").trim()
             if (name.isNotEmpty() && File(dir, name).isFile) name else null
         }.getOrNull()
@@ -41,10 +39,9 @@ object TurnipDriver {
 
         val useA8xx = gpu.adrenoModel >= 800 || Build.VERSION.SDK_INT >= 36
         val packName = if (useA8xx) DRIVER_A8XX else DRIVER_A7XX
-        val expectedVer = if (useA8xx) EXPECTED_DD_VERSION else null
         val assetPath = "graphics_driver/$packName.tzst"
         val outDir = File(context.filesDir, "graphics_driver/$packName")
-        val existingLib = readMetaLibraryName(outDir, expectedVer)
+        val existingLib = readMetaLibraryName(outDir)
         if (existingLib == null) {
             FileUtils.deleteRecursively(outDir)
             outDir.mkdirs()
@@ -53,7 +50,7 @@ object TurnipDriver {
                 return null
             }
         }
-        val soName = readMetaLibraryName(outDir, expectedVer)
+        val soName = readMetaLibraryName(outDir)
             ?: outDir.listFiles()?.firstOrNull { it.name.endsWith(".so") }?.name
             ?: return null
         FileUtils.chmod(File(outDir, soName), 0b111_101_101)
@@ -62,16 +59,34 @@ object TurnipDriver {
 
     /**
      * Ensures the guest Ubuntu rootfs has the patched DD-Turnip v0.5.0 Linux driver
-     * (`/usr/lib/aarch64-linux-gnu/libvulkan_freedreno.so`) installed even when upgrading an
-     * existing rootfs without re-downloading the rootfs archive.
+     * (`/usr/lib/aarch64-linux-gnu/libvulkan_freedreno.so`) AND matching Ubuntu 24.04 LLVM 21
+     * Mesa 26.2.6 Gallium/EGL/GLX/GBM libraries installed, automatically repairing any rootfs
+     * that had incompatible `libgallium-27.0.0-devel.so` (LLVM 20.1) staged.
      */
     fun stageGuestLinuxTurnipDriver(context: Context, rootDir: File) {
         val usrLib = File(rootDir, "usr/lib/aarch64-linux-gnu")
         if (!usrLib.isDirectory) return
         val stampFile = File(rootDir, "etc/linuxdroid/turnip-driver-version")
         val targetSo = File(usrLib, "libvulkan_freedreno.so")
+        val gallium26 = File(usrLib, "libgallium-26.2.6 - kisak-mesa PPA.so")
+        val brokenGallium27 = File(usrLib, "libgallium-27.0.0-devel.so")
         val currentStamp = runCatching { stampFile.readText().trim() }.getOrDefault("")
-        if (currentStamp == EXPECTED_DD_VERSION && targetSo.isFile && targetSo.length() > 8_000_000L) {
+
+        if (brokenGallium27.exists() || !gallium26.isFile) {
+            runCatching {
+                brokenGallium27.delete()
+                ArchiveExtractor.extractAsset(context, "graphics_driver/$GUEST_MESA_GALLIUM.tzst", rootDir)
+            }.onFailure { e ->
+                Log.w(TAG, "Failed restoring guest Mesa 26.2.6 Gallium libraries", e)
+            }
+        }
+
+        if (currentStamp == EXPECTED_DD_VERSION &&
+            targetSo.isFile &&
+            targetSo.length() > 8_000_000L &&
+            gallium26.isFile &&
+            !brokenGallium27.exists()
+        ) {
             return
         }
         val tmpDir = File(context.cacheDir, "guest-turnip-stage")
