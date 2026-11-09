@@ -180,7 +180,7 @@ if [ -x /opt/blender/blender ]; then
     rm -f /opt/blender/lib/libvulkan.so* 2>/dev/null || true
     cat > /usr/local/bin/blender.tmp <<'\''WRAP'\''
 #!/bin/sh
-# BL_WRAPPER_V5
+# BL_WRAPPER_V6
 unset MESA_NO_ERROR DRI_PRIME
 export LIBDECOR_PLUGIN_DIR=/nonexistent
 export LP_NUM_THREADS="${BL_CPU_COUNT:-4}"
@@ -217,7 +217,7 @@ WRAP
       mv -f /usr/share/applications/blender.desktop.tmp /usr/share/applications/blender.desktop
     fi
   '
-  if ! grep -q "BL_WRAPPER_V5" /usr/local/bin/blender 2>/dev/null || grep -q "^PrefersNonDefaultGPU=" /usr/share/applications/blender.desktop 2>/dev/null || [ ! -s /usr/share/applications/blender.desktop ]; then
+  if ! grep -q "BL_WRAPPER_V6" /usr/local/bin/blender 2>/dev/null || grep -q "^PrefersNonDefaultGPU=" /usr/share/applications/blender.desktop 2>/dev/null || [ ! -s /usr/share/applications/blender.desktop ]; then
     sh -c "$refresh_blender_wrapper" 2>/dev/null || linuxdroid-root sh -c "$refresh_blender_wrapper" 2>/dev/null || true
   fi
 fi

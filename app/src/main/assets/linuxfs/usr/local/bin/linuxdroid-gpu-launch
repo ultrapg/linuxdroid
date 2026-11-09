@@ -37,6 +37,9 @@ run_software() {
   log_event "Launching in software rendering mode (BL_GPU_APPS=${BL_GPU_APPS:-0}, fallback_marker=$([ -e "$mark/$name" ] && echo yes || echo no))"
   export LIBGL_ALWAYS_SOFTWARE=1 GALLIUM_DRIVER=llvmpipe LIBDECOR_PLUGIN_DIR=/nonexistent
   unset MESA_LOADER_DRIVER_OVERRIDE LIBGL_KOPPER_DRI2 MESA_GL_VERSION_OVERRIDE MESA_GLSL_VERSION_OVERRIDE ZINK_DESCRIPTORS
+  if [ "${WAYLAND_DISPLAY:-}" = "wayland-0" ] && [ -S "${XDG_RUNTIME_DIR:-/run/linuxdroid}/wayland-1" ]; then
+    export WAYLAND_DISPLAY=wayland-1
+  fi
   exec "$real" "$@"
 }
 

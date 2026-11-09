@@ -69,7 +69,13 @@ object SessionTerminal {
         cmd.add("XDG_RUNTIME_DIR=${LinuxRuntime.GUEST_RUNTIME_DIR}")
         cmd.add("LINUXDROID_ROOT_SOCKET=${RootSpawner.socketName(context)}")
         cmd.add("FLATPAK_BWRAP=/usr/local/bin/bwrap")
-        cmd.add("WAYLAND_DISPLAY=wayland-0")
+        val runtimeDir = LinuxRuntime.runtimeDir(context)
+        val guestWaylandDisplay = when {
+            File(runtimeDir, "wayland-1").exists() -> "wayland-1"
+            File(runtimeDir, "wayland-2").exists() -> "wayland-2"
+            else -> "wayland-0"
+        }
+        cmd.add("WAYLAND_DISPLAY=$guestWaylandDisplay")
         cmd.add("DISPLAY=:0")
         cmd.add("PULSE_SERVER=unix:${File(context.filesDir, "pulseaudio/PS0").absolutePath}")
         cmd.add("BL_CPU_COUNT=$effectiveCores")

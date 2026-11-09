@@ -566,10 +566,11 @@ if [ "$desktop_choice" = "kde" ]; then
   export KWIN_EFFECTS_FORCE_ANIMATIONS=0
   export KWIN_WAYLAND_NO_PERMISSION_CHECKS=1
   export KWIN_SCREENSHOT_NO_PERMISSION_CHECKS=1
+  export KWIN_WAYLAND_NO_XAUTHORITY=1
   unset MESA_NO_ERROR
-  # Nested KWin Wayland, kded5, and ksmserver must always start with QPainter/software QtQuick
+  # Nested KWin Wayland, kded5, ksmserver, and plasmashell start with QPainter/software QtQuick
   # so they never stall or fail trying to create DRM/GBM/EGL surfaces on nested wayland-1.
-  # /usr/local/bin/plasmashell (and /usr/bin/plasmashell shim) and desktop apps via
+  # LinuxDroid's host compositor composites on the hardware Vulkan GPU, and desktop apps via
   # /usr/local/bin/linuxdroid-gpu-launch activate hardware GPU acceleration independently.
   export KWIN_COMPOSE=Q
   export QT_QUICK_BACKEND=software
@@ -579,7 +580,7 @@ if [ "$desktop_choice" = "kde" ]; then
   export GALLIUM_DRIVER=llvmpipe
   "$KWRITECONFIG" --file kwinrc --group Compositing --key Backend QPainter 2>/dev/null || true
   if [ "$gpu_desktop" = 1 ]; then
-    echo "== linuxdroid-desktop: hybrid GPU desktop (KWin QPainter compositing + GPU Plasma & apps, ${LINUXDROID_GPU_ACTIVE:-gpu})"
+    echo "== linuxdroid-desktop: hybrid GPU desktop (Host Vulkan + KWin QPainter + GPU apps, ${LINUXDROID_GPU_ACTIVE:-gpu})"
   fi
 
   mkdir -p "$HOME/.local/share/applications" "$HOME/.config"
@@ -598,6 +599,10 @@ ENTRY
     "$KWRITECONFIG" --file kwinrc --group Wayland --key InputMethod "$HOME/.local/share/applications/linuxdroid-ime.desktop" 2>/dev/null || true
     "$KWRITECONFIG" --file kwinrc --group Wayland --key VirtualKeyboardEnabled true 2>/dev/null || true
     "$KWRITECONFIG" --file kwinrc --group Xwayland --key Scale "$SCALE" 2>/dev/null || true
+    "$KWRITECONFIG" --file kwinrc --group Windows --key BorderlessMaximizedWindows false 2>/dev/null || true
+    "$KWRITECONFIG" --file kwinrc --group Windows --key Placement Centered 2>/dev/null || true
+    "$KWRITECONFIG" --file kwinrc --group org.kde.kdecoration2 --key library org.kde.breeze 2>/dev/null || true
+    "$KWRITECONFIG" --file kwinrc --group org.kde.kdecoration2 --key NoPlugin false 2>/dev/null || true
     "$KWRITECONFIG" --file kcminputrc --group Mouse --key cursorSize "$cursor_px" 2>/dev/null || true
     "$KWRITECONFIG" --file kscreenlockerrc --group Daemon --key Autolock false 2>/dev/null || true
     "$KWRITECONFIG" --file kscreenlockerrc --group Daemon --key LockOnResume false 2>/dev/null || true
@@ -649,7 +654,7 @@ ENTRY
           wl_nested_sock="wayland-2"
         fi
         if [ "$wl1_ready" = "1" ]; then
-          WAYLAND_DISPLAY="$wl_nested_sock" dbus-update-activation-environment WAYLAND_DISPLAY >/dev/null 2>&1 || true
+          WAYLAND_DISPLAY="$wl_nested_sock" DISPLAY=":0" dbus-update-activation-environment WAYLAND_DISPLAY DISPLAY >/dev/null 2>&1 || true
           for kamd in /usr/lib/*/libexec/kactivitymanagerd /usr/lib/kactivitymanagerd /usr/libexec/kactivitymanagerd; do
             if [ -x "$kamd" ]; then
               WAYLAND_DISPLAY="$wl_nested_sock" "$kamd" >/dev/null 2>&1 &
@@ -660,10 +665,9 @@ ENTRY
           write_status "6|Loading KDE Plasma desktop & taskbar..." "== [BOOT 6/6] Loading KDE Plasma desktop & taskbar..."
           break
         fi
-        if [ "$i" -eq 60 ] && ! pgrep -x kwin_wayland >/dev/null 2>&1; then
-          echo "== linuxdroid-desktop: kwin_wayland not running at 6s; starting kwin_wayland fallback"
-          KWIN_COMPOSE=Q QT_QUICK_BACKEND=software LIBGL_ALWAYS_SOFTWARE=1 GALLIUM_DRIVER=llvmpipe \
-            kwin_wayland --wayland-display "${LINUXDROID_PARENT_WAYLAND:-wayland-0}" --xwayland --width "${WIDTH}" --height "${HEIGHT}" --scale "${SCALE}" >/dev/null 2>&1 &
+        if [ "$i" -eq 80 ] && [ ! -S "$XDG_RUNTIME_DIR/wayland-1" ] && ! pgrep -f "/usr/bin/kwin_wayland" >/dev/null 2>&1; then
+          echo "== linuxdroid-desktop: kwin_wayland not running at 8s; starting kwin_wayland_wrapper fallback"
+          /usr/local/bin/kwin_wayland_wrapper --xwayland >/dev/null 2>&1 &
         fi
         if [ "'"$gpu_desktop"'" = "1" ] && [ "$i" -ge 120 ]; then
           echo "== linuxdroid-desktop: wayland-1 did not appear within 12s under GPU desktop; triggering software fallback"

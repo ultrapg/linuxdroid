@@ -35,6 +35,17 @@ if [ "${LINUXDROID_GPU_ACTIVE:-}" = "turnip" ] || [ "${LINUXDROID_GPU_ACTIVE:-}"
   export mesa_glthread=true
 fi
 
+# Never allow desktop apps to attach directly to the host compositor (wayland-0) when a nested
+# desktop compositor (wayland-1 / wayland-2) is active; wayland-0 forces top-level windows to
+# fullscreen and renders them above KWin, hiding the desktop and taskbar.
+if [ "${WAYLAND_DISPLAY:-}" = "wayland-0" ]; then
+  if [ -S "${XDG_RUNTIME_DIR:-/run/linuxdroid}/wayland-1" ]; then
+    export WAYLAND_DISPLAY=wayland-1
+  elif [ -S "${XDG_RUNTIME_DIR:-/run/linuxdroid}/wayland-2" ]; then
+    export WAYLAND_DISPLAY=wayland-2
+  fi
+fi
+
 # Per-application profiles
 if [ "$#" -gt 0 ]; then
   case "$(basename "$1")" in
@@ -45,15 +56,76 @@ if [ "$#" -gt 0 ]; then
       unset mesa_glthread ZINK_DEBUG ZINK_DESCRIPTORS
       export GALLIUM_THREAD=0
       export LIBDECOR_PLUGIN_DIR=/nonexistent
-      if [ "${BLENDER_WAYLAND:-0}" != "1" ] && { [ -n "${DISPLAY:-}" ] || [ -S /tmp/.X11-unix/X0 ] || [ -S /tmp/.X11-unix/X1 ]; }; then
-        if [ -z "${DISPLAY:-}" ]; then
-          if [ -S /tmp/.X11-unix/X0 ]; then
-            export DISPLAY=:0
-          else
-            export DISPLAY=:1
-          fi
+      if [ "${BLENDER_WAYLAND:-0}" != "1" ]; then
+        if [ ! -S /tmp/.X11-unix/X0 ] && [ ! -S /tmp/.X11-unix/X1 ] && [ -S "${XDG_RUNTIME_DIR:-/run/linuxdroid}/wayland-1" ]; then
+          for _ in $(seq 1 20); do
+            [ -S /tmp/.X11-unix/X0 ] || [ -S /tmp/.X11-unix/X1 ] && break
+            sleep 0.1
+          done
         fi
-        unset WAYLAND_DISPLAY
+        if [ -n "${DISPLAY:-}" ] || [ -S /tmp/.X11-unix/X0 ] || [ -S /tmp/.X11-unix/X1 ]; then
+          if [ -z "${DISPLAY:-}" ]; then
+            if [ -S /tmp/.X11-unix/X0 ]; then
+              export DISPLAY=:0
+            else
+              export DISPLAY=:1
+            fi
+          fi
+          if [ -z "${XAUTHORITY:-}" ] || [ ! -r "${XAUTHORITY:-}" ]; then
+            for xa in "${XDG_RUNTIME_DIR:-/run/linuxdroid}"/xauth_* "${HOME:-/home/linux}/.Xauthority"; do
+              if [ -r "$xa" ]; then
+                export XAUTHORITY="$xa"
+                break
+              fi
+            done
+          fi
+          unset WAYLAND_DISPLAY
+        fi
+      fi
+      # Ensure Blender opens as a normal decorated window inside the desktop workarea (leaving
+      # the KDE Plasma / XFCE taskbar panel and KWin window titlebar visible) unless explicit
+      # window or background CLI flags were passed.
+      has_win_flag=0
+      for arg in "${@:2}"; do
+        case "$arg" in
+          -b|--background|-v|--version|-h|--help|-w|--window-border|-W|--window-borderless|-M|--window-maximized|-p|--window-geometry)
+            has_win_flag=1
+            break
+            ;;
+        esac
+      done
+      if [ "$has_win_flag" = "0" ]; then
+        bl_geom="$(python3 -c '
+import os, subprocess
+w, h = 0, 0
+try:
+    out = subprocess.check_output(["xprop", "-root", "_NET_DESKTOP_GEOMETRY"], stderr=subprocess.DEVNULL, timeout=1).decode()
+    nums = [int(x.strip()) for x in out.split("=")[-1].split(",") if x.strip().isdigit()]
+    if len(nums) >= 2:
+        w, h = nums[0], nums[1]
+except Exception:
+    pass
+if w <= 0 or h <= 0:
+    try:
+        w = int(os.environ.get("BL_WIDTH", "0"))
+        h = int(os.environ.get("BL_HEIGHT", "0"))
+    except Exception:
+        w, h = 0, 0
+if w >= 640 and h >= 480:
+    panel_h = 52
+    title_h = 38
+    win_w = max(600, w - 16)
+    win_h = max(400, h - panel_h - title_h - 8)
+    sx = max(0, (w - win_w) // 2)
+    sy = panel_h
+    print(f"{sx} {sy} {win_w} {win_h}")
+' 2>/dev/null || true)"
+        if [ -n "$bl_geom" ]; then
+          # shellcheck disable=SC2086
+          set -- "$1" -w -p $bl_geom "${@:2}"
+        else
+          set -- "$1" -w "${@:2}"
+        fi
       fi
       ;;
     chromium|chromium-browser|google-chrome|google-chrome-stable|brave-browser)

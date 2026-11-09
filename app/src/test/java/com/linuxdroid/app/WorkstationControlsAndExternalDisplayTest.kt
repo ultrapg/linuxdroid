@@ -202,8 +202,24 @@ class WorkstationControlsAndExternalDisplayTest {
             "linuxdroid-gpu must set LIBDECOR_PLUGIN_DIR=/nonexistent for blender",
             gpuScript.contains("export LIBDECOR_PLUGIN_DIR=/nonexistent"),
         )
+        assertTrue(
+            "linuxdroid-gpu must open Blender with window borders (-w) inside the desktop workarea",
+            gpuScript.contains("set -- \"\$1\" -w -p \$bl_geom"),
+        )
 
         val sessionScript = repoRoot.resolve("app/src/main/assets/linuxfs/usr/local/bin/linuxdroid-session").readText()
-        assertTrue("linuxdroid-session must upgrade Blender wrapper to BL_WRAPPER_V5", sessionScript.contains("BL_WRAPPER_V5"))
+        assertTrue("linuxdroid-session must upgrade Blender wrapper to BL_WRAPPER_V6", sessionScript.contains("BL_WRAPPER_V6"))
+
+        val plasmashellScript = repoRoot.resolve("app/src/main/assets/linuxfs/usr/local/bin/plasmashell").readText()
+        assertTrue(
+            "plasmashell wrapper must use QT_QUICK_BACKEND=software on nested Wayland so panel and wallpaper always render",
+            plasmashellScript.contains("export QT_QUICK_BACKEND=software"),
+        )
+
+        val kwinWrapper = repoRoot.resolve("app/src/main/assets/linuxfs/usr/local/bin/kwin_wayland_wrapper").readText()
+        assertTrue(
+            "kwin_wayland_wrapper must enable --xwayland and KWIN_WAYLAND_NO_XAUTHORITY=1",
+            kwinWrapper.contains("--xwayland") && kwinWrapper.contains("KWIN_WAYLAND_NO_XAUTHORITY=1"),
+        )
     }
 }

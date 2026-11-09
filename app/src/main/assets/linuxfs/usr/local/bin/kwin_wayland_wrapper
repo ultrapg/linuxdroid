@@ -1,15 +1,19 @@
 #!/bin/bash
 if [ "${BL_DESKTOP:-}" = "1" ]; then
-  if [ -n "${XDG_RUNTIME_DIR:-}" ] && ! pgrep -x kwin_wayland >/dev/null 2>&1; then
+  if [ -n "${XDG_RUNTIME_DIR:-}" ] && ! pgrep -f "/usr/bin/kwin_wayland " >/dev/null 2>&1; then
     rm -f "$XDG_RUNTIME_DIR"/wayland-[1-9]* 2>/dev/null || true
   fi
   has_wl=0
+  has_xwl=0
   for arg in "$@"; do
-    if [ "$arg" = "--wayland-display" ]; then
-      has_wl=1
-      break
-    fi
+    case "$arg" in
+      --wayland-display) has_wl=1 ;;
+      --xwayland) has_xwl=1 ;;
+    esac
   done
+  if [ "$has_xwl" = "0" ]; then
+    set -- --xwayland "$@"
+  fi
   if [ "$has_wl" = "0" ]; then
     set -- \
       --wayland-display "${LINUXDROID_PARENT_WAYLAND:-wayland-0}" \
@@ -22,5 +26,10 @@ if [ "${BL_DESKTOP:-}" = "1" ]; then
   fi
   export KWIN_COMPOSE=Q
   export QT_QUICK_BACKEND=software
+  export QSG_RENDER_LOOP=basic
+  export LIBGL_ALWAYS_SOFTWARE=1
+  export GALLIUM_DRIVER=llvmpipe
+  export KWIN_WAYLAND_NO_XAUTHORITY=1
+  unset MESA_LOADER_DRIVER_OVERRIDE LIBGL_KOPPER_DRI2 MESA_GL_VERSION_OVERRIDE MESA_GLSL_VERSION_OVERRIDE ZINK_DESCRIPTORS MESA_NO_ERROR
 fi
 exec /usr/bin/kwin_wayland_wrapper "$@"
