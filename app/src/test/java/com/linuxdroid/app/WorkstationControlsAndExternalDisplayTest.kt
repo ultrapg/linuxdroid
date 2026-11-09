@@ -203,25 +203,29 @@ class WorkstationControlsAndExternalDisplayTest {
             gpuScript.contains("export LIBDECOR_PLUGIN_DIR=/nonexistent"),
         )
         assertTrue(
-            "linuxdroid-gpu must open Blender with window borders (-w) inside the desktop workarea",
-            gpuScript.contains("set -- \"\$1\" -w -p \$bl_geom"),
+            "linuxdroid-gpu must open Blender with window borders (-w) inside the desktop workarea using XDisplayWidth/XDisplayHeight",
+            gpuScript.contains("set -- \"\$1\" -w -p \$bl_geom") &&
+                gpuScript.contains("XDisplayWidth") &&
+                gpuScript.contains("XDisplayHeight"),
         )
 
         val sessionScript = repoRoot.resolve("app/src/main/assets/linuxfs/usr/local/bin/linuxdroid-session").readText()
-        assertTrue("linuxdroid-session must upgrade Blender wrapper to BL_WRAPPER_V6", sessionScript.contains("BL_WRAPPER_V6"))
+        assertTrue("linuxdroid-session must upgrade Blender wrapper to BL_WRAPPER_V7", sessionScript.contains("BL_WRAPPER_V7"))
 
         val plasmashellScript = repoRoot.resolve("app/src/main/assets/linuxfs/usr/local/bin/plasmashell").readText()
         assertTrue(
-            "plasmashell wrapper must use QT_QUICK_BACKEND=software on nested Wayland so panel and wallpaper always render",
-            plasmashellScript.contains("export QT_QUICK_BACKEND=software"),
+            "plasmashell wrapper must use QT_QUICK_BACKEND=software on nested Wayland and redirect wayland-0 to wayland-1",
+            plasmashellScript.contains("export QT_QUICK_BACKEND=software") &&
+                plasmashellScript.contains("export WAYLAND_DISPLAY=\"wayland-1\""),
         )
 
         val kwinWrapper = repoRoot.resolve("app/src/main/assets/linuxfs/usr/local/bin/kwin_wayland_wrapper").readText()
         assertTrue(
-            "kwin_wayland_wrapper must enable --xwayland, KWIN_WAYLAND_NO_XAUTHORITY=1, and .distrib fallback",
+            "kwin_wayland_wrapper must enable --xwayland, KWIN_WAYLAND_NO_XAUTHORITY=1, .distrib fallback, and /tmp/.X11-unix prep",
             kwinWrapper.contains("--xwayland") &&
                 kwinWrapper.contains("KWIN_WAYLAND_NO_XAUTHORITY=1") &&
-                kwinWrapper.contains("kwin_wayland_wrapper.distrib"),
+                kwinWrapper.contains("kwin_wayland_wrapper.distrib") &&
+                kwinWrapper.contains("chmod 1777 /tmp/.X11-unix"),
         )
 
         val desktopScript = repoRoot.resolve("app/src/main/assets/linuxfs/usr/local/bin/linuxdroid-desktop").readText()
@@ -229,6 +233,12 @@ class WorkstationControlsAndExternalDisplayTest {
             "linuxdroid-desktop must not use pkill -x on >15-char process names (startplasma-wayland, kwin_wayland_wrapper)",
             desktopScript.contains("pkill -TERM -x startplasma-wayland") ||
                 desktopScript.contains("pkill -TERM -x kwin_wayland_wrapper"),
+        )
+        assertTrue(
+            "linuxdroid-desktop must configure kwinrulesrc to enforce non-fullscreen decorated window mode for Blender",
+            desktopScript.contains("kwinrulesrc") &&
+                desktopScript.contains("\"fullscreenrule\": \"2\"") &&
+                desktopScript.contains("\"noborderrule\": \"2\""),
         )
 
         val plasmashellReal = repoRoot.resolve("app/src/main/assets/linuxfs/usr/lib/linuxdroid/plasmashell.real")

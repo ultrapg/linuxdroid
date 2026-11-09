@@ -667,6 +667,39 @@ update_ini("kwinrc", {
     "Windows": {"BorderlessMaximizedWindows": "false", "Placement": "Centered"},
     "org.kde.kdecoration2": {"library": "org.kde.breeze", "NoPlugin": "false"},
 })
+update_ini("kwinrulesrc", {
+    "General": {"count": "1", "rules": "linuxdroid-blender"},
+    "linuxdroid-blender": {
+        "Description": "LinuxDroid Blender Windowed Desktop Mode",
+        "wmclass": "blender",
+        "wmclasscomplete": "false",
+        "wmclassmatch": "2",
+        "types": "1",
+        "fullscreen": "false",
+        "fullscreenrule": "2",
+        "noborder": "false",
+        "noborderrule": "2",
+        "strictgeometry": "false",
+        "strictgeometryrule": "2",
+        "ignoregeometry": "true",
+        "ignoregeometryrule": "3",
+    },
+    "1": {
+        "Description": "LinuxDroid Blender Windowed Desktop Mode",
+        "wmclass": "blender",
+        "wmclasscomplete": "false",
+        "wmclassmatch": "2",
+        "types": "1",
+        "fullscreen": "false",
+        "fullscreenrule": "2",
+        "noborder": "false",
+        "noborderrule": "2",
+        "strictgeometry": "false",
+        "strictgeometryrule": "2",
+        "ignoregeometry": "true",
+        "ignoregeometryrule": "3",
+    },
+})
 update_ini("plasma-localerc", {"Formats": {"LANG": lang}})
 kcminput_updates = {"Mouse": {"cursorSize": cursor_px}}
 kdeglobals_updates = {"KDE": {"AnimationDurationFactor": "0"}}
@@ -747,6 +780,7 @@ PY
         fi
         if dbus-send --session --dest=org.kde.plasmashell --type=method_call --print-reply /PlasmaShell org.freedesktop.DBus.Introspectable.Introspect 2>/dev/null | grep -q "org.kde.PlasmaShell"; then
           pkill -x ksplashqml 2>/dev/null || true
+          dbus-send --session --dest=org.kde.KWin --type=method_call /KWin org.kde.KWin.reconfigure >/dev/null 2>&1 || true
           dbus-send --session --dest=org.kde.KWin --type=method_call /VirtualKeyboard org.freedesktop.DBus.Properties.Set string:"org.kde.kwin.VirtualKeyboard" string:"enabled" variant:boolean:true >/dev/null 2>&1 || true
           for _ in $(seq 1 40); do
             if sync_live_kde_launchers; then

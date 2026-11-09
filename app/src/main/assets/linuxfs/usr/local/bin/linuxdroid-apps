@@ -502,7 +502,7 @@ print(fallback)
   sudo sh -c '
     cat > /usr/local/bin/blender <<'\''WRAP'\''
 #!/bin/sh
-# BL_WRAPPER_V6
+# BL_WRAPPER_V7
 unset MESA_NO_ERROR DRI_PRIME
 export LIBDECOR_PLUGIN_DIR=/nonexistent
 export LP_NUM_THREADS="${BL_CPU_COUNT:-4}"

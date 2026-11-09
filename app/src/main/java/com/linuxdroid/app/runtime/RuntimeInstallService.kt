@@ -313,7 +313,7 @@ class RuntimeInstallService : Service() {
             )?.let { apiUrl ->
                 result.add(apiUrl)
             }
-            for (fallbackTag in listOf("v1.0.52", "v1.0.51")) {
+            for (fallbackTag in listOf("v1.0.60", "v1.0.59", "v1.0.52")) {
                 result.add("https://github.com/${com.linuxdroid.app.BuildConfig.GITHUB_REPO}/releases/download/$fallbackTag/$fileName")
             }
         }

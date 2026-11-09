@@ -13,6 +13,10 @@ if [ ! -x "$REAL_KWIN_WRAPPER" ]; then
 fi
 
 if [ "${BL_DESKTOP:-}" = "1" ]; then
+  rm -rf /tmp/.X11-unix /tmp/.ICE-unix /tmp/.X*-lock 2>/dev/null || true
+  mkdir -p /tmp/.X11-unix /tmp/.ICE-unix 2>/dev/null || true
+  chmod 1777 /tmp/.X11-unix /tmp/.ICE-unix 2>/dev/null || \
+    linuxdroid-root chmod 1777 /tmp/.X11-unix /tmp/.ICE-unix 2>/dev/null || true
   if [ -n "${XDG_RUNTIME_DIR:-}" ] && ! pgrep -x kwin_wayland >/dev/null 2>&1; then
     rm -f "$XDG_RUNTIME_DIR"/wayland-[1-9]* 2>/dev/null || true
   fi
