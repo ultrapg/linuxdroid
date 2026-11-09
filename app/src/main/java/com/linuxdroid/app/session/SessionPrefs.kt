@@ -130,6 +130,7 @@ data class SessionConfigSignature(
     val gpuApps: Boolean,
     val gpuDesktop: Boolean,
     val customMountsHash: Int,
+    val appVersionCode: Int = com.linuxdroid.app.BuildConfig.VERSION_CODE,
 )
 
 enum class BackgroundMode(val id: String, val label: String, val description: String) {

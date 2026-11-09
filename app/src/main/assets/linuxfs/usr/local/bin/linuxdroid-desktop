@@ -380,6 +380,51 @@ for hdr, body in sections:
                 break
 
 changed = False
+containment_re = re.compile(r"^\[Containments\]\[\d+\]$")
+for hdr, body in sections:
+    if hdr == "[ScreenMapping]":
+        target_sm = ["itemsOnDisabledScreens=\n", "screenMapping=\n"]
+        if body != target_sm:
+            body[:] = target_sm
+            changed = True
+    elif containment_re.match(hdr):
+        is_desktop = any(ln.strip() in ("plugin=org.kde.plasma.folder", "plugin=org.kde.desktopcontainment") for ln in body)
+        is_panel = any(ln.strip() in ("plugin=org.kde.panel", "plugin=org.kde.plasma.private.systemtray") for ln in body)
+        if is_desktop or is_panel:
+            new_body = []
+            seen_screen = False
+            seen_act = False
+            seen_loc = False
+            for ln in body:
+                if ln.startswith("lastScreen="):
+                    if ln != "lastScreen=0\n":
+                        changed = True
+                    new_body.append("lastScreen=0\n")
+                    seen_screen = True
+                elif is_desktop and ln.startswith("activityId="):
+                    target_act = f"activityId={act_id}\n"
+                    if ln != target_act:
+                        changed = True
+                    new_body.append(target_act)
+                    seen_act = True
+                elif is_panel and ln.startswith("location="):
+                    if ln != "location=4\n":
+                        changed = True
+                    new_body.append("location=4\n")
+                    seen_loc = True
+                else:
+                    new_body.append(ln)
+            if not seen_screen:
+                new_body.insert(0, "lastScreen=0\n")
+                changed = True
+            if is_desktop and not seen_act:
+                new_body.insert(0, f"activityId={act_id}\n")
+                changed = True
+            if is_panel and not seen_loc:
+                new_body.insert(0, "location=4\n")
+                changed = True
+            body[:] = new_body
+
 if first_run and task_prefixes:
     for prefix in task_prefixes:
         cfg_hdr = prefix + "[Configuration][General]"
@@ -474,6 +519,16 @@ sync_live_kde_launchers() {
     var forceReset = '"$([ "$first" = 1 ] && echo true || echo false)"';
     var dropDiscover = '"$([ -e /usr/share/applications/org.kde.discover.desktop ] && echo false || echo true)"';
     var ps = panels();
+    if (ps.length === 0 && typeof loadTemplate === "function") {
+      try { loadTemplate("org.kde.plasma.desktop.defaultPanel"); } catch (e) {}
+      ps = panels();
+    }
+    try {
+      var ds = (typeof desktops === "function") ? desktops() : [];
+      for (var d = 0; d < ds.length; d++) {
+        ds[d].wallpaperPlugin = "org.kde.image";
+      }
+    } catch (e) {}
     var matched = 0;
     for (var i = 0; i < ps.length; i++) {
       var ws = ps[i].widgets();
@@ -666,15 +721,15 @@ update_ini("kwinrc", {
     "Xwayland": {"Scale": scale_s},
     "Windows": {"BorderlessMaximizedWindows": "false", "Placement": "Centered"},
     "org.kde.kdecoration2": {"library": "org.kde.breeze", "NoPlugin": "false"},
+    "Plugins": {"linuxdroidwindowedEnabled": "true"},
 })
 update_ini("kwinrulesrc", {
     "General": {"count": "1", "rules": "linuxdroid-blender"},
     "linuxdroid-blender": {
         "Description": "LinuxDroid Blender Windowed Desktop Mode",
         "wmclass": "blender",
-        "wmclasscomplete": "false",
         "wmclassmatch": "2",
-        "types": "1",
+        "types": "65535",
         "fullscreen": "false",
         "fullscreenrule": "2",
         "noborder": "false",
@@ -687,9 +742,8 @@ update_ini("kwinrulesrc", {
     "1": {
         "Description": "LinuxDroid Blender Windowed Desktop Mode",
         "wmclass": "blender",
-        "wmclasscomplete": "false",
         "wmclassmatch": "2",
-        "types": "1",
+        "types": "65535",
         "fullscreen": "false",
         "fullscreenrule": "2",
         "noborder": "false",
@@ -775,7 +829,7 @@ PY
       fi
       shell_up=0
       for j in $(seq 1 60); do
-        if [ "$j" -eq 15 ] && ! pgrep -f "plasmashell" >/dev/null 2>&1; then
+        if [ "$j" -eq 15 ] && ! pgrep -x plasmashell.real >/dev/null 2>&1 && ! pgrep -x plasmashell.distrib >/dev/null 2>&1 && ! pgrep -x plasmashell >/dev/null 2>&1; then
           WAYLAND_DISPLAY="$wl_nested_sock" /usr/local/bin/plasmashell >/dev/null 2>&1 &
         fi
         if dbus-send --session --dest=org.kde.plasmashell --type=method_call --print-reply /PlasmaShell org.freedesktop.DBus.Introspectable.Introspect 2>/dev/null | grep -q "org.kde.PlasmaShell"; then
@@ -796,7 +850,7 @@ PY
       done
       if [ "$shell_up" = "0" ]; then
         echo "== linuxdroid-desktop: Plasma shell did not register within 12s; launching fallback plasmashell"
-        pkill -9 -f "plasmashell" 2>/dev/null || true
+        pkill -9 -x plasmashell.real 2>/dev/null || pkill -9 -x plasmashell.distrib 2>/dev/null || pkill -9 -x plasmashell 2>/dev/null || true
         WAYLAND_DISPLAY="$wl_nested_sock" QT_QUICK_BACKEND=software LIBGL_ALWAYS_SOFTWARE=1 GALLIUM_DRIVER=llvmpipe \
           /usr/local/bin/plasmashell >/dev/null 2>&1 &
         write_status "READY|KDE Plasma desktop ready" "== [BOOT READY] KDE Plasma desktop ready"

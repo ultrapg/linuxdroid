@@ -146,6 +146,118 @@ if w >= 640 and h >= 480:
         else
           set -- "$1" -w "${@:2}"
         fi
+        # Background X11 window decorator & desktop workarea enforcer for Blender on both KWin and XFCE
+        (
+          python3 - "$bl_geom" <<'PY' >/dev/null 2>&1 || true
+import ctypes, os, subprocess, sys, time
+
+geom_parts = [int(x) for x in (sys.argv[1] if len(sys.argv) > 1 else "").split() if x.lstrip("-").isdigit()]
+sx, sy, win_w, win_h = geom_parts if len(geom_parts) == 4 else (12, 48, 0, 0)
+
+try:
+    x11 = ctypes.CDLL("libX11.so.6")
+except Exception:
+    raise SystemExit(0)
+
+class XClientMessageEvent(ctypes.Structure):
+    _fields_ = [
+        ("type", ctypes.c_int),
+        ("serial", ctypes.c_ulong),
+        ("send_event", ctypes.c_int),
+        ("display", ctypes.c_void_p),
+        ("window", ctypes.c_ulong),
+        ("message_type", ctypes.c_ulong),
+        ("format", ctypes.c_int),
+        ("data", ctypes.c_long * 5),
+    ]
+
+class MotifWmHints(ctypes.Structure):
+    _fields_ = [
+        ("flags", ctypes.c_ulong),
+        ("functions", ctypes.c_ulong),
+        ("decorations", ctypes.c_ulong),
+        ("input_mode", ctypes.c_long),
+        ("status", ctypes.c_ulong),
+    ]
+
+x11.XOpenDisplay.argtypes = [ctypes.c_char_p]
+x11.XOpenDisplay.restype = ctypes.c_void_p
+x11.XDefaultRootWindow.argtypes = [ctypes.c_void_p]
+x11.XDefaultRootWindow.restype = ctypes.c_ulong
+x11.XInternAtom.argtypes = [ctypes.c_void_p, ctypes.c_char_p, ctypes.c_int]
+x11.XInternAtom.restype = ctypes.c_ulong
+x11.XChangeProperty.argtypes = [
+    ctypes.c_void_p, ctypes.c_ulong, ctypes.c_ulong, ctypes.c_ulong,
+    ctypes.c_int, ctypes.c_int, ctypes.c_void_p, ctypes.c_int
+]
+x11.XSendEvent.argtypes = [ctypes.c_void_p, ctypes.c_ulong, ctypes.c_int, ctypes.c_long, ctypes.c_void_p]
+x11.XMoveResizeWindow.argtypes = [ctypes.c_void_p, ctypes.c_ulong, ctypes.c_int, ctypes.c_int, ctypes.c_uint, ctypes.c_uint]
+x11.XFlush.argtypes = [ctypes.c_void_p]
+x11.XCloseDisplay.argtypes = [ctypes.c_void_p]
+
+def find_blender_wids():
+    wids = []
+    try:
+        out = subprocess.check_output(["xprop", "-root", "_NET_CLIENT_LIST"], stderr=subprocess.DEVNULL, timeout=1).decode(errors="ignore")
+        if "#" in out:
+            for tok in out.split("#", 1)[1].replace(",", " ").split():
+                if tok.startswith("0x"):
+                    wid = int(tok, 16)
+                    if wid > 0:
+                        p = subprocess.check_output(["xprop", "-id", hex(wid), "WM_CLASS", "_NET_WM_NAME"], stderr=subprocess.DEVNULL, timeout=1).decode(errors="ignore").lower()
+                        if "blender" in p:
+                            wids.append(wid)
+    except Exception:
+        pass
+    return wids
+
+for attempt in range(45):
+    time.sleep(0.2)
+    wids = find_blender_wids()
+    if not wids:
+        continue
+    dpy = x11.XOpenDisplay(None)
+    if not dpy:
+        continue
+    try:
+        root = x11.XDefaultRootWindow(dpy)
+        net_wm_state = x11.XInternAtom(dpy, b"_NET_WM_STATE", 0)
+        state_fs = x11.XInternAtom(dpy, b"_NET_WM_STATE_FULLSCREEN", 0)
+        motif_atom = x11.XInternAtom(dpy, b"_MOTIF_WM_HINTS", 0)
+        for wid in wids:
+            hints = MotifWmHints(flags=2, functions=1, decorations=1, input_mode=0, status=0)
+            x11.XChangeProperty(
+                dpy, wid, motif_atom, motif_atom, 32, 0,
+                ctypes.cast(ctypes.byref(hints), ctypes.c_void_p), 5
+            )
+            ev = XClientMessageEvent()
+            ev.type = 33
+            ev.serial = 0
+            ev.send_event = 1
+            ev.display = dpy
+            ev.window = wid
+            ev.message_type = net_wm_state
+            ev.format = 32
+            ev.data[0] = 0  # _NET_WM_STATE_REMOVE
+            ev.data[1] = state_fs
+            ev.data[2] = 0
+            ev.data[3] = 1
+            ev.data[4] = 0
+            x11.XSendEvent(dpy, root, 0, (1 << 20) | (1 << 19), ctypes.byref(ev))
+            if win_w >= 400 and win_h >= 300:
+                x11.XMoveResizeWindow(dpy, wid, sx, sy, win_w, win_h)
+        x11.XFlush(dpy)
+    finally:
+        x11.XCloseDisplay(dpy)
+    subprocess.run(
+        ["dbus-send", "--session", "--dest=org.kde.KWin", "--type=method_call", "/KWin", "org.kde.KWin.reconfigure"],
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=1
+    )
+    if attempt >= 5:
+        time.sleep(0.5)
+        break
+PY
+        ) &
       fi
       ;;
     chromium|chromium-browser|google-chrome|google-chrome-stable|brave-browser)

@@ -5,16 +5,16 @@
 # handle hardware GPU acceleration without Wayland EGL / Mesa Kopper event-queue conflicts.
 set -u
 
-REAL_PLASMASHELL="/usr/bin/plasmashell.distrib"
-if [ ! -x "$REAL_PLASMASHELL" ]; then
-  if [ -x /usr/lib/linuxdroid/plasmashell.real ]; then
-    REAL_PLASMASHELL="/usr/lib/linuxdroid/plasmashell.real"
-  elif [ -x /usr/bin/plasmashell ] && ! grep -q "^# LinuxDroid plasmashell wrapper" /usr/bin/plasmashell 2>/dev/null; then
-    REAL_PLASMASHELL="/usr/bin/plasmashell"
-  else
-    echo "linuxdroid plasmashell wrapper: $REAL_PLASMASHELL not found" >&2
-    exit 127
+REAL_PLASMASHELL=""
+for candidate in /usr/lib/linuxdroid/plasmashell.real /usr/bin/plasmashell.distrib /usr/bin/plasmashell; do
+  if [ -x "$candidate" ] && ! grep -q "^# LinuxDroid plasmashell" "$candidate" 2>/dev/null; then
+    REAL_PLASMASHELL="$candidate"
+    break
   fi
+done
+if [ -z "$REAL_PLASMASHELL" ]; then
+  echo "linuxdroid plasmashell wrapper: real plasmashell binary not found" >&2
+  exit 127
 fi
 
 export QT_QUICK_BACKEND=software

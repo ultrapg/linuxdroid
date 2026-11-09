@@ -20,6 +20,7 @@ LayoutName=org.kde.breeze.desktop
 LayoutName=org.kde.breeze.desktop
 
 [Plugins]
+linuxdroidwindowedEnabled=true
 blurEnabled=false
 contrastEnabled=false
 kwin4_effect_translucencyEnabled=false

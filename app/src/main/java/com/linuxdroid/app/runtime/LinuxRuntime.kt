@@ -242,7 +242,7 @@ object LinuxRuntime {
                             usrBinTarget.renameTo(backup)
                         }
                     }
-                    if (!backup.exists() && bundledReal.isFile) {
+                    if (bundledReal.isFile) {
                         bundledReal.copyTo(backup, overwrite = true)
                         FileUtils.chmod(backup, 0b111_101_101)
                     }

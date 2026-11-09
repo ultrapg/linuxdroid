@@ -1,15 +1,15 @@
 #!/bin/bash
 # LinuxDroid kwin_wayland_wrapper
-REAL_KWIN_WRAPPER="/usr/bin/kwin_wayland_wrapper.distrib"
-if [ ! -x "$REAL_KWIN_WRAPPER" ]; then
-  if [ -x /usr/lib/linuxdroid/kwin_wayland_wrapper.real ]; then
-    REAL_KWIN_WRAPPER="/usr/lib/linuxdroid/kwin_wayland_wrapper.real"
-  elif [ -x /usr/bin/kwin_wayland_wrapper ] && ! grep -q "^# LinuxDroid kwin_wayland_wrapper" /usr/bin/kwin_wayland_wrapper 2>/dev/null; then
-    REAL_KWIN_WRAPPER="/usr/bin/kwin_wayland_wrapper"
-  else
-    echo "linuxdroid kwin_wayland_wrapper: $REAL_KWIN_WRAPPER not found" >&2
-    exit 127
+REAL_KWIN_WRAPPER=""
+for candidate in /usr/lib/linuxdroid/kwin_wayland_wrapper.real /usr/bin/kwin_wayland_wrapper.distrib /usr/bin/kwin_wayland_wrapper; do
+  if [ -x "$candidate" ] && ! grep -q "^# LinuxDroid kwin_wayland_wrapper" "$candidate" 2>/dev/null; then
+    REAL_KWIN_WRAPPER="$candidate"
+    break
   fi
+done
+if [ -z "$REAL_KWIN_WRAPPER" ]; then
+  echo "linuxdroid kwin_wayland_wrapper: real kwin_wayland_wrapper binary not found" >&2
+  exit 127
 fi
 
 if [ "${BL_DESKTOP:-}" = "1" ]; then

@@ -239,6 +239,16 @@ object DebugLogger {
         appendLine()
         appendLine("--- Guest KWin GPU Log (kwin-gpu.log) ---")
         appendLine(readTailOrPlaceholder(kwinLog, maxBytes = 16_384, maxLines = 100, placeholder = "(kwin-gpu.log is empty)"))
+
+        val userHome = File(root, "home/${SessionPrefs.username(context)}")
+        val kwinrc = File(userHome, ".config/kwinrc")
+        val kwinrulesrc = File(userHome, ".config/kwinrulesrc")
+        appendLine()
+        appendLine("--- Guest KWin Config (kwinrc / kwinrulesrc) ---")
+        appendLine("[kwinrc]")
+        appendLine(readTailOrPlaceholder(kwinrc, maxBytes = 4096, maxLines = 40, placeholder = "(missing)"))
+        appendLine("[kwinrulesrc]")
+        appendLine(readTailOrPlaceholder(kwinrulesrc, maxBytes = 4096, maxLines = 40, placeholder = "(missing)"))
     }
 
     private fun buildAppsAndCrashesSection(context: Context, root: File, logDir: File): String = buildString {

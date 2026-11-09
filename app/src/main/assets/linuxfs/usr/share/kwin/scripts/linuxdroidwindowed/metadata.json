@@ -1,0 +1,20 @@
+{
+    "KPackageStructure": "KWin/Script",
+    "KPlugin": {
+        "Authors": [
+            {
+                "Email": "support@linuxdroid.app",
+                "Name": "LinuxDroid"
+            }
+        ],
+        "Description": "Forces desktop applications like Blender into decorated windowed mode inside the desktop workarea",
+        "EnabledByDefault": true,
+        "Icon": "preferences-system-windows",
+        "Id": "linuxdroidwindowed",
+        "License": "GPL",
+        "Name": "LinuxDroid Windowed Desktop Enforcer",
+        "Version": "1.0"
+    },
+    "X-Plasma-API": "javascript",
+    "X-Plasma-MainScript": "code/main.js"
+}

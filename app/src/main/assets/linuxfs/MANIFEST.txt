@@ -71,3 +71,5 @@
 0755 usr/local/lib/libblsession.so
 0755 usr/sbin/policy-rc.d
 0644 usr/share/applications/linuxdroid-apps.desktop
+0644 usr/share/kwin/scripts/linuxdroidwindowed/contents/code/main.js
+0644 usr/share/kwin/scripts/linuxdroidwindowed/metadata.json
