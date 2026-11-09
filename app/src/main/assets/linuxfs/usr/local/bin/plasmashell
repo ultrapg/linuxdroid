@@ -5,10 +5,14 @@
 # QT_QUICK_BACKEND=software if any stage fails so the desktop never displays a black screen.
 set -u
 
-REAL_PLASMASHELL="/usr/bin/plasmashell"
+REAL_PLASMASHELL="/usr/bin/plasmashell.distrib"
 if [ ! -x "$REAL_PLASMASHELL" ]; then
-  echo "linuxdroid plasmashell wrapper: $REAL_PLASMASHELL not found" >&2
-  exit 127
+  if [ -x /usr/bin/plasmashell ] && ! grep -q "^# LinuxDroid plasmashell wrapper" /usr/bin/plasmashell 2>/dev/null; then
+    REAL_PLASMASHELL="/usr/bin/plasmashell"
+  else
+    echo "linuxdroid plasmashell wrapper: $REAL_PLASMASHELL not found" >&2
+    exit 127
+  fi
 fi
 
 CACHE_DIR="${XDG_CACHE_HOME:-${HOME:-/home/linux}/.cache}/linuxdroid"
@@ -52,9 +56,10 @@ export QT_WAYLAND_FORCE_NONBLOCKING_SWAP_SUPPORT=1
 if [ "${LINUXDROID_GPU_ACTIVE:-}" = "turnip" ]; then
   # Do NOT set MESA_GL_VERSION_OVERRIDE="4.6" without COMPAT: Mesa's _mesa_override_gl_version
   # forces default contexts into API_OPENGL_CORE, breaking Qt5/QtQuick VAO=0 draws and GLSL 1.20 shaders.
-  unset MESA_GL_VERSION_OVERRIDE MESA_GLSL_VERSION_OVERRIDE
+  unset MESA_GL_VERSION_OVERRIDE MESA_GLSL_VERSION_OVERRIDE ZINK_DESCRIPTORS
   export MESA_LOADER_DRIVER_OVERRIDE="${MESA_LOADER_DRIVER_OVERRIDE:-zink}"
   export GALLIUM_DRIVER="${GALLIUM_DRIVER:-zink}"
+  export TU_DEBUG="${TU_DEBUG:-noconform,sysmem}"
   export LIBGL_KOPPER_DRI2=true
   export MESA_VK_WSI_DEBUG=sw
   export MESA_VK_WSI_PRESENT_MODE=mailbox

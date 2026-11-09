@@ -142,17 +142,33 @@ fi
 
 # GPU acceleration shims: route GPU-capable apps through linuxdroid-gpu-launch (Settings > Hardware toggle).
 for gpu_app in firefox mpv vlc krita gimp kdenlive obs godot glxgears vkcube; do
-  [ -e "/usr/local/bin/$gpu_app" ] && continue
   gpu_real=""
   for gpu_dir in /usr/bin /bin /usr/games /opt/bin; do
     [ -x "$gpu_dir/$gpu_app" ] && gpu_real="$gpu_dir/$gpu_app" && break
   done
   [ -n "$gpu_real" ] || continue
+  [ -e "/usr/local/bin/$gpu_app" ] && continue
   gpu_body="#!/bin/sh
 exec /usr/local/bin/linuxdroid-gpu-launch $gpu_app \"\$@\""
   printf '%s\n' "$gpu_body" > "/usr/local/bin/$gpu_app" 2>/dev/null && chmod 755 "/usr/local/bin/$gpu_app" 2>/dev/null || \
     linuxdroid-root sh -c "printf '%s\n' '$gpu_body' > /usr/local/bin/$gpu_app && chmod 755 /usr/local/bin/$gpu_app" 2>/dev/null || true
 done
+
+# Ensure /usr/bin/plasmashell uses the LinuxDroid GPU/fallback wrapper even when invoked by full path
+if [ -x /usr/local/bin/plasmashell ] && [ -f /usr/bin/plasmashell ]; then
+  if ! grep -q "^# LinuxDroid plasmashell wrapper" /usr/bin/plasmashell 2>/dev/null; then
+    (
+      if [ ! -e /usr/bin/plasmashell.distrib ]; then
+        cp -a /usr/bin/plasmashell /usr/bin/plasmashell.distrib 2>/dev/null || \
+          linuxdroid-root cp -a /usr/bin/plasmashell /usr/bin/plasmashell.distrib 2>/dev/null || true
+      fi
+      if [ -x /usr/bin/plasmashell.distrib ]; then
+        cp -f /usr/local/bin/plasmashell /usr/bin/plasmashell 2>/dev/null || \
+          linuxdroid-root cp -f /usr/local/bin/plasmashell /usr/bin/plasmashell 2>/dev/null || true
+      fi
+    )
+  fi
+fi
 
 # Ensure any existing /opt/blender installation uses the safe wrapper without MESA_NO_ERROR / DRI_PRIME / bundled libvulkan
 if [ -x /opt/blender/blender ]; then
