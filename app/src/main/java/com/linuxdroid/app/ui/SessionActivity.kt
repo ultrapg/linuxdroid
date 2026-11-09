@@ -722,7 +722,7 @@ class SessionActivity : ComponentActivity() {
         if (safeMode) {
             SessionPrefs.setGpuMode(this, GpuDriverMode.SOFTWARE)
             SessionPrefs.setProotFastPath(this, false)
-            SessionPrefs.setProotNoSeccomp(this, true)
+            SessionPrefs.setProotNoSeccomp(this, false)
         }
         SessionState.reset()
 

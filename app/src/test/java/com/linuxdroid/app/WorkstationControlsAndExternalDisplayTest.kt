@@ -230,5 +230,43 @@ class WorkstationControlsAndExternalDisplayTest {
             desktopScript.contains("pkill -TERM -x startplasma-wayland") ||
                 desktopScript.contains("pkill -TERM -x kwin_wayland_wrapper"),
         )
+
+        val plasmashellReal = repoRoot.resolve("app/src/main/assets/linuxfs/usr/lib/linuxdroid/plasmashell.real")
+        assertTrue("plasmashell.real must be bundled in assets/linuxfs", plasmashellReal.isFile && plasmashellReal.length() > 100_000L)
+        val psHeader = plasmashellReal.inputStream().use { it.readNBytes(4) }
+        assertTrue(
+            "plasmashell.real must be an ELF binary",
+            psHeader.size == 4 && psHeader[0] == 0x7f.toByte() && psHeader[1] == 'E'.code.toByte() &&
+                psHeader[2] == 'L'.code.toByte() && psHeader[3] == 'F'.code.toByte(),
+        )
+
+        val kwinWrapperReal = repoRoot.resolve("app/src/main/assets/linuxfs/usr/lib/linuxdroid/kwin_wayland_wrapper.real")
+        assertTrue("kwin_wayland_wrapper.real must be bundled in assets/linuxfs", kwinWrapperReal.isFile && kwinWrapperReal.length() > 10_000L)
+        val kwHeader = kwinWrapperReal.inputStream().use { it.readNBytes(4) }
+        assertTrue(
+            "kwin_wayland_wrapper.real must be an ELF binary",
+            kwHeader.size == 4 && kwHeader[0] == 0x7f.toByte() && kwHeader[1] == 'E'.code.toByte() &&
+                kwHeader[2] == 'L'.code.toByte() && kwHeader[3] == 'F'.code.toByte(),
+        )
+
+        assertTrue(
+            "plasmashell wrapper must fall back to /usr/lib/linuxdroid/plasmashell.real",
+            plasmashellScript.contains("/usr/lib/linuxdroid/plasmashell.real"),
+        )
+        assertTrue(
+            "kwin_wayland_wrapper must fall back to /usr/lib/linuxdroid/kwin_wayland_wrapper.real",
+            kwinWrapper.contains("/usr/lib/linuxdroid/kwin_wayland_wrapper.real"),
+        )
+
+        val sessionServiceKt = repoRoot.resolve("app/src/main/java/com/linuxdroid/app/session/SessionService.kt").readText()
+        assertFalse(
+            "forceCompatRetry must not enable PROOT_NO_SECCOMP on Android 15/17",
+            sessionServiceKt.contains("forceCompatRetry || SessionPrefs.prootNoSeccomp"),
+        )
+        val sessionActivityKt = repoRoot.resolve("app/src/main/java/com/linuxdroid/app/ui/SessionActivity.kt").readText()
+        assertFalse(
+            "Safe mode retry must not persist setProotNoSeccomp(this, true)",
+            sessionActivityKt.contains("setProotNoSeccomp(this, true)"),
+        )
     }
 }

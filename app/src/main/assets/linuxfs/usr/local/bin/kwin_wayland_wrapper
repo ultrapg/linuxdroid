@@ -2,7 +2,9 @@
 # LinuxDroid kwin_wayland_wrapper
 REAL_KWIN_WRAPPER="/usr/bin/kwin_wayland_wrapper.distrib"
 if [ ! -x "$REAL_KWIN_WRAPPER" ]; then
-  if [ -x /usr/bin/kwin_wayland_wrapper ] && ! grep -q "^# LinuxDroid kwin_wayland_wrapper" /usr/bin/kwin_wayland_wrapper 2>/dev/null; then
+  if [ -x /usr/lib/linuxdroid/kwin_wayland_wrapper.real ]; then
+    REAL_KWIN_WRAPPER="/usr/lib/linuxdroid/kwin_wayland_wrapper.real"
+  elif [ -x /usr/bin/kwin_wayland_wrapper ] && ! grep -q "^# LinuxDroid kwin_wayland_wrapper" /usr/bin/kwin_wayland_wrapper 2>/dev/null; then
     REAL_KWIN_WRAPPER="/usr/bin/kwin_wayland_wrapper"
   else
     echo "linuxdroid kwin_wayland_wrapper: $REAL_KWIN_WRAPPER not found" >&2

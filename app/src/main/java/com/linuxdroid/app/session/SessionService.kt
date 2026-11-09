@@ -405,7 +405,7 @@ class SessionService : Service() {
         for ((k, v) in guestEnv) prootCmd.add("$k=$v")
         prootCmd.add(LinuxRuntime.SESSION_SCRIPT)
 
-        val useNoSeccomp = forceCompatRetry || SessionPrefs.prootNoSeccomp(this)
+        val useNoSeccomp = SessionPrefs.prootNoSeccomp(this)
         val hostEnv = LinkedHashMap<String, String>().apply {
             put("PROOT_LOADER", LinuxRuntime.prootLoader(this@SessionService).absolutePath)
             put("PROOT_TMP_DIR", LinuxRuntime.prootTempDir(this@SessionService).absolutePath)
@@ -574,7 +574,7 @@ class SessionService : Service() {
         if (snap.phase == SessionPhase.STOPPING) return
 
         if (!hasPresented) {
-            if (!forceCompatRetry && (usedFastPath || !usedNoSeccomp)) {
+            if (!forceCompatRetry && usedFastPath) {
                 Log.w(TAG, "Early exit ($code) before first frame; retrying in PRoot compatibility mode")
                 val nextGen = bootGeneration.incrementAndGet()
                 guestPid = -1

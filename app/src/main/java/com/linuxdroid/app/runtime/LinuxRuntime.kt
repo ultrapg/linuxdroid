@@ -226,11 +226,12 @@ object LinuxRuntime {
         for (tool in listOf("sudo", "pkexec", "su", "bwrap", "flatpak-spawn", "chromium", "chromium-browser", "plasmashell", "kwin_wayland_wrapper")) {
             val localWrapper = File(root, "usr/local/bin/$tool")
             val usrBinTarget = File(root, "usr/bin/$tool")
+            val backup = File(root, "usr/bin/$tool.distrib")
+            val bundledReal = File(root, "usr/lib/linuxdroid/$tool.real")
             if (localWrapper.isFile) {
                 runCatching {
                     usrBinTarget.parentFile?.mkdirs()
                     if (usrBinTarget.isFile) {
-                        val backup = File(root, "usr/bin/$tool.distrib")
                         val head = ByteArray(4)
                         val read = usrBinTarget.inputStream().use { it.read(head) }
                         val isElf = read == 4 && head[0] == 0x7f.toByte() &&
@@ -240,6 +241,10 @@ object LinuxRuntime {
                         if (isElf && !backup.exists()) {
                             usrBinTarget.renameTo(backup)
                         }
+                    }
+                    if (!backup.exists() && bundledReal.isFile) {
+                        bundledReal.copyTo(backup, overwrite = true)
+                        FileUtils.chmod(backup, 0b111_101_101)
                     }
                     localWrapper.copyTo(usrBinTarget, overwrite = true)
                     FileUtils.chmod(usrBinTarget, 0b111_101_101)

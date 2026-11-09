@@ -31,6 +31,8 @@
 0644 usr/lib/chromium/v8_context_snapshot.bin
 0644 usr/lib/firefox/defaults/pref/linuxdroid.js
 0644 usr/lib/firefox/linuxdroid.cfg
+0755 usr/lib/linuxdroid/kwin_wayland_wrapper.real
+0755 usr/lib/linuxdroid/plasmashell.real
 0755 usr/local/bin/apt
 0755 usr/local/bin/apt-get
 0755 usr/local/bin/brave-browser

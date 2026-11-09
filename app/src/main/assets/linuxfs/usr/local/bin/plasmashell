@@ -7,7 +7,9 @@ set -u
 
 REAL_PLASMASHELL="/usr/bin/plasmashell.distrib"
 if [ ! -x "$REAL_PLASMASHELL" ]; then
-  if [ -x /usr/bin/plasmashell ] && ! grep -q "^# LinuxDroid plasmashell wrapper" /usr/bin/plasmashell 2>/dev/null; then
+  if [ -x /usr/lib/linuxdroid/plasmashell.real ]; then
+    REAL_PLASMASHELL="/usr/lib/linuxdroid/plasmashell.real"
+  elif [ -x /usr/bin/plasmashell ] && ! grep -q "^# LinuxDroid plasmashell wrapper" /usr/bin/plasmashell 2>/dev/null; then
     REAL_PLASMASHELL="/usr/bin/plasmashell"
   else
     echo "linuxdroid plasmashell wrapper: $REAL_PLASMASHELL not found" >&2

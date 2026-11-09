@@ -156,6 +156,10 @@ done
 
 # Ensure /usr/bin/plasmashell and /usr/bin/kwin_wayland_wrapper use the LinuxDroid wrappers even when invoked by full path
 for kde_tool in plasmashell kwin_wayland_wrapper; do
+  if [ ! -x "/usr/bin/${kde_tool}.distrib" ] && [ -x "/usr/lib/linuxdroid/${kde_tool}.real" ]; then
+    cp -a "/usr/lib/linuxdroid/${kde_tool}.real" "/usr/bin/${kde_tool}.distrib" 2>/dev/null || \
+      linuxdroid-root cp -a "/usr/lib/linuxdroid/${kde_tool}.real" "/usr/bin/${kde_tool}.distrib" 2>/dev/null || true
+  fi
   if [ -x "/usr/local/bin/$kde_tool" ] && [ -f "/usr/bin/$kde_tool" ]; then
     if ! grep -q "^# LinuxDroid $kde_tool" "/usr/bin/$kde_tool" 2>/dev/null; then
       (
