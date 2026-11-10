@@ -57,29 +57,42 @@ fi
 if [ "$#" -gt 0 ]; then
   case "$(basename "$1")" in
     blender|blender-launcher)
-      # Keep Turnip + Zink + Kopper hardware acceleration active and connect to the nested
-      # desktop compositor (wayland-1 on KDE Plasma, or Xwayland :0 on XFCE) — never unset
-      # WAYLAND_DISPLAY, because libwayland-client defaults to "wayland-0" (the Android host
-      # fullscreen compositor) whenever WAYLAND_DISPLAY is unset!
+      # Follow DroidDeck's desktop GPU pattern: run Blender on Xwayland (:0) with Turnip + Zink +
+      # Kopper (LIBGL_KOPPER_DRI2=true, MESA_VK_WSI_DEBUG=sw) and WAYLAND_DISPLAY=wayland-off +
+      # BL_FORCE_X11=1 so libblsession.so blocks GHOST_SystemWayland's wl_display_connect(nullptr)
+      # from ever connecting to wayland-0 (the Android fullscreen host compositor) or wayland-1
+      # (where KWIN_COMPOSE=Q lacks zwp_linux_dmabuf_v1 and causes Mesa EGL Wayland to fall back
+      # to swrast). On Xwayland (:0), Zink+Turnip Kopper renders with full Adreno hardware
+      # acceleration inside a decorated KWin window with Breeze titlebar and visible KDE taskbar.
       unset mesa_glthread ZINK_DEBUG ZINK_DESCRIPTORS
       export GALLIUM_THREAD=0
       export LIBDECOR_PLUGIN_DIR=/nonexistent
-      if [ -S "${XDG_RUNTIME_DIR:-/run/linuxdroid}/wayland-1" ]; then
-        export WAYLAND_DISPLAY=wayland-1
-        unset BL_FORCE_X11
-      elif [ -S "${XDG_RUNTIME_DIR:-/run/linuxdroid}/wayland-2" ]; then
-        export WAYLAND_DISPLAY=wayland-2
-        unset BL_FORCE_X11
-      elif [ -S /tmp/.X11-unix/X0 ] || [ -S /tmp/.X11-unix/X1 ]; then
-        if [ -z "${DISPLAY:-}" ]; then
-          if [ -S /tmp/.X11-unix/X0 ]; then
-            export DISPLAY=:0
-          else
-            export DISPLAY=:1
-          fi
+      if [ "${BLENDER_WAYLAND:-0}" != "1" ]; then
+        if [ ! -S /tmp/.X11-unix/X0 ] && [ ! -S /tmp/.X11-unix/X1 ] && \
+           { [ -S "${XDG_RUNTIME_DIR:-/run/linuxdroid}/wayland-1" ] || [ -S "${XDG_RUNTIME_DIR:-/run/linuxdroid}/wayland-2" ]; }; then
+          for _ in $(seq 1 30); do
+            [ -S /tmp/.X11-unix/X0 ] || [ -S /tmp/.X11-unix/X1 ] && break
+            sleep 0.1
+          done
         fi
-        export WAYLAND_DISPLAY=wayland-off
-        export BL_FORCE_X11=1
+        if [ -S /tmp/.X11-unix/X0 ] || [ -S /tmp/.X11-unix/X1 ]; then
+          if [ -z "${DISPLAY:-}" ]; then
+            if [ -S /tmp/.X11-unix/X0 ]; then
+              export DISPLAY=:0
+            else
+              export DISPLAY=:1
+            fi
+          fi
+          export WAYLAND_DISPLAY=wayland-off
+          export BL_FORCE_X11=1
+          export GDK_BACKEND=x11
+          export QT_QPA_PLATFORM=xcb
+          export SDL_VIDEODRIVER=x11
+        elif [ -S "${XDG_RUNTIME_DIR:-/run/linuxdroid}/wayland-1" ]; then
+          export WAYLAND_DISPLAY=wayland-1
+        elif [ -S "${XDG_RUNTIME_DIR:-/run/linuxdroid}/wayland-2" ]; then
+          export WAYLAND_DISPLAY=wayland-2
+        fi
       fi
       if [ -z "${XAUTHORITY:-}" ] || [ ! -r "${XAUTHORITY:-}" ]; then
         for xa in "${XDG_RUNTIME_DIR:-/run/linuxdroid}"/xauth_* "${HOME:-/home/linux}/.Xauthority"; do
@@ -103,7 +116,7 @@ if [ "$#" -gt 0 ]; then
       done
       if [ "$has_win_flag" = "0" ]; then
         bl_geom="$(python3 -c '
-import ctypes, os, subprocess
+import ctypes, os
 w, h = 0, 0
 try:
     w = int(os.environ.get("BL_WIDTH", "0"))
@@ -135,12 +148,12 @@ if w <= 0 or h <= 0:
 if w >= 640 and h >= 480:
     panel_h = 56
     title_h = 40
-    win_w = max(560, w - 64)
-    win_h = max(400, h - panel_h - title_h - 24)
+    win_w = max(560, w - 48)
+    win_h = max(400, h - panel_h - title_h - 16)
     sx = max(0, (w - win_w) // 2)
-    sy = panel_h + 8
+    sy = panel_h + 4
     print(f"{sx} {sy} {win_w} {win_h}")
-' 2>/dev/null || echo "32 64 1856 960")"
+' 2>/dev/null || echo "24 60 1872 968")"
         if [ -n "$bl_geom" ]; then
           # shellcheck disable=SC2086
           set -- "$1" -w -p $bl_geom "${@:2}"
@@ -153,7 +166,8 @@ if w >= 640 and h >= 480:
 import ctypes, os, subprocess, sys, time
 
 geom_parts = [int(x) for x in (sys.argv[1] if len(sys.argv) > 1 else "").split() if x.lstrip("-").isdigit()]
-sx, sy, win_w, win_h = geom_parts if len(geom_parts) == 4 else (12, 48, 0, 0)
+sx, sy, win_w, win_h = geom_parts if len(geom_parts) == 4 else (24, 60, 0, 0)
+top_y = 38
 
 try:
     x11 = ctypes.CDLL("libX11.so.6")
@@ -224,6 +238,8 @@ for attempt in range(45):
         root = x11.XDefaultRootWindow(dpy)
         net_wm_state = x11.XInternAtom(dpy, b"_NET_WM_STATE", 0)
         state_fs = x11.XInternAtom(dpy, b"_NET_WM_STATE_FULLSCREEN", 0)
+        state_max_h = x11.XInternAtom(dpy, b"_NET_WM_STATE_MAXIMIZED_HORZ", 0)
+        state_max_v = x11.XInternAtom(dpy, b"_NET_WM_STATE_MAXIMIZED_VERT", 0)
         motif_atom = x11.XInternAtom(dpy, b"_MOTIF_WM_HINTS", 0)
         for wid in wids:
             hints = MotifWmHints(flags=2, functions=1, decorations=1, input_mode=0, status=0)
@@ -231,22 +247,23 @@ for attempt in range(45):
                 dpy, wid, motif_atom, motif_atom, 32, 0,
                 ctypes.cast(ctypes.byref(hints), ctypes.c_void_p), 5
             )
-            ev = XClientMessageEvent()
-            ev.type = 33
-            ev.serial = 0
-            ev.send_event = 1
-            ev.display = dpy
-            ev.window = wid
-            ev.message_type = net_wm_state
-            ev.format = 32
-            ev.data[0] = 0  # _NET_WM_STATE_REMOVE
-            ev.data[1] = state_fs
-            ev.data[2] = 0
-            ev.data[3] = 1
-            ev.data[4] = 0
-            x11.XSendEvent(dpy, root, 0, (1 << 20) | (1 << 19), ctypes.byref(ev))
+            for atom1, atom2 in ((state_fs, 0), (state_max_h, state_max_v)):
+                ev = XClientMessageEvent()
+                ev.type = 33
+                ev.serial = 0
+                ev.send_event = 1
+                ev.display = dpy
+                ev.window = wid
+                ev.message_type = net_wm_state
+                ev.format = 32
+                ev.data[0] = 0  # _NET_WM_STATE_REMOVE
+                ev.data[1] = atom1
+                ev.data[2] = atom2
+                ev.data[3] = 1
+                ev.data[4] = 0
+                x11.XSendEvent(dpy, root, 0, (1 << 20) | (1 << 19), ctypes.byref(ev))
             if win_w >= 400 and win_h >= 300:
-                x11.XMoveResizeWindow(dpy, wid, sx, sy, win_w, win_h)
+                x11.XMoveResizeWindow(dpy, wid, sx, top_y, win_w, win_h)
         x11.XFlush(dpy)
     finally:
         x11.XCloseDisplay(dpy)

@@ -46,6 +46,7 @@ typedef int64_t (*kopper_swap_buffers_fn)(void *drawable, uint32_t flush_flags);
 typedef int64_t (*kopper_swap_buffers_damage_fn)(void *drawable, uint32_t flush_flags, int nrects, const int *rects);
 typedef void (*wl_egl_window_resize_fn)(void *win, int width, int height, int dx, int dy);
 typedef void *(*wl_display_connect_fn)(const char *name);
+typedef void *(*wl_display_connect_to_fd_fn)(int fd);
 
 struct bl_lib_match_ctx {
   const char *substr;
@@ -344,6 +345,37 @@ static int is_host_wayland_compositor_client(void) {
   return 0;
 }
 
+static int is_force_x11_client(const char *name) {
+  const char *force_x11 = getenv("BL_FORCE_X11");
+  const char *env_wl = getenv("WAYLAND_DISPLAY");
+  const char *effective = (name && name[0]) ? name : env_wl;
+
+  if ((force_x11 && strcmp(force_x11, "1") == 0) ||
+      (effective && (strcmp(effective, "wayland-off") == 0 || strcmp(effective, "none") == 0))) {
+    return 1;
+  }
+
+  int has_x11 = is_socket_path("/tmp/.X11-unix/X0") || is_socket_path("/tmp/.X11-unix/X1");
+  const char *prog = program_invocation_short_name;
+  if (prog && (strcmp(prog, "blender") == 0 || strcmp(prog, "blender-launcher") == 0)) {
+    const char *bl_wl = getenv("BLENDER_WAYLAND");
+    if ((!bl_wl || strcmp(bl_wl, "1") != 0) && has_x11) {
+      return 1;
+    }
+  }
+
+  /* If a client explicitly unset WAYLAND_DISPLAY while DISPLAY and X11 socket are active,
+   * do not let wl_display_connect(NULL) implicitly fall back to "wayland-0". */
+  if ((!name || !name[0]) && (!env_wl || !env_wl[0])) {
+    const char *dpy = getenv("DISPLAY");
+    if (dpy && dpy[0] && has_x11 && !is_host_wayland_compositor_client()) {
+      return 1;
+    }
+  }
+
+  return 0;
+}
+
 void *wl_display_connect(const char *name) {
   static wl_display_connect_fn real_fn = NULL;
   if (!real_fn) {
@@ -354,15 +386,13 @@ void *wl_display_connect(const char *name) {
     return NULL;
   }
 
-  const char *force_x11 = getenv("BL_FORCE_X11");
-  const char *env_wl = getenv("WAYLAND_DISPLAY");
-  const char *effective = (name && name[0]) ? name : env_wl;
-
-  if ((force_x11 && strcmp(force_x11, "1") == 0) ||
-      (effective && (strcmp(effective, "wayland-off") == 0 || strcmp(effective, "none") == 0))) {
+  if (is_force_x11_client(name)) {
     errno = ENOENT;
     return NULL;
   }
+
+  const char *env_wl = getenv("WAYLAND_DISPLAY");
+  const char *effective = (name && name[0]) ? name : env_wl;
 
   if (!is_host_wayland_compositor_client()) {
     const char *rt = getenv("XDG_RUNTIME_DIR");
@@ -392,5 +422,21 @@ void *wl_display_connect(const char *name) {
   }
 
   return real_fn(name);
+}
+
+void *wl_display_connect_to_fd(int fd) {
+  static wl_display_connect_to_fd_fn real_fn = NULL;
+  if (!real_fn) {
+    real_fn = (wl_display_connect_to_fd_fn)resolve_lib_symbol("libwayland-client.so", "libwayland-client.so.0", "wl_display_connect_to_fd", (void *)wl_display_connect_to_fd);
+  }
+  if (!real_fn) {
+    errno = ENOSYS;
+    return NULL;
+  }
+  if (is_force_x11_client(NULL)) {
+    errno = ENOENT;
+    return NULL;
+  }
+  return real_fn(fd);
 }
 

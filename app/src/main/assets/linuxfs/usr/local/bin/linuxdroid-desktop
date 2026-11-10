@@ -746,6 +746,7 @@ update_ini("kwinrc", {
 blender_rule = {
     "Description": "LinuxDroid Blender Windowed Desktop Mode",
     "wmclass": "blender",
+    "wmclasscomplete": "false",
     "wmclassmatch": "2",
     "types": "65535",
     "fullscreen": "false",

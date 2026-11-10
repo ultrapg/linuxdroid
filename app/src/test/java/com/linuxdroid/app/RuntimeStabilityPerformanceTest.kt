@@ -480,4 +480,24 @@ with tempfile.TemporaryDirectory(prefix="ld-taskbar-test-") as tmp:
         assertTrue("Taskbar migration test timed out:\n$output", finished)
         assertEquals("Taskbar migration test failed:\n$output", 0, proc.exitValue())
     }
+
+    @Test
+    fun blenderDesktopWindowedXwaylandAndHostWaylandProtection() {
+        val rootDir = if (File("tools/linuxfs/preload/wayland_kopper.c").isFile) File(".") else File("..")
+        val preloadSrc = File(rootDir, "tools/linuxfs/preload/wayland_kopper.c").readText()
+        assertTrue(preloadSrc.contains("is_force_x11_client"))
+        assertTrue(preloadSrc.contains("wl_display_connect_to_fd"))
+        assertTrue(preloadSrc.contains("wayland-off"))
+
+        val linuxfs = findAssetsLinuxfs()
+        val gpuScript = File(linuxfs, "usr/local/bin/linuxdroid-gpu").readText()
+        assertTrue(gpuScript.contains("export WAYLAND_DISPLAY=wayland-off"))
+        assertTrue(gpuScript.contains("export BL_FORCE_X11=1"))
+        assertTrue(gpuScript.contains("top_y = 38"))
+        assertTrue(gpuScript.contains("x11.XMoveResizeWindow(dpy, wid, sx, top_y, win_w, win_h)"))
+
+        val compositorSrc = File(rootDir, "app/src/main/cpp/waylandcomp/src/compositor.c").readText()
+        assertTrue(compositorSrc.contains("is_desktop_compositor_surface"))
+        assertTrue(compositorSrc.contains("s->keep_on_top = 1;"))
+    }
 }

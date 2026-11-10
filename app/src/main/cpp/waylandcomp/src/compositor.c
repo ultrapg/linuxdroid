@@ -601,10 +601,23 @@ static void raise_kept_on_top(void) {
 
 static void send_toplevel_configure(struct surface *s);
 
+static int is_desktop_compositor_surface(const struct surface *s) {
+    if (!s || !s->resource) return 0;
+    const char *prog = client_name(wl_resource_get_client(s->resource));
+    if (!prog) return 0;
+    return strcmp(prog, "kwin_wayland") == 0 ||
+           strcmp(prog, "kwin_wayland_wrapper") == 0 ||
+           strcmp(prog, "Xwayland") == 0 ||
+           strcmp(prog, "weston") == 0;
+}
+
 static void map_toplevel(struct surface *s) {
     int w, h;
     if (s->mapped) return;
     s->mapped = 1;
+    if (is_desktop_compositor_surface(s)) {
+        s->keep_on_top = 1;
+    }
     surface_size(s, &w, &h);
     {
         char name[160];
@@ -614,7 +627,10 @@ static void map_toplevel(struct surface *s) {
     }
     wl_list_insert(g_toplevels.prev, &s->toplevel_link);
     raise_kept_on_top();
-    if (!g_desktop) g_key_target = s;
+    if (!g_desktop) {
+        struct surface *top = wl_list_empty(&g_toplevels) ? s : wl_container_of(g_toplevels.prev, top, toplevel_link);
+        g_key_target = top;
+    }
     apply_zorder();
     publish_query_state();
     if (s->xdg_toplevel && s->xdg_surface && g_output_w > 0 && g_output_h > 0 &&
