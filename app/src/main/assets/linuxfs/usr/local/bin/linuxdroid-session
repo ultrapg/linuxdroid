@@ -154,7 +154,21 @@ exec /usr/local/bin/linuxdroid-gpu-launch $gpu_app \"\$@\""
     linuxdroid-root sh -c "printf '%s\n' '$gpu_body' > /usr/local/bin/$gpu_app && chmod 755 /usr/local/bin/$gpu_app" 2>/dev/null || true
 done
 
-# Ensure /usr/bin/plasmashell and /usr/bin/kwin_wayland_wrapper use the LinuxDroid wrappers even when invoked by full path
+# Ensure /usr/bin/plasmashell, /usr/bin/kwin_wayland_wrapper, and /usr/bin/chromium* use the LinuxDroid wrappers even when invoked by full path
+for ch_bin in /usr/bin/chromium /usr/bin/chromium-browser; do
+  if [ -x "$ch_bin" ] && [ -x /usr/local/bin/chromium ] && ! grep -q "LinuxDroid: Chromium wrapper" "$ch_bin" 2>/dev/null; then
+    if [ ! -e "${ch_bin}.distrib" ]; then
+      cp -a "$ch_bin" "${ch_bin}.distrib" 2>/dev/null || linuxdroid-root cp -a "$ch_bin" "${ch_bin}.distrib" 2>/dev/null || true
+    fi
+    cp -f /usr/local/bin/chromium "$ch_bin" 2>/dev/null || linuxdroid-root cp -f /usr/local/bin/chromium "$ch_bin" 2>/dev/null || true
+  fi
+done
+for ch_desk in /usr/share/applications/chromium.desktop /usr/share/applications/chromium-browser.desktop; do
+  if [ -f "$ch_desk" ] && ! grep -q "^Exec=/usr/local/bin/chromium" "$ch_desk" 2>/dev/null; then
+    sed -i -E 's#^Exec=[^ ]*chromium(-browser)?#Exec=/usr/local/bin/chromium#' "$ch_desk" 2>/dev/null || \
+      linuxdroid-root sed -i -E 's#^Exec=[^ ]*chromium(-browser)?#Exec=/usr/local/bin/chromium#' "$ch_desk" 2>/dev/null || true
+  fi
+done
 for kde_tool in plasmashell kwin_wayland_wrapper; do
   if [ -x "/usr/lib/linuxdroid/${kde_tool}.real" ]; then
     if [ ! -x "/usr/bin/${kde_tool}.distrib" ] || grep -q "^# LinuxDroid $kde_tool" "/usr/bin/${kde_tool}.distrib" 2>/dev/null; then

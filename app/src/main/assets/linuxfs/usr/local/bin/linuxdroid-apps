@@ -346,12 +346,21 @@ install_chromium() {
   apt_install chromium
   sudo sh -c '
     mkdir -p /etc/chromium.d
-    printf "%s\n" "export CHROMIUM_FLAGS=\"\$CHROMIUM_FLAGS --no-sandbox --no-zygote --disable-gpu-sandbox --disable-dev-shm-usage --ozone-platform-hint=auto\"" \
+    printf "%s\n" "export CHROMIUM_FLAGS=\"\$CHROMIUM_FLAGS --no-sandbox --no-zygote --disable-gpu-sandbox --disable-dev-shm-usage\"" \
       > /etc/chromium.d/linuxdroid
-    f=/usr/share/applications/chromium.desktop
-    if [ -f "$f" ] && ! grep -q -- "--no-sandbox" "$f"; then
-      sed -i "s#^Exec=\([^ ]*chromium[^ ]*\)#Exec=\1 --no-sandbox --no-zygote --disable-gpu-sandbox --disable-dev-shm-usage --ozone-platform-hint=auto#" "$f"
-    fi
+    for ch_bin in /usr/bin/chromium /usr/bin/chromium-browser; do
+      if [ -x "$ch_bin" ] && [ -x /usr/local/bin/chromium ] && ! grep -q "LinuxDroid: Chromium wrapper" "$ch_bin" 2>/dev/null; then
+        if [ ! -e "${ch_bin}.distrib" ]; then
+          cp -a "$ch_bin" "${ch_bin}.distrib" 2>/dev/null || true
+        fi
+        cp -f /usr/local/bin/chromium "$ch_bin" 2>/dev/null || true
+      fi
+    done
+    for f in /usr/share/applications/chromium.desktop /usr/share/applications/chromium-browser.desktop; do
+      if [ -f "$f" ]; then
+        sed -i -E "s#^Exec=[^ ]*chromium(-browser)?#Exec=/usr/local/bin/chromium#" "$f"
+      fi
+    done
   '
   /usr/local/bin/linuxdroid-default-browser --force || true
   echo "==> Chromium installed and set as the default browser."

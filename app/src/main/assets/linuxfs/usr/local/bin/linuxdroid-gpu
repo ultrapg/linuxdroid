@@ -17,11 +17,11 @@ fi
 unset MESA_NO_ERROR
 
 if [ "${LINUXDROID_GPU_ACTIVE:-}" = "turnip" ] || [ "${LINUXDROID_GPU_ACTIVE:-}" = "unified" ]; then
-  case "${VK_ICD_FILENAMES:-}${VK_DRIVER_FILES:-}" in
-    *lvp_icd*) ;;
-    *) unset LIBGL_ALWAYS_SOFTWARE ;;
-  esac
   if [ "${LINUXDROID_GPU_ACTIVE:-}" = "turnip" ]; then
+    case "${VK_ICD_FILENAMES:-}${VK_DRIVER_FILES:-}" in
+      *lvp_icd*) ;;
+      *) unset LIBGL_ALWAYS_SOFTWARE ;;
+    esac
     # Never override GL version to 4.6 without COMPAT; Mesa forces Core Profile and breaks
     # QWaylandBlitter / Qt Quick / legacy GL shaders. Zink + Turnip natively supports 4.6 Compat.
     unset MESA_GL_VERSION_OVERRIDE MESA_GLSL_VERSION_OVERRIDE
@@ -30,6 +30,15 @@ if [ "${LINUXDROID_GPU_ACTIVE:-}" = "turnip" ] || [ "${LINUXDROID_GPU_ACTIVE:-}"
     export MESA_VK_WSI_DEBUG=sw
     export MESA_VK_WSI_PRESENT_MODE=mailbox
     export QT_WAYLAND_FORCE_NONBLOCKING_SWAP_SUPPORT=1
+  elif [ "${LINUXDROID_GPU_ACTIVE:-}" = "unified" ]; then
+    # On Mali / Immortalis / Exynos / MediaTek / Tensor without a Linux /dev/dri/renderD128 node,
+    # Mesa's virpipe driver (vtest socket) is loaded via Mesa's swrast loader path, which requires
+    # LIBGL_ALWAYS_SOFTWARE=1 whenever /dev/dri/renderD128 is absent.
+    if [ -c /dev/dri/renderD128 ] && [ -r /dev/dri/renderD128 ] && [ -w /dev/dri/renderD128 ]; then
+      unset LIBGL_ALWAYS_SOFTWARE
+    elif [ "${GALLIUM_DRIVER:-}" = "virpipe" ]; then
+      export LIBGL_ALWAYS_SOFTWARE=1
+    fi
   fi
   export MOZ_WEBRENDER=1
   export mesa_glthread=true
@@ -319,7 +328,22 @@ PY
       ;;
     chromium|chromium-browser|google-chrome|google-chrome-stable|brave-browser)
       export GALLIUM_THREAD=0
-      set -- "$1" --ozone-platform=wayland --in-process-gpu --disable-gpu-watchdog --disable-vulkan "${@:2}"
+      # ANGLE gles-egl requests an OpenGL ES 3.0/2.0 context; desktop MESA_GL_VERSION_OVERRIDE=4.3COMPAT
+      # overrides the GLES version string and causes ANGLE context initialization to fail on Mali/VirGL.
+      unset MESA_GL_VERSION_OVERRIDE MESA_GLSL_VERSION_OVERRIDE
+      if [ "${LINUXDROID_GPU_ACTIVE:-}" = "turnip" ] && \
+         { [ -S "${XDG_RUNTIME_DIR:-/run/linuxdroid}/wayland-1" ] || [ -S "${XDG_RUNTIME_DIR:-/run/linuxdroid}/wayland-2" ]; }; then
+        set -- "$1" --ozone-platform=wayland --in-process-gpu --disable-gpu-watchdog --disable-vulkan "${@:2}"
+      else
+        if [ -S /tmp/.X11-unix/X0 ] || [ -S /tmp/.X11-unix/X1 ]; then
+          export DISPLAY="${DISPLAY:-:0}"
+          export WAYLAND_DISPLAY=wayland-off
+          export BL_FORCE_X11=1
+          set -- "$1" --ozone-platform=x11 --disable-gpu-watchdog --disable-vulkan "${@:2}"
+        else
+          set -- "$1" --ozone-platform=wayland --disable-gpu-watchdog --disable-vulkan "${@:2}"
+        fi
+      fi
       ;;
     firefox)
       export MOZ_ENABLE_WAYLAND=1 MOZ_WEBRENDER=1 GALLIUM_THREAD=0

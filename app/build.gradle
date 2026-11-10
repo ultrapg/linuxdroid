@@ -23,8 +23,8 @@ android {
         // Target SDK 28 preserves Android SELinux untrusted_app_27 execution & background workstation permissions
         // required by PRoot, FEX-Emu JIT, PulseAudio, and VirGL/Venus render server across Android 14-16+.
         targetSdk 28
-        versionCode 65
-        versionName "1.0.64"
+        versionCode 66
+        versionName "1.0.65"
 
         buildConfigField "String", "CATALOG_URL", "\"https://github.com/ultrapg/linuxdroid/releases/latest/download/catalog.json\""
         buildConfigField "String", "GITHUB_REPO", "\"ultrapg/linuxdroid\""

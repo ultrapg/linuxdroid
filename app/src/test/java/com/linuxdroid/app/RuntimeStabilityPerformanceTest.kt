@@ -511,5 +511,10 @@ with tempfile.TemporaryDirectory(prefix="ld-taskbar-test-") as tmp:
         val compositorSrc = File(rootDir, "app/src/main/cpp/waylandcomp/src/compositor.c").readText()
         assertTrue(compositorSrc.contains("is_desktop_compositor_surface"))
         assertTrue(compositorSrc.contains("s->keep_on_top = 1;"))
+
+        val chromiumScript = File(linuxfs, "usr/local/bin/chromium").readText()
+        assertTrue(chromiumScript.contains("unset MESA_GL_VERSION_OVERRIDE MESA_GLSL_VERSION_OVERRIDE"))
+        assertTrue(chromiumScript.contains("flags+=(--ozone-platform=x11)"))
+        assertTrue(gpuScript.contains("elif [ \"\${GALLIUM_DRIVER:-}\" = \"virpipe\" ]; then"))
     }
 }

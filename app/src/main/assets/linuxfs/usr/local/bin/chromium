@@ -40,10 +40,23 @@ case "${LANG:-}" in
 esac
 mkdir -p /tmp/chromium-crashpad 2>/dev/null || true
 
+if [ -r /etc/linuxdroid/gpu.env ]; then
+  set -a
+  # shellcheck disable=SC1091
+  . /etc/linuxdroid/gpu.env
+  set +a
+fi
+if [ -r "${XDG_RUNTIME_DIR:-/run/linuxdroid}/desktop.env" ]; then
+  # shellcheck disable=SC1090
+  . "${XDG_RUNTIME_DIR:-/run/linuxdroid}/desktop.env"
+fi
+# ANGLE gles-egl requests an OpenGL ES context; desktop GL overrides break ANGLE initialization on Mali/VirGL.
+unset MESA_GL_VERSION_OVERRIDE MESA_GLSL_VERSION_OVERRIDE
+
 user_args=()
 for arg in "$@"; do
   case "$arg" in
-    --no-sandbox|--no-zygote|--disable-gpu-sandbox|--disable-dev-shm-usage|--in-process-gpu|--disable-gpu-watchdog|--disable-vulkan|--ozone-platform-hint=*)
+    --no-sandbox|--no-zygote|--disable-gpu-sandbox|--disable-dev-shm-usage|--in-process-gpu|--disable-gpu-watchdog|--disable-vulkan|--ozone-platform-hint=*|--ozone-platform=*)
       ;;
     *)
       user_args+=("$arg")
@@ -56,7 +69,6 @@ flags=(
   --no-zygote
   --disable-gpu-sandbox
   --disable-dev-shm-usage
-  --in-process-gpu
   --disable-gpu-watchdog
   --disable-vulkan
   --disable-features=Vulkan,DefaultANGLEVulkan,VulkanFromANGLE,GlobalShortcutsPortal,DesktopCapturePipeWire,WebRtcPipeWireCapturer,AudioServiceOutOfProcess
@@ -64,10 +76,25 @@ flags=(
   --no-first-run
   --no-default-browser-check
   --lang=en-US
-  --ozone-platform-hint=auto
   --use-gl=angle
   --use-angle=gles-egl
 )
+
+if [ "${LINUXDROID_GPU_ACTIVE:-}" = "turnip" ]; then
+  flags+=(--in-process-gpu --ozone-platform-hint=auto)
+else
+  # On Mali / VirGL / software, route to Xwayland (:0) when available so Mesa swrast/virpipe
+  # presents via X11 SHM without needing zwp_linux_dmabuf_v1 on nested KWin QPainter (wayland-1),
+  # and keep the GPU in a separate process so Chromium can cleanly fall back if VirGL fails.
+  if [ -S /tmp/.X11-unix/X0 ] || [ -S /tmp/.X11-unix/X1 ]; then
+    export DISPLAY="${DISPLAY:-:0}"
+    export WAYLAND_DISPLAY=wayland-off
+    export BL_FORCE_X11=1
+    flags+=(--ozone-platform=x11)
+  else
+    flags+=(--ozone-platform-hint=auto)
+  fi
+fi
 
 if [ "${BL_GPU_APPS:-0}" = "1" ]; then
   flags+=(--ignore-gpu-blocklist --enable-gpu-rasterization --enable-zero-copy)
@@ -76,4 +103,7 @@ if [ "${BL_GPU_APPS:-0}" = "1" ]; then
   fi
 fi
 
+export LIBGL_ALWAYS_SOFTWARE=1
+export GALLIUM_DRIVER=llvmpipe
+unset MESA_LOADER_DRIVER_OVERRIDE LIBGL_KOPPER_DRI2
 exec "$real_bin" "${flags[@]}" "${user_args[@]}"
