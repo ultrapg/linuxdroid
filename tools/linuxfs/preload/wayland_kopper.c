@@ -3,8 +3,13 @@
 #include <errno.h>
 #include <link.h>
 #include <stdint.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
+#include <unistd.h>
+
+extern char *program_invocation_short_name;
 
 /*
  * Wayland Kopper + Zink WSI integration fix for Mesa 26.2 (libEGL_mesa.so.0 + libgallium.so):
@@ -40,6 +45,7 @@ typedef int (*dri_bind_context_fn)(void *ctx, void *draw, void *read);
 typedef int64_t (*kopper_swap_buffers_fn)(void *drawable, uint32_t flush_flags);
 typedef int64_t (*kopper_swap_buffers_damage_fn)(void *drawable, uint32_t flush_flags, int nrects, const int *rects);
 typedef void (*wl_egl_window_resize_fn)(void *win, int width, int height, int dx, int dy);
+typedef void *(*wl_display_connect_fn)(const char *name);
 
 struct bl_lib_match_ctx {
   const char *substr;
@@ -305,3 +311,86 @@ void wl_egl_window_resize(void *win, int width, int height, int dx, int dy) {
     }
   }
 }
+
+static int is_socket_path(const char *path) {
+  struct stat st;
+  return path && stat(path, &st) == 0 && S_ISSOCK(st.st_mode);
+}
+
+static int is_host_wayland_compositor_client(void) {
+  const char *allow = getenv("BL_ALLOW_HOST_WAYLAND");
+  if (allow && strcmp(allow, "1") == 0) {
+    return 1;
+  }
+  const char *prog = program_invocation_short_name;
+  if (!prog || !prog[0]) {
+    return 0;
+  }
+  if (strcmp(prog, "kwin_wayland") == 0 ||
+      strcmp(prog, "kwin_wayland_wrapper") == 0 ||
+      strcmp(prog, "weston") == 0 ||
+      strcmp(prog, "linuxdroid-ime") == 0) {
+    return 1;
+  }
+  if (strcmp(prog, "Xwayland") == 0) {
+    const char *rt = getenv("XDG_RUNTIME_DIR");
+    if (!rt || !rt[0]) rt = "/run/linuxdroid";
+    char wl1[512];
+    snprintf(wl1, sizeof(wl1), "%s/wayland-1", rt);
+    if (!is_socket_path(wl1)) {
+      return 1;
+    }
+  }
+  return 0;
+}
+
+void *wl_display_connect(const char *name) {
+  static wl_display_connect_fn real_fn = NULL;
+  if (!real_fn) {
+    real_fn = (wl_display_connect_fn)resolve_lib_symbol("libwayland-client.so", "libwayland-client.so.0", "wl_display_connect", (void *)wl_display_connect);
+  }
+  if (!real_fn) {
+    errno = ENOSYS;
+    return NULL;
+  }
+
+  const char *force_x11 = getenv("BL_FORCE_X11");
+  const char *env_wl = getenv("WAYLAND_DISPLAY");
+  const char *effective = (name && name[0]) ? name : env_wl;
+
+  if ((force_x11 && strcmp(force_x11, "1") == 0) ||
+      (effective && (strcmp(effective, "wayland-off") == 0 || strcmp(effective, "none") == 0))) {
+    errno = ENOENT;
+    return NULL;
+  }
+
+  if (!is_host_wayland_compositor_client()) {
+    const char *rt = getenv("XDG_RUNTIME_DIR");
+    if (!rt || !rt[0]) rt = "/run/linuxdroid";
+    char wl1[512];
+    char wl2[512];
+    snprintf(wl1, sizeof(wl1), "%s/wayland-1", rt);
+    snprintf(wl2, sizeof(wl2), "%s/wayland-2", rt);
+    int has_wl1 = is_socket_path(wl1);
+    int has_wl2 = !has_wl1 && is_socket_path(wl2);
+
+    if (!effective || !effective[0] || strcmp(effective, "wayland-0") == 0 ||
+        strstr(effective, "/wayland-0") != NULL) {
+      if (has_wl1) {
+        setenv("WAYLAND_DISPLAY", "wayland-1", 1);
+        return real_fn("wayland-1");
+      }
+      if (has_wl2) {
+        setenv("WAYLAND_DISPLAY", "wayland-2", 1);
+        return real_fn("wayland-2");
+      }
+      if (is_socket_path("/tmp/.X11-unix/X0") || is_socket_path("/tmp/.X11-unix/X1")) {
+        errno = ENOENT;
+        return NULL;
+      }
+    }
+  }
+
+  return real_fn(name);
+}
+

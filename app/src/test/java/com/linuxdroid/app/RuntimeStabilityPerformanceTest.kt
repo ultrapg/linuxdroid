@@ -103,6 +103,10 @@ class RuntimeStabilityPerformanceTest {
             "libblsession.so must export drmGetDeviceFromDevId() so KWin 5.27 WaylandEglBackend devId=0 resolves to renderD128",
             funcs.contains("drmGetDeviceFromDevId"),
         )
+        assertTrue(
+            "libblsession.so must export wl_display_connect() so desktop apps route to nested KWin wayland-1 instead of host wayland-0",
+            funcs.contains("wl_display_connect"),
+        )
     }
 
     @Test
@@ -315,6 +319,24 @@ class RuntimeStabilityPerformanceTest {
         assertTrue(
             "XFCE taskbar migration must use xfce-launchers-v5 stamp",
             desktopSh.contains("xfce-launchers-v5"),
+        )
+        assertFalse(
+            "linuxdroid-desktop must not unset WAYLAND_DISPLAY (which causes libwayland-client to default to host wayland-0)",
+            desktopSh.contains("unset WAYLAND_DISPLAY"),
+        )
+        assertTrue(
+            "linuxdroid-desktop Xwayland mode must set WAYLAND_DISPLAY=wayland-off and BL_FORCE_X11=1",
+            desktopSh.contains("export WAYLAND_DISPLAY=\"wayland-off\"") && desktopSh.contains("export BL_FORCE_X11=1"),
+        )
+
+        val gpuSh = File(assetsRoot, "usr/local/bin/linuxdroid-gpu").readText()
+        assertFalse(
+            "linuxdroid-gpu must never unset WAYLAND_DISPLAY (unsetting WAYLAND_DISPLAY causes wl_display_connect(NULL) to connect to host fullscreen wayland-0)",
+            gpuSh.contains("unset WAYLAND_DISPLAY"),
+        )
+        assertTrue(
+            "linuxdroid-gpu must route Blender to wayland-1 when nested KWin Wayland is active",
+            gpuSh.contains("export WAYLAND_DISPLAY=wayland-1"),
         )
     }
 

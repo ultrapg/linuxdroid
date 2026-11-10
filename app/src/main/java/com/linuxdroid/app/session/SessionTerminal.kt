@@ -77,6 +77,7 @@ object SessionTerminal {
         }
         cmd.add("WAYLAND_DISPLAY=$guestWaylandDisplay")
         cmd.add("DISPLAY=:0")
+        cmd.add("BL_GPU_APPS=${if (SessionPrefs.gpuApps(context)) "1" else "0"}")
         cmd.add("PULSE_SERVER=unix:${File(context.filesDir, "pulseaudio/PS0").absolutePath}")
         cmd.add("BL_CPU_COUNT=$effectiveCores")
         if (affinityCores.isNotEmpty()) {

@@ -30,6 +30,16 @@ HEIGHT="${BL_HEIGHT:-1080}"
 PIXEL_WIDTH="${BL_PIXEL_WIDTH:-$WIDTH}"
 PIXEL_HEIGHT="${BL_PIXEL_HEIGHT:-$HEIGHT}"
 SCALE="${BL_SCALE:-1}"
+mkdir -p "${XDG_RUNTIME_DIR:-/run/linuxdroid}" 2>/dev/null || true
+cat > "${XDG_RUNTIME_DIR:-/run/linuxdroid}/desktop.env" <<EOF
+export BL_WIDTH="${WIDTH}"
+export BL_HEIGHT="${HEIGHT}"
+export BL_PIXEL_WIDTH="${PIXEL_WIDTH}"
+export BL_PIXEL_HEIGHT="${PIXEL_HEIGHT}"
+export BL_SCALE="${SCALE}"
+export BL_GPU_APPS="${BL_GPU_APPS:-1}"
+export BL_GPU_DESKTOP="${BL_GPU_DESKTOP:-0}"
+EOF
 
 boot_step() {
   local step_num="$1"
@@ -647,12 +657,12 @@ X-KDE-Wayland-VirtualKeyboard=true
 ENTRY
 
   # Configure all KDE INI settings in a single fast Python pass instead of 19 separate kwriteconfig5 processes
-  python3 -B - "$HOME/.config" "$SCALE" "${BL_UI_SCALE:-$SCALE}" "${LANG:-C.UTF-8}" "$HOME/.local/share/applications/linuxdroid-ime.desktop" "$HOME/.local/share/linuxdroid/desktop-tuned-v1" <<'PY' 2>/dev/null || true
+  python3 -B - "$HOME/.config" "$SCALE" "${BL_UI_SCALE:-$SCALE}" "${LANG:-C.UTF-8}" "$HOME/.local/share/applications/linuxdroid-ime.desktop" "$HOME/.local/share/linuxdroid/desktop-tuned-v1" "$WIDTH" "$HEIGHT" <<'PY' 2>/dev/null || true
 import os
 import re
 import sys
 
-cfg_dir, scale_s, ui_scale_s, lang, ime_desktop, tuned_stamp = sys.argv[1:7]
+cfg_dir, scale_s, ui_scale_s, lang, ime_desktop, tuned_stamp, width_s, height_s = sys.argv[1:9]
 os.makedirs(cfg_dir, exist_ok=True)
 try:
     scale = float(scale_s)
@@ -662,6 +672,16 @@ try:
     ui_scale = float(ui_scale_s)
 except Exception:
     ui_scale = scale
+try:
+    disp_w = max(640, int(width_s))
+    disp_h = max(480, int(height_s))
+except Exception:
+    disp_w, disp_h = 1920, 1080
+
+win_w = max(560, disp_w - 64)
+win_h = max(400, disp_h - 120)
+max_w = disp_w
+max_h = max(420, disp_h - 48)
 
 cursor_px = str(max(24, int(round(24.0 * scale))))
 font_dpi = str(int(round(96.0 * ui_scale / scale)) if abs(ui_scale - scale) > 0.01 else 0)
@@ -723,36 +743,34 @@ update_ini("kwinrc", {
     "org.kde.kdecoration2": {"library": "org.kde.breeze", "NoPlugin": "false"},
     "Plugins": {"linuxdroidwindowedEnabled": "true"},
 })
+blender_rule = {
+    "Description": "LinuxDroid Blender Windowed Desktop Mode",
+    "wmclass": "blender",
+    "wmclassmatch": "2",
+    "types": "65535",
+    "fullscreen": "false",
+    "fullscreenrule": "2",
+    "noborder": "false",
+    "noborderrule": "2",
+    "maximizehoriz": "false",
+    "maximizehorizrule": "3",
+    "maximizevert": "false",
+    "maximizevertrule": "3",
+    "size": f"{win_w},{win_h}",
+    "sizerule": "3",
+    "maxsize": f"{max_w},{max_h}",
+    "maxsizerule": "2",
+    "placement": "4",
+    "placementrule": "2",
+    "strictgeometry": "false",
+    "strictgeometryrule": "2",
+    "ignoregeometry": "true",
+    "ignoregeometryrule": "2",
+}
 update_ini("kwinrulesrc", {
-    "General": {"count": "1", "rules": "linuxdroid-blender"},
-    "linuxdroid-blender": {
-        "Description": "LinuxDroid Blender Windowed Desktop Mode",
-        "wmclass": "blender",
-        "wmclassmatch": "2",
-        "types": "65535",
-        "fullscreen": "false",
-        "fullscreenrule": "2",
-        "noborder": "false",
-        "noborderrule": "2",
-        "strictgeometry": "false",
-        "strictgeometryrule": "2",
-        "ignoregeometry": "true",
-        "ignoregeometryrule": "3",
-    },
-    "1": {
-        "Description": "LinuxDroid Blender Windowed Desktop Mode",
-        "wmclass": "blender",
-        "wmclassmatch": "2",
-        "types": "65535",
-        "fullscreen": "false",
-        "fullscreenrule": "2",
-        "noborder": "false",
-        "noborderrule": "2",
-        "strictgeometry": "false",
-        "strictgeometryrule": "2",
-        "ignoregeometry": "true",
-        "ignoregeometryrule": "3",
-    },
+    "General": {"count": "1", "rules": "1"},
+    "linuxdroid-blender": blender_rule,
+    "1": blender_rule,
 })
 update_ini("plasma-localerc", {"Formats": {"LANG": lang}})
 kcminput_updates = {"Mouse": {"cursorSize": cursor_px}}
@@ -799,7 +817,8 @@ PY
           wl_nested_sock="wayland-2"
         fi
         if [ "$wl1_ready" = "1" ]; then
-          WAYLAND_DISPLAY="$wl_nested_sock" DISPLAY=":0" dbus-update-activation-environment WAYLAND_DISPLAY DISPLAY >/dev/null 2>&1 || true
+          WAYLAND_DISPLAY="$wl_nested_sock" DISPLAY=":0" BL_WIDTH="$WIDTH" BL_HEIGHT="$HEIGHT" BL_SCALE="$SCALE" BL_GPU_APPS="${BL_GPU_APPS:-1}" \
+            dbus-update-activation-environment WAYLAND_DISPLAY DISPLAY BL_WIDTH BL_HEIGHT BL_SCALE BL_GPU_APPS >/dev/null 2>&1 || true
           for kamd in /usr/lib/*/libexec/kactivitymanagerd /usr/lib/kactivitymanagerd /usr/libexec/kactivitymanagerd; do
             if [ -x "$kamd" ]; then
               WAYLAND_DISPLAY="$wl_nested_sock" "$kamd" >/dev/null 2>&1 &
@@ -1076,7 +1095,8 @@ run_xwayland_desktop() {
   fi
 
   export DISPLAY="$disp"
-  unset WAYLAND_DISPLAY
+  export WAYLAND_DISPLAY="wayland-off"
+  export BL_FORCE_X11=1
   export XDG_SESSION_TYPE=x11
   export GDK_BACKEND=x11
   export QT_QPA_PLATFORM=xcb

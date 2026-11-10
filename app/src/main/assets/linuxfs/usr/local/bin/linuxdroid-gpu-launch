@@ -33,17 +33,29 @@ log_event() {
   printf '[%s] [%s] %s\n' "$(date -u '+%Y-%m-%d %H:%M:%S UTC')" "$name" "$*" >> "$app_log" 2>/dev/null || true
 }
 
+if [ -r "${XDG_RUNTIME_DIR:-/run/linuxdroid}/desktop.env" ]; then
+  # shellcheck disable=SC1090
+  . "${XDG_RUNTIME_DIR:-/run/linuxdroid}/desktop.env"
+fi
+
 run_software() {
   log_event "Launching in software rendering mode (BL_GPU_APPS=${BL_GPU_APPS:-0}, fallback_marker=$([ -e "$mark/$name" ] && echo yes || echo no))"
   export LIBGL_ALWAYS_SOFTWARE=1 GALLIUM_DRIVER=llvmpipe LIBDECOR_PLUGIN_DIR=/nonexistent
   unset MESA_LOADER_DRIVER_OVERRIDE LIBGL_KOPPER_DRI2 MESA_GL_VERSION_OVERRIDE MESA_GLSL_VERSION_OVERRIDE ZINK_DESCRIPTORS
-  if [ "${WAYLAND_DISPLAY:-}" = "wayland-0" ] && [ -S "${XDG_RUNTIME_DIR:-/run/linuxdroid}/wayland-1" ]; then
-    export WAYLAND_DISPLAY=wayland-1
+  if [ -z "${WAYLAND_DISPLAY:-}" ] || [ "${WAYLAND_DISPLAY:-}" = "wayland-0" ]; then
+    if [ -S "${XDG_RUNTIME_DIR:-/run/linuxdroid}/wayland-1" ]; then
+      export WAYLAND_DISPLAY=wayland-1
+    elif [ -S "${XDG_RUNTIME_DIR:-/run/linuxdroid}/wayland-2" ]; then
+      export WAYLAND_DISPLAY=wayland-2
+    elif [ -S /tmp/.X11-unix/X0 ] || [ -S /tmp/.X11-unix/X1 ]; then
+      export WAYLAND_DISPLAY=wayland-off
+      export BL_FORCE_X11=1
+    fi
   fi
   exec "$real" "$@"
 }
 
-if [ "${BL_GPU_APPS:-0}" != "1" ] || [ -e "$mark/$name" ]; then
+if [ "${BL_GPU_APPS:-1}" != "1" ] || [ -e "$mark/$name" ]; then
   run_software "$@"
 fi
 
