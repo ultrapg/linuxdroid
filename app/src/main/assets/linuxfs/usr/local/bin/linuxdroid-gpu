@@ -195,6 +195,29 @@ class MotifWmHints(ctypes.Structure):
         ("status", ctypes.c_ulong),
     ]
 
+class XSizeHintsAspect(ctypes.Structure):
+    _fields_ = [("x", ctypes.c_int), ("y", ctypes.c_int)]
+
+class XSizeHints(ctypes.Structure):
+    _fields_ = [
+        ("flags", ctypes.c_long),
+        ("x", ctypes.c_int),
+        ("y", ctypes.c_int),
+        ("width", ctypes.c_int),
+        ("height", ctypes.c_int),
+        ("min_width", ctypes.c_int),
+        ("min_height", ctypes.c_int),
+        ("max_width", ctypes.c_int),
+        ("max_height", ctypes.c_int),
+        ("width_inc", ctypes.c_int),
+        ("height_inc", ctypes.c_int),
+        ("min_aspect", XSizeHintsAspect),
+        ("max_aspect", XSizeHintsAspect),
+        ("base_width", ctypes.c_int),
+        ("base_height", ctypes.c_int),
+        ("win_gravity", ctypes.c_int),
+    ]
+
 x11.XOpenDisplay.argtypes = [ctypes.c_char_p]
 x11.XOpenDisplay.restype = ctypes.c_void_p
 x11.XDefaultRootWindow.argtypes = [ctypes.c_void_p]
@@ -205,6 +228,7 @@ x11.XChangeProperty.argtypes = [
     ctypes.c_void_p, ctypes.c_ulong, ctypes.c_ulong, ctypes.c_ulong,
     ctypes.c_int, ctypes.c_int, ctypes.c_void_p, ctypes.c_int
 ]
+x11.XSetWMNormalHints.argtypes = [ctypes.c_void_p, ctypes.c_ulong, ctypes.POINTER(XSizeHints)]
 x11.XSendEvent.argtypes = [ctypes.c_void_p, ctypes.c_ulong, ctypes.c_int, ctypes.c_long, ctypes.c_void_p]
 x11.XMoveResizeWindow.argtypes = [ctypes.c_void_p, ctypes.c_ulong, ctypes.c_int, ctypes.c_int, ctypes.c_uint, ctypes.c_uint]
 x11.XFlush.argtypes = [ctypes.c_void_p]
@@ -238,42 +262,57 @@ for attempt in range(45):
         root = x11.XDefaultRootWindow(dpy)
         net_wm_state = x11.XInternAtom(dpy, b"_NET_WM_STATE", 0)
         state_fs = x11.XInternAtom(dpy, b"_NET_WM_STATE_FULLSCREEN", 0)
-        state_max_h = x11.XInternAtom(dpy, b"_NET_WM_STATE_MAXIMIZED_HORZ", 0)
-        state_max_v = x11.XInternAtom(dpy, b"_NET_WM_STATE_MAXIMIZED_VERT", 0)
         motif_atom = x11.XInternAtom(dpy, b"_MOTIF_WM_HINTS", 0)
         for wid in wids:
-            hints = MotifWmHints(flags=2, functions=1, decorations=1, input_mode=0, status=0)
+            # flags=3 (MWM_HINTS_FUNCTIONS | MWM_HINTS_DECORATIONS), functions=1 (MWM_FUNC_ALL: resize, move, minimize, maximize, close)
+            hints = MotifWmHints(flags=3, functions=1, decorations=1, input_mode=0, status=0)
             x11.XChangeProperty(
                 dpy, wid, motif_atom, motif_atom, 32, 0,
                 ctypes.cast(ctypes.byref(hints), ctypes.c_void_p), 5
             )
-            for atom1, atom2 in ((state_fs, 0), (state_max_h, state_max_v)):
-                ev = XClientMessageEvent()
-                ev.type = 33
-                ev.serial = 0
-                ev.send_event = 1
-                ev.display = dpy
-                ev.window = wid
-                ev.message_type = net_wm_state
-                ev.format = 32
-                ev.data[0] = 0  # _NET_WM_STATE_REMOVE
-                ev.data[1] = atom1
-                ev.data[2] = atom2
-                ev.data[3] = 1
-                ev.data[4] = 0
-                x11.XSendEvent(dpy, root, 0, (1 << 20) | (1 << 19), ctypes.byref(ev))
+            # PMinSize (1 << 4) only, with no PMaxSize so the window can be freely resized or maximized
+            sz_hints = XSizeHints()
+            sz_hints.flags = (1 << 4)
+            sz_hints.min_width = 320
+            sz_hints.min_height = 240
+            x11.XSetWMNormalHints(dpy, wid, ctypes.byref(sz_hints))
+            ev = XClientMessageEvent()
+            ev.type = 33
+            ev.serial = 0
+            ev.send_event = 1
+            ev.display = dpy
+            ev.window = wid
+            ev.message_type = net_wm_state
+            ev.format = 32
+            ev.data[0] = 0  # _NET_WM_STATE_REMOVE
+            ev.data[1] = state_fs
+            ev.data[2] = 0
+            ev.data[3] = 1
+            ev.data[4] = 0
+            x11.XSendEvent(dpy, root, 0, (1 << 20) | (1 << 19), ctypes.byref(ev))
             if win_w >= 400 and win_h >= 300:
                 x11.XMoveResizeWindow(dpy, wid, sx, top_y, win_w, win_h)
         x11.XFlush(dpy)
     finally:
         x11.XCloseDisplay(dpy)
     subprocess.run(
+        [
+            "python3", "-c",
+            "import os\n"
+            "p = os.path.expanduser('~/.config/kwinrulesrc')\n"
+            "if os.path.isfile(p):\n"
+            "    t = open(p, encoding='utf-8', errors='surrogateescape').read()\n"
+            "    nt = t.replace('maxsizerule=2\\n', 'maxsizerule=0\\n').replace('ignoregeometry=true\\n', 'ignoregeometry=false\\n').replace('fullscreenrule=2\\n', 'fullscreenrule=3\\n')\n"
+            "    if nt != t:\n"
+            "        open(p, 'w', encoding='utf-8', errors='surrogateescape').write(nt)\n"
+        ],
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=1
+    )
+    subprocess.run(
         ["dbus-send", "--session", "--dest=org.kde.KWin", "--type=method_call", "/KWin", "org.kde.KWin.reconfigure"],
         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=1
     )
-    if attempt >= 5:
-        time.sleep(0.5)
-        break
+    break
 PY
         ) &
       fi

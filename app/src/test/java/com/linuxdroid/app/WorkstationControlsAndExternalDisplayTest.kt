@@ -237,7 +237,7 @@ class WorkstationControlsAndExternalDisplayTest {
         assertTrue(
             "linuxdroid-desktop must configure kwinrulesrc to enforce non-fullscreen decorated window mode for Blender",
             desktopScript.contains("kwinrulesrc") &&
-                desktopScript.contains("\"fullscreenrule\": \"2\"") &&
+                desktopScript.contains("\"fullscreenrule\": \"3\"") &&
                 desktopScript.contains("\"noborderrule\": \"2\""),
         )
 

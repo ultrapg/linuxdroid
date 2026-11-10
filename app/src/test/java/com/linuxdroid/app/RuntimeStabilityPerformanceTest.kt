@@ -495,6 +495,18 @@ with tempfile.TemporaryDirectory(prefix="ld-taskbar-test-") as tmp:
         assertTrue(gpuScript.contains("export BL_FORCE_X11=1"))
         assertTrue(gpuScript.contains("top_y = 38"))
         assertTrue(gpuScript.contains("x11.XMoveResizeWindow(dpy, wid, sx, top_y, win_w, win_h)"))
+        assertTrue(gpuScript.contains("XSetWMNormalHints"))
+        assertTrue(gpuScript.contains("MotifWmHints(flags=3, functions=1, decorations=1"))
+
+        val desktopScript = File(linuxfs, "usr/local/bin/linuxdroid-desktop").readText()
+        assertTrue(desktopScript.contains("\"maxsizerule\": \"0\""))
+        assertTrue(desktopScript.contains("\"ignoregeometry\": \"false\""))
+        assertTrue(desktopScript.contains("\"fullscreenrule\": \"3\""))
+
+        val kwinScript = File(linuxfs, "usr/share/kwin/scripts/linuxdroidwindowed/contents/code/main.js").readText()
+        assertTrue(kwinScript.contains("_linuxdroidInitialFitDone"))
+        assertFalse(kwinScript.contains("clientMaximizedStateChanged"))
+        assertFalse(kwinScript.contains("captionChanged"))
 
         val compositorSrc = File(rootDir, "app/src/main/cpp/waylandcomp/src/compositor.c").readText()
         assertTrue(compositorSrc.contains("is_desktop_compositor_surface"))

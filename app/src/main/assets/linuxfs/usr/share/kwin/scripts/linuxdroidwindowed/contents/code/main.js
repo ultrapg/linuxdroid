@@ -4,7 +4,7 @@
             return false;
         }
         try {
-            if (c.specialWindow || c.desktopWindow || c.dock || c.panel || c.toolbar || c.menu || c.splash || c.notification || c.popupWindow || c.tooltip) {
+            if (c.specialWindow || c.desktopWindow || c.dock || c.panel || c.toolbar || c.menu || c.splash || c.notification || c.popupWindow || c.tooltip || c.dialog || c.utility) {
                 return false;
             }
             var rc = String(c.resourceClass || "").toLowerCase();
@@ -18,19 +18,17 @@
         return false;
     }
 
-    function fitToDesktopWorkArea(c) {
+    function applyInitialWindowedBoundsOnce(c) {
         if (!isTargetWindow(c)) {
             return;
         }
+        if (c._linuxdroidInitialFitDone) {
+            return;
+        }
+        c._linuxdroidInitialFitDone = true;
         try {
             if (c.fullScreen) {
                 c.fullScreen = false;
-            }
-        } catch (e) {
-        }
-        try {
-            if (typeof c.setMaximize === "function") {
-                c.setMaximize(false, false);
             }
         } catch (e) {
         }
@@ -55,19 +53,11 @@
             }
             var g = c.frameGeometry;
             if (g) {
-                var targetW = Math.min(g.width, maxW - 32);
-                var targetH = Math.min(g.height, maxH - 24);
-                var targetX = g.x;
-                var targetY = g.y;
-                var needsMove = false;
-                if (g.width >= maxW - 8 || g.height >= dispH - 48 || g.y < minY + 4 || (g.y + g.height) > (minY + maxH - 4)) {
-                    targetW = Math.max(560, maxW - 64);
-                    targetH = Math.max(420, maxH - 32);
-                    targetX = minX + Math.max(8, Math.floor((maxW - targetW) / 2));
-                    targetY = minY + Math.max(8, Math.floor((maxH - targetH) / 2));
-                    needsMove = true;
-                }
-                if (needsMove) {
+                if (g.width >= maxW - 8 || g.height >= dispH - 24 || g.y < minY || (g.y + g.height) > (minY + maxH)) {
+                    var targetW = Math.max(560, maxW - 48);
+                    var targetH = Math.max(420, maxH - 24);
+                    var targetX = minX + Math.max(8, Math.floor((maxW - targetW) / 2));
+                    var targetY = minY + Math.max(8, Math.floor((maxH - targetH) / 2));
                     c.frameGeometry = {
                         x: targetX,
                         y: targetY,
@@ -85,47 +75,7 @@
             return;
         }
         if (isTargetWindow(c)) {
-            fitToDesktopWorkArea(c);
-        }
-        try {
-            if (c.fullScreenChanged && typeof c.fullScreenChanged.connect === "function") {
-                c.fullScreenChanged.connect(function () {
-                    if (isTargetWindow(c) && c.fullScreen) {
-                        fitToDesktopWorkArea(c);
-                    }
-                });
-            }
-        } catch (e) {
-        }
-        try {
-            if (c.clientMaximizedStateChanged && typeof c.clientMaximizedStateChanged.connect === "function") {
-                c.clientMaximizedStateChanged.connect(function () {
-                    if (isTargetWindow(c)) {
-                        fitToDesktopWorkArea(c);
-                    }
-                });
-            }
-        } catch (e) {
-        }
-        try {
-            if (c.captionChanged && typeof c.captionChanged.connect === "function") {
-                c.captionChanged.connect(function () {
-                    if (isTargetWindow(c)) {
-                        fitToDesktopWorkArea(c);
-                    }
-                });
-            }
-        } catch (e) {
-        }
-        try {
-            if (c.windowShown && typeof c.windowShown.connect === "function") {
-                c.windowShown.connect(function () {
-                    if (isTargetWindow(c)) {
-                        fitToDesktopWorkArea(c);
-                    }
-                });
-            }
-        } catch (e) {
+            applyInitialWindowedBoundsOnce(c);
         }
     }
 
