@@ -513,8 +513,17 @@ with tempfile.TemporaryDirectory(prefix="ld-taskbar-test-") as tmp:
         assertTrue(compositorSrc.contains("s->keep_on_top = 1;"))
 
         val chromiumScript = File(linuxfs, "usr/local/bin/chromium").readText()
+        val chromiumBrowserScript = File(linuxfs, "usr/local/bin/chromium-browser").readText()
+        assertEquals(chromiumScript, chromiumBrowserScript)
         assertTrue(chromiumScript.contains("unset MESA_GL_VERSION_OVERRIDE MESA_GLSL_VERSION_OVERRIDE"))
         assertTrue(chromiumScript.contains("flags+=(--ozone-platform=x11)"))
         assertTrue(gpuScript.contains("elif [ \"\${GALLIUM_DRIVER:-}\" = \"virpipe\" ]; then"))
+        assertTrue(gpuScript.contains("set -- \"\$1\" --ozone-platform=x11 --in-process-gpu --disable-gpu-watchdog --disable-vulkan \"\${@:2}\""))
+
+        val gpuLaunchScript = File(linuxfs, "usr/local/bin/linuxdroid-gpu-launch").readText()
+        assertTrue(gpuLaunchScript.contains("chromium|chromium-browser|google-chrome|google-chrome-stable|brave-browser)"))
+
+        val webhelperSrc = File(rootDir, "tools/linuxfs/preload/webhelper.c").readText()
+        assertFalse(webhelperSrc.contains("\"--in-process-gpu\""))
     }
 }

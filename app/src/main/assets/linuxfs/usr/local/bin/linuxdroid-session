@@ -155,9 +155,11 @@ exec /usr/local/bin/linuxdroid-gpu-launch $gpu_app \"\$@\""
 done
 
 # Ensure /usr/bin/plasmashell, /usr/bin/kwin_wayland_wrapper, and /usr/bin/chromium* use the LinuxDroid wrappers even when invoked by full path
+rm -f "${HOME:-/home/linux}/.cache/linuxdroid/gpu-fallback/chromium" \
+      "${HOME:-/home/linux}/.cache/linuxdroid/gpu-fallback/chromium-browser" 2>/dev/null || true
 for ch_bin in /usr/bin/chromium /usr/bin/chromium-browser; do
-  if [ -x "$ch_bin" ] && [ -x /usr/local/bin/chromium ] && ! grep -q "LinuxDroid: Chromium wrapper" "$ch_bin" 2>/dev/null; then
-    if [ ! -e "${ch_bin}.distrib" ]; then
+  if [ -x "$ch_bin" ] && [ -x /usr/local/bin/chromium ] && ! cmp -s /usr/local/bin/chromium "$ch_bin" 2>/dev/null; then
+    if [ ! -e "${ch_bin}.distrib" ] && ! grep -q "LinuxDroid: Chromium wrapper" "$ch_bin" 2>/dev/null; then
       cp -a "$ch_bin" "${ch_bin}.distrib" 2>/dev/null || linuxdroid-root cp -a "$ch_bin" "${ch_bin}.distrib" 2>/dev/null || true
     fi
     cp -f /usr/local/bin/chromium "$ch_bin" 2>/dev/null || linuxdroid-root cp -f /usr/local/bin/chromium "$ch_bin" 2>/dev/null || true

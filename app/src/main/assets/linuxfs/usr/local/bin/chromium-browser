@@ -40,10 +40,23 @@ case "${LANG:-}" in
 esac
 mkdir -p /tmp/chromium-crashpad 2>/dev/null || true
 
+if [ -r /etc/linuxdroid/gpu.env ]; then
+  set -a
+  # shellcheck disable=SC1091
+  . /etc/linuxdroid/gpu.env
+  set +a
+fi
+if [ -r "${XDG_RUNTIME_DIR:-/run/linuxdroid}/desktop.env" ]; then
+  # shellcheck disable=SC1090
+  . "${XDG_RUNTIME_DIR:-/run/linuxdroid}/desktop.env"
+fi
+# ANGLE gles-egl requests an OpenGL ES context; desktop GL overrides break ANGLE initialization on Mali/VirGL.
+unset MESA_GL_VERSION_OVERRIDE MESA_GLSL_VERSION_OVERRIDE
+
 user_args=()
 for arg in "$@"; do
   case "$arg" in
-    --no-sandbox|--no-zygote|--disable-gpu-sandbox|--disable-dev-shm-usage|--in-process-gpu|--disable-gpu-watchdog|--disable-vulkan|--ozone-platform-hint=*)
+    --no-sandbox|--no-zygote|--disable-gpu-sandbox|--disable-dev-shm-usage|--in-process-gpu|--disable-gpu-watchdog|--disable-vulkan|--ozone-platform-hint=*|--ozone-platform=*)
       ;;
     *)
       user_args+=("$arg")
@@ -56,7 +69,6 @@ flags=(
   --no-zygote
   --disable-gpu-sandbox
   --disable-dev-shm-usage
-  --in-process-gpu
   --disable-gpu-watchdog
   --disable-vulkan
   --disable-features=Vulkan,DefaultANGLEVulkan,VulkanFromANGLE,GlobalShortcutsPortal,DesktopCapturePipeWire,WebRtcPipeWireCapturer,AudioServiceOutOfProcess
@@ -64,16 +76,56 @@ flags=(
   --no-first-run
   --no-default-browser-check
   --lang=en-US
-  --ozone-platform-hint=auto
   --use-gl=angle
   --use-angle=gles-egl
 )
 
+# Wait briefly for on-demand Xwayland socket if nested Wayland compositor is running
+if [ ! -S /tmp/.X11-unix/X0 ] && [ ! -S /tmp/.X11-unix/X1 ] && \
+   { [ -S "${XDG_RUNTIME_DIR:-/run/linuxdroid}/wayland-1" ] || [ -S "${XDG_RUNTIME_DIR:-/run/linuxdroid}/wayland-2" ]; }; then
+  for _ in $(seq 1 20); do
+    [ -S /tmp/.X11-unix/X0 ] || [ -S /tmp/.X11-unix/X1 ] && break
+    sleep 0.1
+  done
+fi
+
+# Route Chromium to Xwayland (:0) whenever available so both Adreno Turnip (Zink + Kopper DRI2)
+# and Mali / VirGL / llvmpipe present via X11 SHM inside a decorated KWin / XFCE window without
+# needing zwp_linux_dmabuf_v1 on nested KWin QPainter (wayland-1).
+if [ -S /tmp/.X11-unix/X0 ] || [ -S /tmp/.X11-unix/X1 ]; then
+  if [ -z "${DISPLAY:-}" ]; then
+    if [ -S /tmp/.X11-unix/X0 ]; then
+      export DISPLAY=:0
+    else
+      export DISPLAY=:1
+    fi
+  fi
+  export WAYLAND_DISPLAY=wayland-off
+  export BL_FORCE_X11=1
+  if [ -z "${XAUTHORITY:-}" ] || [ ! -r "${XAUTHORITY:-}" ]; then
+    for xa in "${XDG_RUNTIME_DIR:-/run/linuxdroid}"/xauth_* "${HOME:-/home/linux}/.Xauthority"; do
+      if [ -r "$xa" ]; then
+        export XAUTHORITY="$xa"
+        break
+      fi
+    done
+  fi
+  flags+=(--ozone-platform=x11)
+else
+  flags+=(--ozone-platform-hint=auto)
+fi
+
 if [ "${BL_GPU_APPS:-0}" = "1" ]; then
+  if [ "${LINUXDROID_GPU_ACTIVE:-}" = "turnip" ]; then
+    flags+=(--in-process-gpu)
+  fi
   flags+=(--ignore-gpu-blocklist --enable-gpu-rasterization --enable-zero-copy)
   if [ -x /usr/local/bin/linuxdroid-gpu-launch ]; then
     exec /usr/local/bin/linuxdroid-gpu-launch "$real_bin" "${flags[@]}" "${user_args[@]}"
   fi
 fi
 
+export LIBGL_ALWAYS_SOFTWARE=1
+export GALLIUM_DRIVER=llvmpipe
+unset MESA_LOADER_DRIVER_OVERRIDE LIBGL_KOPPER_DRI2
 exec "$real_bin" "${flags[@]}" "${user_args[@]}"
