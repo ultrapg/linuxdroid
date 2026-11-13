@@ -41,7 +41,7 @@ fi
 run_software() {
   log_event "Launching in software rendering mode (BL_GPU_APPS=${BL_GPU_APPS:-0}, fallback_marker=$([ -e "$mark/$name" ] && echo yes || echo no))"
   export LIBGL_ALWAYS_SOFTWARE=1 GALLIUM_DRIVER=llvmpipe LIBDECOR_PLUGIN_DIR=/nonexistent
-  unset MESA_LOADER_DRIVER_OVERRIDE LIBGL_KOPPER_DRI2 MESA_GL_VERSION_OVERRIDE MESA_GLSL_VERSION_OVERRIDE ZINK_DESCRIPTORS
+  unset VTEST_SOCKET_NAME VN_DEBUG MESA_LOADER_DRIVER_OVERRIDE LIBGL_KOPPER_DRI2 MESA_GL_VERSION_OVERRIDE MESA_GLSL_VERSION_OVERRIDE ZINK_DESCRIPTORS
   case "$name" in
     blender|blender-launcher)
       if [ "${BLENDER_WAYLAND:-0}" != "1" ] && { [ -S /tmp/.X11-unix/X0 ] || [ -S /tmp/.X11-unix/X1 ]; }; then
@@ -66,6 +66,45 @@ run_software() {
             fi
           done
         fi
+        sw_args=()
+        has_use_gl=0
+        has_use_angle=0
+        has_inproc=0
+        has_ozone=0
+        for sw_arg in "$@"; do
+          case "$sw_arg" in
+            --use-angle=gles-egl)
+              sw_args+=(--use-angle=gl)
+              has_use_angle=1
+              ;;
+            --use-angle=*)
+              sw_args+=("$sw_arg")
+              has_use_angle=1
+              ;;
+            --use-gl=*)
+              sw_args+=("$sw_arg")
+              has_use_gl=1
+              ;;
+            --in-process-gpu)
+              sw_args+=("$sw_arg")
+              has_inproc=1
+              ;;
+            --ozone-platform=*)
+              sw_args+=(--ozone-platform=x11)
+              has_ozone=1
+              ;;
+            --ozone-platform-hint=*|--enable-zero-copy)
+              ;;
+            *)
+              sw_args+=("$sw_arg")
+              ;;
+          esac
+        done
+        [ "$has_ozone" = "0" ] && sw_args=(--ozone-platform=x11 "${sw_args[@]}")
+        [ "$has_inproc" = "0" ] && sw_args=(--in-process-gpu "${sw_args[@]}")
+        [ "$has_use_angle" = "0" ] && sw_args=(--use-angle=gl "${sw_args[@]}")
+        [ "$has_use_gl" = "0" ] && sw_args=(--use-gl=angle "${sw_args[@]}")
+        set -- "${sw_args[@]}"
       fi
       ;;
   esac

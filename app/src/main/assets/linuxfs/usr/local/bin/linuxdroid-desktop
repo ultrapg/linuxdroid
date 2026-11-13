@@ -1108,12 +1108,19 @@ run_xwayland_desktop() {
   export QT_ACCESSIBILITY=1
   export QT_LINUX_ACCESSIBILITY_ALWAYS_ON=1
   if [ "${BL_GPU_DESKTOP:-0}" = "1" ]; then
-    unset LIBGL_ALWAYS_SOFTWARE MESA_GL_VERSION_OVERRIDE MESA_GLSL_VERSION_OVERRIDE
+    unset MESA_GL_VERSION_OVERRIDE MESA_GLSL_VERSION_OVERRIDE
     export GALLIUM_THREAD=0
     export MESA_LOG=null
     if [ "${LINUXDROID_GPU_ACTIVE:-}" = "turnip" ]; then
+      unset LIBGL_ALWAYS_SOFTWARE
       export LIBGL_KOPPER_DRI2=true
       export MESA_VK_WSI_DEBUG=sw
+    elif [ "${GALLIUM_DRIVER:-}" = "virpipe" ] || [ "${GALLIUM_DRIVER:-}" = "llvmpipe" ]; then
+      export LIBGL_ALWAYS_SOFTWARE=1
+    elif [ -c /dev/dri/renderD128 ] && [ -r /dev/dri/renderD128 ] && [ -w /dev/dri/renderD128 ]; then
+      unset LIBGL_ALWAYS_SOFTWARE
+    else
+      export LIBGL_ALWAYS_SOFTWARE=1
     fi
   else
     unset MESA_LOADER_DRIVER_OVERRIDE LIBGL_KOPPER_DRI2 MESA_GL_VERSION_OVERRIDE MESA_GLSL_VERSION_OVERRIDE

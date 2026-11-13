@@ -116,6 +116,32 @@ class GpuConfigTest {
     }
 
     @Test
+    fun samsungTabA11PlusDimensity7300MaliG615SelectsUnifiedVirpipeWithSoftwareLoader() {
+        val gpu = GpuInfo.fromProbeMap(
+            probe = mapOf(
+                "device" to "Mali-G615 MC2",
+                "vendor_id" to "0x13b5",
+                "api" to "1.3.274",
+                "ext.VK_ANDROID_external_memory_android_hardware_buffer" to "yes",
+            ),
+            socHardware = "mt6878 dimensity",
+            hasKgslNode = false,
+            hasDriRenderNode = false,
+            hasMaliNode = true,
+        )
+        assertEquals(GpuFamily.MALI, gpu.family)
+
+        val resolved = GpuConfigGenerator.resolve(GpuDriverMode.AUTO, gpu, "/run/linuxdroid/virgl_test")
+        assertEquals("unified", resolved.activeBackend)
+        assertTrue(resolved.requiresVirglServer)
+        assertTrue(resolved.enableVenus)
+        assertEquals("virpipe", resolved.envVars["GALLIUM_DRIVER"])
+        assertEquals("1", resolved.envVars["LIBGL_ALWAYS_SOFTWARE"])
+        assertEquals("/run/linuxdroid/virgl_test", resolved.envVars["VTEST_SOCKET_NAME"])
+        assertFalse(resolved.envVars["VK_ICD_FILENAMES"]!!.contains("panfrost_icd"))
+    }
+
+    @Test
     fun softwareModeSelectsLlvmpipeAndLavapipe() {
         val gpu = GpuInfo.fromProbeMap(emptyMap())
         val resolved = GpuConfigGenerator.resolve(GpuDriverMode.SOFTWARE, gpu, "/run/linuxdroid/virgl_test")

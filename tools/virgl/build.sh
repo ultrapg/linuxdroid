@@ -25,7 +25,11 @@ else
     mv "$WORK_DIR/src/libepoxy-${EPOXY_VER}" "$WORK_DIR/src/libepoxy"
 fi
 
-curl -fsSL "https://gitlab.freedesktop.org/virgl/virglrenderer/-/archive/${VIRGL_VER}/virglrenderer-${VIRGL_VER}.tar.gz" | tar -xz -C "$WORK_DIR/src"
+if [ -f /tmp/virgl-src/virgl.tar.gz ]; then
+    tar -xzf /tmp/virgl-src/virgl.tar.gz -C "$WORK_DIR/src"
+else
+    curl -fsSL "https://gitlab.freedesktop.org/virgl/virglrenderer/-/archive/${VIRGL_VER}/virglrenderer-${VIRGL_VER}.tar.gz" | tar -xz -C "$WORK_DIR/src"
+fi
 mv "$WORK_DIR/src/virglrenderer-${VIRGL_VER}" "$WORK_DIR/src/virglrenderer"
 
 patch -d "$WORK_DIR/src/virglrenderer" -p1 < "$SCRIPT_DIR/patches/0001-android-venus-ahb-and-egl.patch"

@@ -1,5 +1,5 @@
 diff --git a/meson.build b/meson.build
-index 10be099..b1f824e 100644
+index 10be099..52fab1a 100644
 --- a/meson.build
 +++ b/meson.build
 @@ -107,7 +107,7 @@ endif
@@ -19,7 +19,7 @@ index 10be099..b1f824e 100644
  
  if thread_dep.found() and not with_host_windows
    conf_data.set('HAVE_PTHREAD', 1)
-@@ -273,7 +274,7 @@ endif
+@@ -273,14 +274,14 @@ endif
  
  if with_egl
     if cc.has_header('epoxy/egl.h', dependencies: epoxy_dep) and epoxy_dep.get_variable(pkgconfig: 'epoxy_has_egl') == '1'
@@ -28,6 +28,16 @@ index 10be099..b1f824e 100644
           have_egl = true
        else
           if libdrm_dep.found()
+-            gbm_dep = dependency('gbm', version: '>= ' + _gbm_ver, required: require_egl)
++            gbm_dep = dependency('gbm', version: '>= ' + _gbm_ver, required: false)
+          endif
+-         have_egl = gbm_dep.found() and cc.has_header('sys/mman.h', required: require_egl)
+-         conf_data.set('ENABLE_GBM', have_egl)
++         have_egl = cc.has_header('sys/mman.h', required: require_egl)
++         conf_data.set('ENABLE_GBM', gbm_dep.found() and have_egl)
+       endif
+       conf_data.set('HAVE_EPOXY_EGL_H', have_egl)
+    else
 @@ -327,7 +328,11 @@ if with_venus
     if with_minigbm_allocation
        gbm_dep = dependency('gbm')
@@ -421,6 +431,55 @@ index b0b6691..afd07e7 100644
  
     bool KHR_external_fence_fd;
     bool KHR_external_semaphore_fd;
+diff --git a/src/virglrenderer.c b/src/virglrenderer.c
+index ba88640..d1de17c 100644
+--- a/src/virglrenderer.c
++++ b/src/virglrenderer.c
+@@ -909,10 +909,16 @@ int virgl_renderer_init(void *cookie, int flags, struct virgl_renderer_callbacks
+    }
+ 
+    if (!state.proxy_initialized && (flags & VIRGL_RENDERER_RENDER_SERVER)) {
+-      ret = proxy_renderer_init(&proxy_cbs, flags | VIRGL_RENDERER_NO_VIRGL);
+-      if (ret)
+-         goto fail;
+-      state.proxy_initialized = true;
++      int proxy_ret = proxy_renderer_init(&proxy_cbs, flags | VIRGL_RENDERER_NO_VIRGL);
++      if (proxy_ret) {
++         if (!state.vrend_initialized) {
++            ret = proxy_ret;
++            goto fail;
++         }
++         virgl_warn("proxy_renderer_init failed (%d); continuing with vrend only\n", proxy_ret);
++      } else {
++         state.proxy_initialized = true;
++      }
+    }
+ 
+    if ((flags & VIRGL_RENDERER_ASYNC_FENCE_CB) &&
+diff --git a/src/vrend_renderer.c b/src/vrend_renderer.c
+index d0b7784..4e3c22b 100644
+--- a/src/vrend_renderer.c
++++ b/src/vrend_renderer.c
+@@ -7617,6 +7617,8 @@ int vrend_renderer_init(const struct vrend_if_cbs *cbs, uint32_t flags)
+    }
+ 
+    for (uint32_t i = 0; i < ARRAY_SIZE(gl_versions); i++) {
++      if ((flags & VREND_USE_GLES) && gl_versions[i].major >= 4)
++         continue;
+       ctx_params.major_ver = gl_versions[i].major;
+       ctx_params.minor_ver = gl_versions[i].minor;
+ 
+@@ -11333,6 +11335,10 @@ int vrend_renderer_create_fence(struct vrend_context *ctx,
+ #ifdef HAVE_EPOXY_EGL_H
+    if (vrend_state.use_egl_fence) {
+       fence->eglsyncobj = virgl_egl_fence_create(egl);
++      if (fence->eglsyncobj == NULL) {
++         vrend_state.use_egl_fence = false;
++         fence->glsyncobj = glFenceSync(GL_SYNC_GPU_COMMANDS_COMPLETE, 0);
++      }
+    } else
+ #endif
+    {
 diff --git a/src/vrend_winsys.c b/src/vrend_winsys.c
 index 2f56080..217a205 100644
 --- a/src/vrend_winsys.c
@@ -460,7 +519,7 @@ index 2f56080..217a205 100644
        free(egl);
        egl = NULL;
 diff --git a/src/vrend_winsys_egl.c b/src/vrend_winsys_egl.c
-index 9d9f410..7382c20 100644
+index 9d9f410..5eb1ae4 100644
 --- a/src/vrend_winsys_egl.c
 +++ b/src/vrend_winsys_egl.c
 @@ -103,6 +103,7 @@ struct virgl_egl {
@@ -482,7 +541,46 @@ index 9d9f410..7382c20 100644
        return false;
     }
  
-@@ -341,11 +342,16 @@ struct virgl_egl *virgl_egl_init(EGLNativeDisplayType display_id, bool surfacele
+@@ -298,13 +299,17 @@ static bool virgl_egl_get_display(struct virgl_egl *egl)
+ }
+ #endif /* ENABLE_MINIGBM_ALLOCATION */
+ 
++#ifndef EGL_OPENGL_ES3_BIT_KHR
++#define EGL_OPENGL_ES3_BIT_KHR 0x0040
++#endif
++
+ #ifdef ENABLE_GBM
+ struct virgl_egl *virgl_egl_init(struct virgl_gbm *gbm, bool surfaceless, bool gles)
+ #else
+ struct virgl_egl *virgl_egl_init(EGLNativeDisplayType display_id, bool surfaceless, bool gles)
+ #endif
+ {
+-   static EGLint conf_att[] = {
++   EGLint conf_att[] = {
+       EGL_SURFACE_TYPE, EGL_WINDOW_BIT,
+       EGL_RENDERABLE_TYPE, EGL_OPENGL_BIT,
+       EGL_RED_SIZE, 1,
+@@ -313,8 +318,8 @@ struct virgl_egl *virgl_egl_init(EGLNativeDisplayType display_id, bool surfacele
+       EGL_ALPHA_SIZE, 0,
+       EGL_NONE,
+    };
+-   static const EGLint ctx_att[] = {
+-      EGL_CONTEXT_CLIENT_VERSION, 2,
++   EGLint ctx_att[] = {
++      EGL_CONTEXT_CLIENT_VERSION, gles ? 3 : 2,
+       EGL_NONE
+    };
+    EGLBoolean success;
+@@ -331,7 +336,7 @@ struct virgl_egl *virgl_egl_init(EGLNativeDisplayType display_id, bool surfacele
+       return NULL;
+ 
+    if (gles)
+-      conf_att[3] = EGL_OPENGL_ES2_BIT;
++      conf_att[3] = EGL_OPENGL_ES3_BIT_KHR;
+ 
+    if (surfaceless)
+       conf_att[1] = EGL_PBUFFER_BIT;
+@@ -341,11 +346,16 @@ struct virgl_egl *virgl_egl_init(EGLNativeDisplayType display_id, bool surfacele
     egl->gbm = gbm;
  #endif
  
@@ -500,7 +598,7 @@ index 9d9f410..7382c20 100644
  #ifdef ENABLE_MINIGBM_ALLOCATION
     if (virgl_egl_get_display(egl)) {
       /* Make -Wdangling-else happy. */
-@@ -370,6 +376,7 @@ struct virgl_egl *virgl_egl_init(EGLNativeDisplayType display_id, bool surfacele
+@@ -370,6 +380,7 @@ struct virgl_egl *virgl_egl_init(EGLNativeDisplayType display_id, bool surfacele
        egl->egl_display = eglGetDisplay(display_id);
  #endif
     }
@@ -508,7 +606,30 @@ index 9d9f410..7382c20 100644
  
     if (!egl->egl_display) {
  #ifdef ENABLE_GBM
-@@ -424,8 +431,20 @@ struct virgl_egl *virgl_egl_init(EGLNativeDisplayType display_id, bool surfacele
+@@ -416,32 +427,70 @@ struct virgl_egl *virgl_egl_init(EGLNativeDisplayType display_id, bool surfacele
+ 
+    success = eglChooseConfig(egl->egl_display, conf_att, &egl->egl_conf,
+                              1, &num_configs);
++   if ((!success || num_configs != 1) && gles) {
++      conf_att[3] = EGL_OPENGL_ES2_BIT;
++      success = eglChooseConfig(egl->egl_display, conf_att, &egl->egl_conf,
++                                1, &num_configs);
++   }
++   if ((!success || num_configs != 1) && surfaceless) {
++      conf_att[1] = EGL_WINDOW_BIT;
++      success = eglChooseConfig(egl->egl_display, conf_att, &egl->egl_conf,
++                                1, &num_configs);
++   }
+    if (!success || num_configs != 1)
+       goto fail;
+ 
+    egl->egl_ctx = eglCreateContext(egl->egl_display, egl->egl_conf, EGL_NO_CONTEXT,
+                                    ctx_att);
++   if (!egl->egl_ctx && gles && ctx_att[1] == 3) {
++      ctx_att[1] = 2;
++      egl->egl_ctx = eglCreateContext(egl->egl_display, egl->egl_conf, EGL_NO_CONTEXT,
++                                      ctx_att);
++   }
     if (!egl->egl_ctx)
        goto fail;
  
@@ -529,9 +650,32 @@ index 9d9f410..7382c20 100644
 +                       egl->egl_ctx))
 +      goto fail;
  
++#if defined(__ANDROID__)
++   /* On Android Mali GPUs (libGLES_mali.so), EGL_SYNC_NATIVE_FENCE_ANDROID returns
++    * EGL_NO_SYNC_KHR on surfaceless contexts or command batches with no queued render job,
++    * causing vrend init and fence creation to fail. vtest never exports native fence FDs,
++    * so use standard GLES 3.x glFenceSync + glClientWaitSync across all Android GPUs.
++    */
++   egl->extension_bits &= ~EGL_KHR_FENCE_SYNC_ANDROID;
++#endif
     if (virgl_egl_supports_fences(egl)) {
++      glFlush();
        egl->signaled_fence = eglCreateSyncKHR(egl->egl_display,
-@@ -442,6 +461,8 @@ struct virgl_egl *virgl_egl_init(EGLNativeDisplayType display_id, bool surfacele
+                                              EGL_SYNC_NATIVE_FENCE_ANDROID, NULL);
+       if (!egl->signaled_fence) {
+-         virgl_error("Failed to create signaled fence");
+-         goto fail;
++         virgl_info("Disabling EGL_ANDROID_native_fence_sync (signaled fence unavailable)\n");
++         egl->extension_bits &= ~EGL_KHR_FENCE_SYNC_ANDROID;
++      } else {
++         /* flush to ensure a native fence object is created prior to exporting. */
++         glFlush();
+       }
+-
+-      /* flush to ensure a native fence object is created prior to exporting. */
+-      glFlush();
+    }
+ 
     return egl;
  
   fail:
@@ -540,7 +684,7 @@ index 9d9f410..7382c20 100644
     free(egl);
     return NULL;
  }
-@@ -453,6 +474,9 @@ void virgl_egl_destroy(struct virgl_egl *egl)
+@@ -453,6 +502,9 @@ void virgl_egl_destroy(struct virgl_egl *egl)
     }
     eglMakeCurrent(egl->egl_display, EGL_NO_SURFACE, EGL_NO_SURFACE,
                    EGL_NO_CONTEXT);
@@ -550,19 +694,36 @@ index 9d9f410..7382c20 100644
     eglDestroyContext(egl->egl_display, egl->egl_ctx);
     eglTerminate(egl->egl_display);
     free(egl);
-@@ -648,8 +672,9 @@ void virgl_egl_destroy_context(struct virgl_egl *egl, virgl_renderer_gl_context
+@@ -648,9 +700,24 @@ void virgl_egl_destroy_context(struct virgl_egl *egl, virgl_renderer_gl_context
  int virgl_egl_make_context_current(struct virgl_egl *egl, virgl_renderer_gl_context virglctx)
  {
     EGLContext egl_ctx = (EGLContext)virglctx;
-+   EGLSurface surf = egl_ctx == EGL_NO_CONTEXT ? EGL_NO_SURFACE : egl->pbuffer_surface;
- 
+-
 -   return eglMakeCurrent(egl->egl_display, EGL_NO_SURFACE, EGL_NO_SURFACE,
-+   return eglMakeCurrent(egl->egl_display, surf, surf,
-                          egl_ctx) ? 0 : -1;
+-                         egl_ctx) ? 0 : -1;
++   EGLSurface surf = (egl_ctx == EGL_NO_CONTEXT || egl_ctx != egl->egl_ctx) ? EGL_NO_SURFACE : egl->pbuffer_surface;
++
++   if (eglMakeCurrent(egl->egl_display, surf, surf, egl_ctx))
++      return 0;
++
++   if (egl_ctx != EGL_NO_CONTEXT && surf == EGL_NO_SURFACE && egl->pbuffer_surface != EGL_NO_SURFACE) {
++      static const EGLint pb_att[] = {
++         EGL_WIDTH, 1,
++         EGL_HEIGHT, 1,
++         EGL_NONE
++      };
++      EGLSurface ctx_surf = eglCreatePbufferSurface(egl->egl_display, egl->egl_conf, pb_att);
++      if (ctx_surf != EGL_NO_SURFACE && eglMakeCurrent(egl->egl_display, ctx_surf, ctx_surf, egl_ctx))
++         return 0;
++      if (ctx_surf != EGL_NO_SURFACE)
++         eglDestroySurface(egl->egl_display, ctx_surf);
++   }
++   return -1;
  }
  
+ virgl_renderer_gl_context virgl_egl_get_current_context(UNUSED struct virgl_egl *egl)
 diff --git a/vtest/vtest_server.c b/vtest/vtest_server.c
-index 93d949d..68624bf 100644
+index 93d949d..ee77776 100644
 --- a/vtest/vtest_server.c
 +++ b/vtest/vtest_server.c
 @@ -36,6 +36,7 @@
@@ -573,7 +734,16 @@ index 93d949d..68624bf 100644
  #include <getopt.h>
  #include <string.h>
  
-@@ -412,7 +413,7 @@ static void vtest_server_open_socket(void)
+@@ -137,6 +138,8 @@ int vtest_main(int argc, char **argv)
+ while (__AFL_LOOP(1000)) {
+ #endif
+ 
++   signal(SIGPIPE, SIG_IGN);
++
+    vtest_server_getenv();
+    vtest_server_parse_args(argc, argv);
+ 
+@@ -412,7 +415,7 @@ static void vtest_server_open_socket(void)
        goto err;
     }
  
@@ -582,7 +752,7 @@ index 93d949d..68624bf 100644
        goto err;
     }
  
-@@ -459,6 +460,8 @@ static void vtest_server_wait_clients(void)
+@@ -459,6 +462,8 @@ static void vtest_server_wait_clients(void)
  
     ret = select(max_fd + 1, &read_fds, NULL, NULL, NULL);
     if (ret < 0) {
@@ -591,3 +761,33 @@ index 93d949d..68624bf 100644
        perror("Failed to select on socket!");
        exit(1);
     }
+@@ -480,13 +485,16 @@ static void vtest_server_wait_clients(void)
+    if (server.socket >= 0 && FD_ISSET(server.socket, &read_fds)) {
+       int new_fd = accept(server.socket, NULL, NULL);
+       if (new_fd < 0) {
++         if (errno == EINTR || errno == EAGAIN || errno == ECONNABORTED)
++            return;
+          perror("Failed to accept socket.");
+          exit(1);
+       }
+ 
+       if (vtest_server_add_client(new_fd, new_fd)) {
++         close(new_fd);
+          perror("Failed to add client.");
+-         exit(1);
++         return;
+       }
+    }
+ }
+@@ -649,7 +657,10 @@ static void vtest_server_run(void)
+                                        server.render_device);
+          if (ret) {
+             vtest_server_inactivate_clients();
+-            run = false;
++            is_empty = true;
++            if (!server.loop) {
++               run = false;
++            }
+          }
+       }
+ 

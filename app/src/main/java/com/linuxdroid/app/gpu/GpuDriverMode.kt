@@ -119,14 +119,10 @@ object GpuConfigGenerator {
                 if (enableVenus) {
                     env["VN_DEBUG"] = "vtest"
                 }
-                if (gpu.hasDriRenderNode || gpu.hasMaliNode) {
-                    env["LIBGL_ALWAYS_SOFTWARE"] = "1"
-                    env["GALLIUM_DRIVER"] = "virpipe"
-                    env["MESA_GL_VERSION_OVERRIDE"] = "4.3COMPAT"
-                    env["MESA_GLSL_VERSION_OVERRIDE"] = "430"
-                    if (gpu.hasDriRenderNode) {
-                        env.remove("LIBGL_ALWAYS_SOFTWARE")
-                    }
+                if (gpu.hasDriRenderNode) {
+                    env["GALLIUM_DRIVER"] = "zink"
+                    env["MESA_LOADER_DRIVER_OVERRIDE"] = "zink"
+                    env["LIBGL_KOPPER_DRI2"] = "true"
                 } else {
                     env["LIBGL_ALWAYS_SOFTWARE"] = "1"
                     env["GALLIUM_DRIVER"] = "virpipe"

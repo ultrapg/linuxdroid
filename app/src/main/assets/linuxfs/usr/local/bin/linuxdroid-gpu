@@ -33,11 +33,66 @@ if [ "${LINUXDROID_GPU_ACTIVE:-}" = "turnip" ] || [ "${LINUXDROID_GPU_ACTIVE:-}"
   elif [ "${LINUXDROID_GPU_ACTIVE:-}" = "unified" ]; then
     # On Mali / Immortalis / Exynos / MediaTek / Tensor without a Linux /dev/dri/renderD128 node,
     # Mesa's virpipe driver (vtest socket) is loaded via Mesa's swrast loader path, which requires
-    # LIBGL_ALWAYS_SOFTWARE=1 whenever /dev/dri/renderD128 is absent.
-    if [ -c /dev/dri/renderD128 ] && [ -r /dev/dri/renderD128 ] && [ -w /dev/dri/renderD128 ]; then
-      unset LIBGL_ALWAYS_SOFTWARE
-    elif [ "${GALLIUM_DRIVER:-}" = "virpipe" ]; then
+    # LIBGL_ALWAYS_SOFTWARE=1 whenever GALLIUM_DRIVER=virpipe or /dev/dri/renderD128 is absent.
+    if [ "${GALLIUM_DRIVER:-}" = "virpipe" ] || [ "${GALLIUM_DRIVER:-}" = "llvmpipe" ]; then
       export LIBGL_ALWAYS_SOFTWARE=1
+    elif [ -c /dev/dri/renderD128 ] && [ -r /dev/dri/renderD128 ] && [ -w /dev/dri/renderD128 ]; then
+      unset LIBGL_ALWAYS_SOFTWARE
+    else
+      export LIBGL_ALWAYS_SOFTWARE=1
+    fi
+    if [ "${GALLIUM_DRIVER:-}" = "virpipe" ]; then
+      vtest_sock="${VTEST_SOCKET_NAME:-/run/linuxdroid/virgl_test}"
+      virpipe_ok=0
+      if [ -S "$vtest_sock" ]; then
+        if timeout 3 python3 - <<'PY' >/dev/null 2>&1; then
+import ctypes, os
+os.environ["LIBGL_ALWAYS_SOFTWARE"] = "1"
+os.environ["GALLIUM_DRIVER"] = "virpipe"
+egl = ctypes.CDLL("libEGL.so.1")
+gl = ctypes.CDLL("libGL.so.1")
+egl.eglGetPlatformDisplay.argtypes = [ctypes.c_uint, ctypes.c_void_p, ctypes.c_void_p]
+egl.eglGetPlatformDisplay.restype = ctypes.c_void_p
+egl.eglInitialize.argtypes = [ctypes.c_void_p, ctypes.POINTER(ctypes.c_int), ctypes.POINTER(ctypes.c_int)]
+egl.eglInitialize.restype = ctypes.c_uint
+egl.eglBindAPI.argtypes = [ctypes.c_uint]
+egl.eglBindAPI.restype = ctypes.c_uint
+egl.eglChooseConfig.argtypes = [ctypes.c_void_p, ctypes.POINTER(ctypes.c_int), ctypes.POINTER(ctypes.c_void_p), ctypes.c_int, ctypes.POINTER(ctypes.c_int)]
+egl.eglChooseConfig.restype = ctypes.c_uint
+egl.eglCreateContext.argtypes = [ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p, ctypes.POINTER(ctypes.c_int)]
+egl.eglCreateContext.restype = ctypes.c_void_p
+egl.eglCreatePbufferSurface.argtypes = [ctypes.c_void_p, ctypes.c_void_p, ctypes.POINTER(ctypes.c_int)]
+egl.eglCreatePbufferSurface.restype = ctypes.c_void_p
+egl.eglMakeCurrent.argtypes = [ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p]
+egl.eglMakeCurrent.restype = ctypes.c_uint
+gl.glGetString.argtypes = [ctypes.c_uint]
+gl.glGetString.restype = ctypes.c_char_p
+dpy = egl.eglGetPlatformDisplay(0x31DD, None, None)
+maj, mn = ctypes.c_int(0), ctypes.c_int(0)
+if not dpy or not egl.eglInitialize(dpy, ctypes.byref(maj), ctypes.byref(mn)):
+    raise SystemExit(1)
+egl.eglBindAPI(0x30A0)
+cfg_attr = (ctypes.c_int * 13)(0x3033, 0x0001, 0x3024, 8, 0x3023, 8, 0x3022, 8, 0x3021, 8, 0x3040, 0x0004, 0x3038)
+cfg = ctypes.c_void_p()
+ncfg = ctypes.c_int(0)
+if not egl.eglChooseConfig(dpy, cfg_attr, ctypes.byref(cfg), 1, ctypes.byref(ncfg)) or ncfg.value < 1:
+    raise SystemExit(1)
+surf = egl.eglCreatePbufferSurface(dpy, cfg, (ctypes.c_int * 5)(0x3057, 16, 0x3056, 16, 0x3038))
+ctx = egl.eglCreateContext(dpy, cfg, None, (ctypes.c_int * 3)(0x3098, 2, 0x3038))
+if not ctx or not egl.eglMakeCurrent(dpy, surf, surf, ctx):
+    raise SystemExit(1)
+if not gl.glGetString(0x1F01):
+    raise SystemExit(1)
+os._exit(0)
+PY
+          virpipe_ok=1
+        fi
+      fi
+      if [ "$virpipe_ok" != "1" ]; then
+        export LIBGL_ALWAYS_SOFTWARE=1
+        export GALLIUM_DRIVER=llvmpipe
+        unset VTEST_SOCKET_NAME VN_DEBUG MESA_LOADER_DRIVER_OVERRIDE MESA_GL_VERSION_OVERRIDE MESA_GLSL_VERSION_OVERRIDE
+      fi
     fi
   fi
   export MOZ_WEBRENDER=1
@@ -359,7 +414,35 @@ PY
         if [ "${LINUXDROID_GPU_ACTIVE:-}" = "turnip" ]; then
           set -- "$1" --ozone-platform=x11 --in-process-gpu --disable-gpu-watchdog --disable-vulkan "${@:2}"
         else
-          set -- "$1" --ozone-platform=x11 --disable-gpu-watchdog --disable-vulkan "${@:2}"
+          ch_bin="$1"
+          shift
+          ch_args=()
+          has_use_gl=0
+          has_use_angle=0
+          for ch_arg in "$@"; do
+            case "$ch_arg" in
+              --use-angle=gles-egl)
+                ch_args+=(--use-angle=gl)
+                has_use_angle=1
+                ;;
+              --use-angle=*)
+                ch_args+=("$ch_arg")
+                has_use_angle=1
+                ;;
+              --use-gl=*)
+                ch_args+=("$ch_arg")
+                has_use_gl=1
+                ;;
+              --enable-zero-copy)
+                ;;
+              *)
+                ch_args+=("$ch_arg")
+                ;;
+            esac
+          done
+          [ "$has_use_gl" = "0" ] && ch_args=(--use-gl=angle "${ch_args[@]}")
+          [ "$has_use_angle" = "0" ] && ch_args=(--use-angle=gl "${ch_args[@]}")
+          set -- "$ch_bin" --ozone-platform=x11 --in-process-gpu --disable-gpu-watchdog --disable-vulkan "${ch_args[@]}"
         fi
       else
         if [ "${LINUXDROID_GPU_ACTIVE:-}" = "turnip" ]; then

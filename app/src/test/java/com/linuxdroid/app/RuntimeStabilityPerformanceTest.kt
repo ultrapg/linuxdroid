@@ -517,11 +517,24 @@ with tempfile.TemporaryDirectory(prefix="ld-taskbar-test-") as tmp:
         assertEquals(chromiumScript, chromiumBrowserScript)
         assertTrue(chromiumScript.contains("unset MESA_GL_VERSION_OVERRIDE MESA_GLSL_VERSION_OVERRIDE"))
         assertTrue(chromiumScript.contains("flags+=(--ozone-platform=x11)"))
-        assertTrue(gpuScript.contains("elif [ \"\${GALLIUM_DRIVER:-}\" = \"virpipe\" ]; then"))
+        assertTrue(chromiumScript.contains("flags+=(--use-angle=gles-egl --in-process-gpu --ignore-gpu-blocklist --enable-gpu-rasterization --enable-zero-copy)"))
+        assertTrue(chromiumScript.contains("flags+=(--use-angle=gl --in-process-gpu)"))
+        assertTrue(gpuScript.contains("if [ \"\${GALLIUM_DRIVER:-}\" = \"virpipe\" ] || [ \"\${GALLIUM_DRIVER:-}\" = \"llvmpipe\" ]; then"))
         assertTrue(gpuScript.contains("set -- \"\$1\" --ozone-platform=x11 --in-process-gpu --disable-gpu-watchdog --disable-vulkan \"\${@:2}\""))
+        assertTrue(gpuScript.contains("set -- \"\$ch_bin\" --ozone-platform=x11 --in-process-gpu --disable-gpu-watchdog --disable-vulkan \"\${ch_args[@]}\""))
 
         val gpuLaunchScript = File(linuxfs, "usr/local/bin/linuxdroid-gpu-launch").readText()
         assertTrue(gpuLaunchScript.contains("chromium|chromium-browser|google-chrome|google-chrome-stable|brave-browser)"))
+        assertTrue(gpuLaunchScript.contains("--use-angle=gles-egl)"))
+        assertTrue(gpuLaunchScript.contains("sw_args+=(--use-angle=gl)"))
+
+        val runtimeSrc = File(rootDir, "app/src/main/java/com/linuxdroid/app/runtime/LinuxRuntime.kt").readText()
+        assertTrue(runtimeSrc.contains("KGSL_DEVICE"))
+        assertFalse(runtimeSrc.contains("MALI_DEVICE"))
+
+        val drmSrc = File(rootDir, "tools/linuxfs/preload/drm.c").readText()
+        assertFalse(drmSrc.contains("/dev/mali0"))
+        assertFalse(drmSrc.contains("panfrost"))
 
         val webhelperSrc = File(rootDir, "tools/linuxfs/preload/webhelper.c").readText()
         assertFalse(webhelperSrc.contains("\"--in-process-gpu\""))

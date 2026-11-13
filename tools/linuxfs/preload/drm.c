@@ -49,7 +49,6 @@ static pthread_mutex_t lock = PTHREAD_MUTEX_INITIALIZER;
 static struct handle_entry handle_entries[MAX_HANDLES];
 static uint32_t next_handle = 1;
 static dev_t kgsl_dev;
-static dev_t mali_dev;
 static dev_t dri_render_dev;
 static dev_t dri_card_dev;
 static int synth_drm_state;
@@ -62,16 +61,13 @@ static void init_synth_drm_devs_locked(void) {
   if (stat("/dev/kgsl-3d0", &st) == 0 && S_ISCHR(st.st_mode)) {
     kgsl_dev = st.st_rdev;
   }
-  if (stat("/dev/mali0", &st) == 0 && S_ISCHR(st.st_mode)) {
-    mali_dev = st.st_rdev;
-  }
   if (stat("/dev/dri/renderD128", &st) == 0 && S_ISCHR(st.st_mode)) {
     dri_render_dev = st.st_rdev;
   }
   if (stat("/dev/dri/card0", &st) == 0 && S_ISCHR(st.st_mode)) {
     dri_card_dev = st.st_rdev;
   }
-  synth_drm_state = (kgsl_dev != 0 || mali_dev != 0 || dri_render_dev != 0 || dri_card_dev != 0) ? 1 : -1;
+  synth_drm_state = (kgsl_dev != 0 || dri_render_dev != 0 || dri_card_dev != 0) ? 1 : -1;
 }
 
 static int synth_drm_kind_dev(dev_t rdev) {
@@ -84,18 +80,16 @@ static int synth_drm_kind_dev(dev_t rdev) {
   if (kgsl_dev != 0 && rdev == kgsl_dev) {
     return 1;
   }
-  if (mali_dev != 0 && rdev == mali_dev) {
-    return 2;
-  }
-  if ((dri_render_dev != 0 && rdev == dri_render_dev) ||
-      (dri_card_dev != 0 && rdev == dri_card_dev)) {
+  if (kgsl_dev != 0 &&
+      ((dri_render_dev != 0 && rdev == dri_render_dev) ||
+       (dri_card_dev != 0 && rdev == dri_card_dev))) {
     char sys_subsys[128];
     struct stat sst;
     snprintf(sys_subsys, sizeof(sys_subsys), "/sys/dev/char/%u:%u/device/subsystem",
              (unsigned int)((rdev >> 8) & 0xfff) | ((unsigned int)(rdev >> 32) & ~0xfffU),
              (unsigned int)(rdev & 0xff) | ((unsigned int)(rdev >> 12) & ~0xffU));
     if (lstat(sys_subsys, &sst) != 0) {
-      return (mali_dev != 0) ? 2 : 1;
+      return 1;
     }
   }
   return 0;
@@ -270,8 +264,9 @@ static int alloc_synth_drm_device(int kind, struct bl_drm_device **out_dev) {
   }
   const char *primary_node = "/dev/dri/card0";
   const char *render_node = "/dev/dri/renderD128";
-  const char *fullname = (kind == 2) ? "/soc/gpu" : "/soc/kgsl-3d0";
-  const char *compat_str = (kind == 2) ? "arm,mali-valhall" : "qcom,adreno";
+  const char *fullname = "/soc/kgsl-3d0";
+  const char *compat_str = "qcom,adreno";
+  (void)kind;
   struct stat pst;
   int has_primary = (stat(primary_node, &pst) == 0 && S_ISCHR(pst.st_mode));
 
@@ -344,7 +339,6 @@ int drmGetDeviceFromDevId(dev_t find_rdev, uint32_t flags, void *device) {
       "/dev/dri/renderD128",
       "/dev/dri/renderD129",
       "/dev/kgsl-3d0",
-      "/dev/mali0",
       "/dev/dri/card0",
     };
     struct stat st;
@@ -390,7 +384,7 @@ int drmGetDevices2(uint32_t flags, void *devices, int max_devices) {
   pthread_mutex_lock(&lock);
   init_synth_drm_devs_locked();
   pthread_mutex_unlock(&lock);
-  int kind = (kgsl_dev != 0) ? 1 : ((mali_dev != 0) ? 2 : 0);
+  int kind = (kgsl_dev != 0) ? 1 : 0;
   if (kind == 0 && dri_render_dev != 0) {
     kind = synth_drm_kind_dev(dri_render_dev);
   }
@@ -490,9 +484,9 @@ __attribute__((visibility("hidden"))) int bl_drm_gem_close(int fd, unsigned long
     v->version_major = 1;
     v->version_minor = 6;
     v->version_patchlevel = 0;
-    copy_drm_field(v->name, &v->name_len, kind == 2 ? "panfrost" : "msm");
+    copy_drm_field(v->name, &v->name_len, "msm");
     copy_drm_field(v->date, &v->date_len, "20240101");
-    copy_drm_field(v->desc, &v->desc_len, kind == 2 ? "ARM Mali DRM" : "Qualcomm KGSL DRM");
+    copy_drm_field(v->desc, &v->desc_len, "Qualcomm KGSL DRM");
     *rc = 0;
     return 1;
   }
@@ -535,9 +529,9 @@ void *drmGetVersion(int fd) {
     if (!v) {
       return NULL;
     }
-    const char *name = (kind == 2) ? "panfrost" : "msm";
+    const char *name = "msm";
     const char *date = "20240101";
-    const char *desc = (kind == 2) ? "ARM Mali DRM" : "Qualcomm KGSL DRM";
+    const char *desc = "Qualcomm KGSL DRM";
     v->version_major = 1;
     v->version_minor = 6;
     v->version_patchlevel = 0;

@@ -13,9 +13,11 @@ if [ "${LINUXDROID_GPU_ACTIVE:-}" = "turnip" ]; then
   export LIBGL_KOPPER_DRI2=true
   export MESA_VK_WSI_DEBUG=sw
 elif [ "${LINUXDROID_GPU_ACTIVE:-}" = "unified" ]; then
-  if [ -c /dev/dri/renderD128 ] && [ -r /dev/dri/renderD128 ] && [ -w /dev/dri/renderD128 ]; then
+  if [ "${GALLIUM_DRIVER:-}" = "virpipe" ] || [ "${GALLIUM_DRIVER:-}" = "llvmpipe" ]; then
+    export LIBGL_ALWAYS_SOFTWARE=1
+  elif [ -c /dev/dri/renderD128 ] && [ -r /dev/dri/renderD128 ] && [ -w /dev/dri/renderD128 ]; then
     unset LIBGL_ALWAYS_SOFTWARE
-  elif [ "${GALLIUM_DRIVER:-}" = "virpipe" ]; then
+  else
     export LIBGL_ALWAYS_SOFTWARE=1
   fi
 fi

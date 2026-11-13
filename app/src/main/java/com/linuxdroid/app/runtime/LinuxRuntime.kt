@@ -23,7 +23,6 @@ object LinuxRuntime {
     const val GUEST_RUNTIME_DIR = "/run/linuxdroid"
     private const val OVERLAY_STAMP_FILE = "overlay-version"
     private const val KGSL_DEVICE = "/dev/kgsl-3d0"
-    private const val MALI_DEVICE = "/dev/mali0"
     private const val SYSTEM_FONTS = "/system/fonts"
     private const val GUEST_SYSTEM_FONTS = "/usr/local/share/fonts/android"
 
@@ -589,9 +588,13 @@ object LinuxRuntime {
     }
 
     /**
-     * Exposes Qualcomm `/dev/kgsl-3d0` or Mali `/dev/mali0` as synthetic DRM render nodes
-     * (`/dev/dri/renderD128` and `/dev/dri/renderD0`) whenever native `/dev/dri/renderD128` is missing
-     * or blocked by SELinux (`EACCES`).
+     * Exposes Qualcomm `/dev/kgsl-3d0` as a synthetic DRM render node (`/dev/dri/renderD128`)
+     * whenever native `/dev/dri/renderD128` is missing or blocked by SELinux (`EACCES`).
+     *
+     * Note: ARM's proprietary `/dev/mali0` (`mali_kbase`) character device is intentionally NOT
+     * bound to `/dev/dri/renderD128`: it is incompatible with mainline Linux `panfrost`/`panthor`
+     * DRM ioctls, and exposing it as `renderD128` tricks Mesa and launch wrappers into taking the
+     * DRI2 hardware loader path instead of `swrast`/`virpipe`.
      *
      * Important `libdrm` internals:
      * - `drmGetNodeTypeFromDevId(rdev)` computes `min = minor(rdev)` (`0` for `/dev/kgsl-3d0`) and
@@ -603,27 +606,15 @@ object LinuxRuntime {
      */
     private fun bindKgslDrmIfNeeded(context: Context, specs: MutableList<String>) {
         if (GpuInfo.isAccessibleCharDevice("/dev/dri/renderD128")) return
-        val (hostDevPath, ueventDriver, drvTarget) = when {
-            GpuInfo.isAccessibleCharDevice(KGSL_DEVICE) -> Triple(
-                KGSL_DEVICE,
-                "DRIVER=kgsl-3d0\n" +
-                    "OF_FULLNAME=/soc/kgsl-3d0\n" +
-                    "OF_COMPATIBLE_0=qcom,adreno\n" +
-                    "OF_COMPATIBLE_N=1\n" +
-                    "MODALIAS=platform:kgsl-3d0\n",
-                "/sys/bus/platform/drivers/msm_drm"
-            )
-            GpuInfo.isAccessibleCharDevice(MALI_DEVICE) -> Triple(
-                MALI_DEVICE,
-                "DRIVER=panfrost\n" +
-                    "OF_FULLNAME=/soc/gpu\n" +
-                    "OF_COMPATIBLE_0=arm,mali-valhall-csf\n" +
-                    "OF_COMPATIBLE_N=1\n" +
-                    "MODALIAS=platform:panfrost\n",
-                "/sys/bus/platform/drivers/panfrost"
-            )
-            else -> return
-        }
+        if (!GpuInfo.isAccessibleCharDevice(KGSL_DEVICE)) return
+        val hostDevPath = KGSL_DEVICE
+        val ueventDriver =
+            "DRIVER=kgsl-3d0\n" +
+                "OF_FULLNAME=/soc/kgsl-3d0\n" +
+                "OF_COMPATIBLE_0=qcom,adreno\n" +
+                "OF_COMPATIBLE_N=1\n" +
+                "MODALIAS=platform:kgsl-3d0\n"
+        val drvTarget = "/sys/bus/platform/drivers/msm_drm"
         val st = try {
             Os.stat(hostDevPath)
         } catch (_: ErrnoException) {
